@@ -1,7 +1,7 @@
 # 配置管理与动态能力架构（Best Practices）
 
 > 日期：2026-09-18  
-> 来源：本项目已验证的 [Mock 服务选型调研](./Mock服务选型调研.md)，本次补充核查 WireMock、Mockoon、Prism 官方文档；Mountebank/MockServer/Hoverfly 参考项目历史验证结果。
+> 来源：本项目已验证的 [Mock 服务选型调研](./mock-server-landscape.md)，本次补充核查 WireMock、Mockoon、Prism 官方文档；Mountebank/MockServer/Hoverfly 参考项目历史验证结果。
 
 ## 一、三种架构模式
 
@@ -155,5 +155,5 @@
 
 - WireMock Admin API Reference: https://wiremock.org/docs/standalone/admin-api-reference/
 - Mockoon Admin API Overview: https://mockoon.com/docs/latest/admin-api/overview/
-- Project internal: [Mock 服务选型调研](./Mock服务选型调研.md)
+- Project internal: [Mock 服务选型调研](./mock-server-landscape.md)
 

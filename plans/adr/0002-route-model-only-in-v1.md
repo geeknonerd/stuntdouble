@@ -2,7 +2,7 @@
 
 - 状态：`已接受`
 - 日期：2026-09-18
-- 关联：[ADR 0001](0001-第一版不支持共享状态.md)、[Mock 服务选型调研](../../research/Mock服务选型调研.md)
+- 关联：[ADR 0001](0001-no-shared-state-in-v1.md)、[Mock 服务选型调研](../../research/mock-server-landscape.md)
 
 ## 背景
 

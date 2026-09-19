@@ -2,7 +2,7 @@
 
 - 状态：`已接受`
 - 日期：2026-09-18
-- 关联：[ADR 0003](0003-第一版采用完全脚本化与多语言运行时.md)、[ADR 0004](0004-脚本能力只经宿主函数提供.md)、[示例文档清单与二进制下载场景](../demo-document-catalog.md)
+- 关联：[ADR 0003](0003-script-first-multi-runtime.md)、[ADR 0004](0004-host-functions-only-sandbox.md)、[示例文档清单与二进制下载场景](../demo-document-catalog.md)
 
 ## 背景
 

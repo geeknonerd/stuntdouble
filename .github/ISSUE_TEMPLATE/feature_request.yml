@@ -1,0 +1,63 @@
+name: Feature request
+description: Propose a capability for Stunt Double
+title: "[Feature]: "
+labels: ["needs-triage", "enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Stunt Double has a narrow v1 scope. Before opening this request, read `plans/product-definition.md` and the ADRs under `plans/adr/`. New capabilities must fit the single execution model: `match → source → transform → response`.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What integration or testing problem are you trying to solve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What should Stunt Double do? Include configuration or `ctx` API shape when relevant.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Existing tools, workarounds, or other designs you evaluated.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: pipeline
+    attributes:
+      label: Pipeline stage
+      description: Which part of the execution model does this affect?
+      options:
+        - label: match
+        - label: source
+        - label: transform
+        - label: response
+        - label: runtime or host API
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope confirmation
+      options:
+        - label: I checked the v1 non-goals and this request does not conflict with them.
+          required: true
+        - label: I understand this request may be deferred to a later version.
+          required: true
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy confirmation
+      options:
+        - label: I removed customer names, internal URLs, tokens, credentials, production logs, request bodies, and response bodies.
+          required: true

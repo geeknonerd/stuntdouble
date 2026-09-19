@@ -2,7 +2,7 @@
 
 - 状态：`已接受`
 - 日期：2026-09-18
-- 关联：[Mock 服务选型调研](../../research/Mock服务选型调研.md)、[示例文档清单与二进制下载场景](../demo-document-catalog.md)
+- 关联：[Mock 服务选型调研](../../research/mock-server-landscape.md)、[示例文档清单与二进制下载场景](../demo-document-catalog.md)
 
 ## 背景
 

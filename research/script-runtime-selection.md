@@ -1,7 +1,7 @@
 # Mock Server 脚本运行时选型（JS/TS + Python）
 
 > 日期：2026-09-18  
-> 关联：[ADR 0003](../plans/adr/0003-第一版采用完全脚本化与多语言运行时.md)、架构设计最佳实践调研.md
+> 关联：[ADR 0003](../plans/adr/0003-script-first-multi-runtime.md)、architecture-best-practices.md
 
 ## 一、核心结论
 

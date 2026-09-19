@@ -1,43 +1,89 @@
-> 本目录是 Stunt Double（`stuntdouble`）的公开实现仓库。
-> 功能定义、架构决策与演示场景文档由本仓维护，支持开源贡献与社区协作。
-
-# Stunt Double（`stuntdouble`）
+# Stunt Double
 
 > **A test double that plays the whole show.**
-> 面向集成联调的 Mock Server：会读外部数据、能吐文件、内置 JS/Python 运行时，零外部环境依赖。
 
-## 项目目标
+Stunt Double is a planned Rust-based mock server for integration testing against real external dependencies. It is designed to read upstream APIs, transform data with built-in JavaScript or Python, return files and binary responses, and run with zero host runtime dependencies.
 
-自研一个可对外发布的 Mock Server 产品（Rust 实现，运行时内置），覆盖声明式路由配置、数据源驱动响应、脚本化变换与文件读写；同时保留历史公开演示场景的实现契约作为需求证据。
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![Status: design phase](https://img.shields.io/badge/status-design%20phase-orange.svg)](#status)
 
-## 当前状态
+## Why Stunt Double
 
-`探索中`
+Most mock tools are optimized for static stubs. Stunt Double targets the part of integration work that static stubs usually cannot cover:
 
-产品功能边界收敛中，尚未进入实现选型。本仓维护产品规划、架构决策与公开演示场景示例。
+- Upstream APIs that return the data your client actually needs.
+- CSV, JSON, text, and binary transformations.
+- PDF, file, and byte-stream responses with Range support.
+- CI environments where installing Node.js, Python, or a JVM is not acceptable.
+- Scripted behavior with explicit host limits instead of an unrestricted runtime.
 
-## 当前文档
+The design goal is a single binary that behaves like the real dependency closely enough to test the client, not just to return a canned response.
 
-- [Mock 服务选型调研](research/Mock服务选型调研.md)：WireMock、Mountebank、MockServer、Mockoon 等方案的能力矩阵、差距与选型建议，作为产品差异化的输入。
-- [json-server 外部数据能力](research/json-server外部数据能力.md)：json-server 对外部接口和文件透传能力的边界。
-- [示例文档清单与二进制下载场景](plans/demo-document-catalog.md)：manifest 与 PDF 下载接口的契约、实现流程和运行说明，是当前已验证的公开演示场景。
-- [Mock Server 产品功能定义](plans/Mock产品功能定义.md)：产品命题、已确认范围与待定事项，随讨论更新。
-- [ADR 0001 第一版不支持共享状态](plans/adr/0001-第一版不支持共享状态.md)：第一版数据源边界与已知功能缺口的决策依据。
-- [ADR 0002 第一版只实装路由模型](plans/adr/0002-第一版只实装路由模型.md)：单一执行模型与资源派生推迟的决策依据。
-- [ADR 0003 完全脚本化与多语言运行时](plans/adr/0003-第一版采用完全脚本化与多语言运行时.md)：变换表达力路线 C、Boa+RustPython 嵌入式 + 零依赖的决策依据（含实验风险）。
-- [ADR 0004 脚本能力只经宿主函数提供](plans/adr/0004-脚本能力只经宿主函数提供.md)：半托管沙箱与宿主 API 契约的决策依据。
-- [ADR 0005 上游失败语义与可观测性](plans/adr/0005-上游失败语义与可观测性.md)：透传/错误码分界、超时预算、重试与日志策略的决策依据。
-- [ADR 0006 产品定位](plans/adr/0006-产品定位.md)：主定位（对接真实外部依赖的联调假服务）、顺风场景与不做范围的决策依据。
-- [ADR 0007 项目命名与品牌](plans/adr/0007-项目命名与品牌.md)：Stunt Double / stuntdouble 命名依据、空间核验与演进说明。
-- [脚本运行时选型调研](research/脚本运行时选型调研.md)：验证 Boa v0.22.x (test262 >90%) + boa_runtime WebAPI + RustPython stdlib 子集；被否掉的方案说明。
-- [架构设计最佳实践调研](research/架构设计最佳实践调研.md)：静态配置/热重载/管理 API 三种模式的对比与演进约束。
+## Status
 
-## 未决事项
+**Design phase.** There is no runnable server yet. The repository currently contains product definition, architecture decisions, and a public demo scenario.
 
-- 配置文件主格式（TOML / YAML / JSON 择一为主）。
-- 实现代码的正式仓库位置仍需补充；本仓库只维护调研与实现文档。
-- 落地前需按实际安装版本复核 json-server API 与上游依赖差异。
+The project is intentionally starting with the execution model and security boundaries before choosing implementation details. See [plans/adr/](plans/adr/).
 
-## 最近整理
+## Planned v1
 
-2026-09-19
+- Route model with one pipeline: `match → source → transform → response`.
+- Built-in JavaScript runtime: Boa.
+- Built-in Python runtime: RustPython with a stdlib subset.
+- Host-injected `ctx` API. No raw `fetch`, `fs`, `os`, `subprocess`, or `socket`.
+- Upstream HTTP, static file reads, file streaming, uploads, and Range responses.
+- One static file root with path traversal protection.
+- Static configuration with restart. Hot reload and Admin API are deferred.
+- Linux x86_64, macOS arm64, and Windows x86_64 binaries plus a container image.
+- Structured request logs with `request_id` and stable error classes.
+
+## Non-goals for v1
+
+- Request-to-request shared state.
+- Response sequencing.
+- Automatic resource CRUD.
+- TypeScript transpilation.
+- npm, pip, or third-party imports.
+- Hot reload, Admin API, or GUI.
+- Built-in TLS termination.
+- WebSocket, GraphQL, or gRPC.
+
+See [plans/product-definition.md](plans/product-definition.md) for the full scope.
+
+## Documentation
+
+- [Product definition](plans/product-definition.md) — v1 scope, host API, non-goals.
+- [Demo scenario](plans/demo-document-catalog.md) — CSV manifest and PDF download contract.
+- [Architecture decisions](plans/adr/) — ADR 0001–0009.
+- [Research](research/) — mock server landscape, runtimes, architecture, and open-source baseline.
+- [Chinese README](README.zh-CN.md).
+
+Most design documents are currently written in Chinese. English translations are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Contributing
+
+Before proposing a feature, read the product definition and the ADRs. The project has a deliberately narrow v1 scope, and new capabilities must fit the single execution model.
+
+- Use the GitHub issue templates for bugs and feature requests.
+- Keep customer data out of issues, logs, fixtures, and screenshots.
+- Sign off commits with `git commit -s` (DCO).
+- Keep commit messages in English.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow.
+
+## Security
+
+Do not report vulnerabilities in a public issue. Use GitHub private vulnerability reporting for this repository. See [SECURITY.md](SECURITY.md).
+
+Never paste customer hostnames, tokens, headers, production logs, request bodies, or response bodies into a public issue.
+
+## License
+
+Dual-licensed under either of:
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+You may choose either license. This is the standard permissive licensing pattern for Rust projects and keeps the core usable in commercial and open-source environments.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in this project is dual-licensed as above, without additional terms or conditions.

@@ -23,9 +23,9 @@ Stunt Double（技术标识 `stuntdouble`）是面向集成联调的 Rust Mock S
 ## 权威文档
 
 - [README.md](README.md)：项目目标、当前状态、文档索引
-- [plans/Mock产品功能定义.md](plans/Mock产品功能定义.md)：v1 范围、宿主 API、不做清单
+- [plans/product-definition.md](plans/product-definition.md)：v1 范围、宿主 API、不做清单
 - [plans/demo-document-catalog.md](plans/demo-document-catalog.md)：已验证的公开演示场景接口契约
-- [plans/adr/](plans/adr/)：架构决策记录
+- [plans/adr/](plans/adr/)：架构决策记录，包含许可证与商业化决策
 - [research/](research/)：选型调研与能力边界证据
 
 ## v1 核心边界
@@ -137,9 +137,17 @@ match → source → transform → response
 
 ## Agent 协作约定
 
-- **先读文档，再动手**：遇到功能问题先看 [Mock 产品功能定义.md](plans/Mock产品功能定义.md)，代码实现前先理解四段流水线与 `ctx` API 约束
+- **先读文档，再动手**：遇到功能问题先看 [Mock 产品功能定义.md](plans/product-definition.md)，代码实现前先理解四段流水线与 `ctx` API 约束
 - **修根因**：共享函数的改动优先在源头修改，而非各调用点打补丁
 - **简洁表达**：首行给动作；多步编号，每步一事；结尾给出一个明确的下一步时长建议
+
+## 许可证与商业化
+
+- 核心采用 MIT OR Apache-2.0 双许可证，任选其一
+- 贡献按 DCO sign-off，不引入 CLA
+- 商业化优先级：支持与 SLA、托管团队服务、企业治理、培训与集成服务
+- 打赏与赞助仅作为补充，不作为主要收入来源
+- 详细决策见 `plans/adr/0008-dual-mit-apache-license.md` 与 `plans/adr/0009-open-core-and-funding.md`
 
 ## 待定事项
 

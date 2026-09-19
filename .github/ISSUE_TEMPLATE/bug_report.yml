@@ -1,0 +1,81 @@
+name: Bug report
+description: Report a defect in Stunt Double
+title: "[Bug]: "
+labels: ["needs-triage", "bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Do not include customer data, secrets, tokens, hostnames, production logs, request bodies, or response bodies. Use the public demo values from `plans/demo-document-catalog.md` when an example is needed.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened?
+      placeholder: A concise description of the problem.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Steps, commands, or a minimal fixture. Redact all sensitive data.
+      placeholder: |
+        1. Start the server with ...
+        2. Request ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Release version, binary version, or commit SHA.
+      placeholder: "e.g. 0.1.0 or 9ae47c0"
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, architecture, and any relevant runtime details.
+      placeholder: "e.g. Ubuntu 24.04 x86_64, Docker"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or diagnostics
+      description: Paste only redacted output. Remove secrets, customer paths, and internal hostnames.
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy confirmation
+      options:
+        - label: I removed customer names, internal URLs, tokens, credentials, production logs, request bodies, and response bodies.
+          required: true
