@@ -1,0 +1,6 @@
+/target
+.env
+.env.*
+private/
+*.local
+*.local.md
