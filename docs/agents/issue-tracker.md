@@ -28,6 +28,17 @@ When set to `yes`, PRs run through the same labels and states as issues, using t
 
 GitHub shares one number space across issues and PRs, so a bare `#42` may be either — resolve with `gh pr view 42` and fall back to `gh issue view 42`.
 
+## Additional labels
+
+Use these GitHub labels alongside the canonical triage labels:
+
+- Type: `bug`, `enhancement`, `documentation`, `question`
+- Community: `good first issue`, `help wanted`
+- Maintainer: `duplicate`, `invalid`
+- Release: milestone `v1` for the first public version
+
+Privacy rule: issues, comments, logs, fixtures, and screenshots must use the public demo names from `plans/demo-document-catalog.md` (`/demo/documents/...`, `DOC-0001`, `metadata.example.com`, `files.example.com`). Do not paste customer paths, hostnames, headers, tokens, production logs, request bodies, or response bodies.
+
 ## When a skill says "publish to the issue tracker"
 
 Create a GitHub issue.
