@@ -54,7 +54,12 @@ See [plans/product-definition.md](plans/product-definition.md) for the full scop
 
 - [Product definition](plans/product-definition.md) — v1 scope, host API, non-goals.
 - [Demo scenario](plans/demo-document-catalog.md) — CSV manifest and PDF download contract.
-- [Architecture decisions](plans/adr/) — ADR 0001–0009.
+- [Architecture decisions](plans/adr/) — ADR 0001–0012.
+- [Development and release workflow](docs/development.md) — branch, commit, CI, versioning, and release rules.
+- [Governance](GOVERNANCE.md) — maintainer model and response expectations.
+- [Public contracts](docs/contracts/) — configuration, `ctx` API, and CLI.
+- [Domain glossary](CONTEXT.md) — project vocabulary.
+- [Changelog](CHANGELOG.md) — release history.
 - [Research](research/) — mock server landscape, runtimes, architecture, and open-source baseline.
 - [Chinese README](README.zh-CN.md).
 
@@ -70,7 +75,7 @@ Before proposing a feature, read the product definition and the ADRs. The projec
 - Sign off commits with `git commit -s` (DCO).
 - Keep commit messages in English.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow.
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/development.md](docs/development.md) for the full workflow.
 
 ## Security
 

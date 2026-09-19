@@ -1,8 +1,8 @@
 # Mock Server 产品功能定义
 
-- 状态：`功能已收敛`（仅剩配置文件主格式待定）
-- 更新：2026-09-18
-- 关联：[Mock 服务选型调研](../research/mock-server-landscape.md)、[示例文档清单与二进制下载场景](demo-document-catalog.md)
+- 状态：`功能已收敛`（配置文件主格式已确认，公开契约草案已建立）
+- 更新：2026-09-19
+- 关联：[Mock 服务选型调研](../research/mock-server-landscape.md)、[示例文档清单与二进制下载场景](demo-document-catalog.md)、[配置契约](../docs/contracts/config.md)、[ctx API 契约](../docs/contracts/ctx-api.md)、[CLI 契约](../docs/contracts/cli.md)
 
 ## 1. 产品命题与定位
 
@@ -81,10 +81,16 @@
 
 ## 6. 待定
 
-- 配置文件主格式（TOML / YAML / JSON 择一为主，兼容其一）。
+- 实际 MSRV：候选 Rust 1.82，待 Boa 与 RustPython 版本定稿后校准。
 - v2 路线：SQLite 共享状态（ADR 0001 预留）、声明式响应序列、资源模型预设生成器、Admin API（模式 3）、内置 TLS。
-- 宿主 API 的稳定性承诺与版本化规则（ADR 0004 的约束落地方式）。
+- crates.io 包名保留与首个发布凭据配置。
+- 独立治理邮箱；当前 Code of Conduct 使用 GitHub 私密报告。
+- 自定义域名；当前使用 GitHub Pages。
 
 ## 7. 术语
 
-领域词汇将维护在仓库根目录 `CONTEXT.md`（按需创建）。
+领域词汇统一维护在仓库根目录 [CONTEXT.md](../CONTEXT.md)。
+
+## 8. 开发与发布规范
+
+Git 工作流、版本号、发布策略、CI 门槛与供应链规范见 [docs/development.md](../docs/development.md) 与 ADR 0010–0012。

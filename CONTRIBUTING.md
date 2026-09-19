@@ -42,13 +42,21 @@ When a decision is hard to reverse (e.g., runtime choice, security boundaries, f
 ...
 ```
 
-We maintain 8+ ADRs so far. Add additional ones when needed.
+We maintain 12 ADRs so far. Add additional ones when needed.
+
+## Development workflow
+
+Use trunk-based development with short-lived branches and pull requests. `main` is always releasable. Squash merge is the only merge method; branches are deleted after merge. Every pull request must pass `fmt`, `clippy`, `test`, `docs`, `deny`, `audit`, `msrv`, `pr-title`, and `dco`.
+
+See [docs/development.md](docs/development.md) for the full workflow, versioning rules, and release process.
 
 ## Commit style
 
-- Keep commit messages in English and concise (one line summary; optional context below).
-- Conventional commits are welcome but not required. We recommend `chore:`, `docs:`, `feat:` prefix patterns.
-- Sign off each commit to accept the DCO: `git commit -s`.
+- Use **Conventional Commits** with PR titles that become the squash commit subject.
+  Example: `feat(config): add route validation` or `fix(sandbox): reject path traversal`.
+- Allowed types: `feat`, `fix`, `docs`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `security`.
+- Scope is optional but recommended when it matches our areas: `config`, `match`, `source`, `transform`, `response`, `sandbox`, `runtime-js`, `runtime-python`, `files`, `obs`, `dist`.
+- Signing-off with `git commit -s` (DCO) is mandatory on every commit.
 
 ## License and DCO
 

@@ -1,0 +1,9 @@
+* text=auto eol=lf
+*.sh text eol=lf
+*.bat binary
+*.ps1 binary
+*.png binary
+*.pdf binary
+/docs/** linguist-documentation
+/plans/** linguist-documentation
+/research/** linguist-documentation

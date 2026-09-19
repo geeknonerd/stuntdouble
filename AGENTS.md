@@ -19,10 +19,15 @@ Stunt Double（技术标识 `stuntdouble`）是面向集成联调的 Rust Mock S
 - `plans/` 与 `research/`：产品规划、架构决策与演示场景文档
 - 本仓为开源实现仓库；功能定义与决策以本仓为准
 - 文档基线：2026-09-19
+- 协作规范：已明确 Git 工作流、版本号、发布、契约与治理规则
 
 ## 权威文档
 
 - [README.md](README.md)：项目目标、当前状态、文档索引
+- [docs/development.md](docs/development.md)：Git 工作流、版本号、发布流程、MSRV 与依赖规范
+- [GOVERNANCE.md](GOVERNANCE.md)：维护者职责与响应预期
+- [docs/contracts/](docs/contracts/)：配置、`ctx` API、CLI 的公开契约
+- [CONTEXT.md](CONTEXT.md)：项目领域词汇表
 - [plans/product-definition.md](plans/product-definition.md)：v1 范围、宿主 API、不做清单
 - [plans/demo-document-catalog.md](plans/demo-document-catalog.md)：已验证的公开演示场景接口契约
 - [plans/adr/](plans/adr/)：架构决策记录，包含许可证与商业化决策
@@ -149,12 +154,27 @@ match → source → transform → response
 - 打赏与赞助仅作为补充，不作为主要收入来源
 - 详细决策见 `plans/adr/0008-dual-mit-apache-license.md` 与 `plans/adr/0009-open-core-and-funding.md`
 
+## 开发与发布规范
+
+- 主干开发：`main` 始终可发布，所有变更经短分支 + PR
+- 合并策略：仅 squash merge，合并后自动删分支
+- 提交：英文 Conventional Commits，必须 `git commit -s`（DCO）
+- 分支命名：`feat/`、`fix/`、`docs/`、`chore/`、`ci/`、`release/`
+- 版本号：SemVer，tag 为 `vMAJOR.MINOR.PATCH`
+- 发布：`release-plz` 生成 release PR，合并后打 tag；`cargo-dist` 构建产物
+- CI 硬门槛：`fmt`、`clippy`、`test`、`docs`、`deny`、`audit`、`msrv`、`pr-title`、`dco`
+- 兼容性：配置、`ctx` API、CLI 三份契约分开版本化
+- `ctx` API：同一 `apiVersion` 只加不删；删除或重命名需要新 `apiVersion`
+- 产物：三平台二进制、SHA256SUMS、GitHub attestation、SBOM、GHCR 镜像 digest
+- 发布自动化在首个 crate 落地后启用；当前先保留规范与占位 CI
+
 ## 待定事项
 
-- 配置文件主格式（TOML / YAML / JSON 择一为主）
 - v2 路线优先级
-- 宿主 API 版本化与稳定性承诺
-- GitHub Releases / 容器镜像发布流程
+- 实际 MSRV（候选 Rust 1.82，待运行时依赖定稿后校准）
+- crates.io 包名保留与首个发布凭据配置
+- 独立治理邮箱（当前 Code of Conduct 走 GitHub 私密报告）
+- 自定义域名（当前使用 GitHub Pages）
 
 ---
 

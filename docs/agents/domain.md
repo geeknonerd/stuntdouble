@@ -4,12 +4,13 @@ How the engineering skills should consume this repo's domain documentation when 
 
 ## Before exploring, read these
 
-- **`CONTEXT.md`** at the repo root, if it exists.
+- **`CONTEXT.md`** at the repo root — the project glossary.
 - **`plans/adr/`** — read ADRs that touch the area you're about to work in. This repo keeps ADRs there instead of `docs/adr/`.
 - **`plans/product-definition.md`** — v1 scope, host API contract, and the do-not-build list.
 - **`plans/demo-document-catalog.md`** — the public demo scenario for CSV manifest generation and binary download.
+- **`docs/contracts/`** — configuration, `ctx` API, and CLI contracts.
 
-If any of these files don't exist, **proceed silently**. Don't flag their absence; don't suggest creating them upfront. The `/domain-modeling` skill creates `CONTEXT.md` lazily when terms or decisions actually get resolved.
+If a file doesn't exist, **proceed silently**. Don't flag its absence. `CONTEXT.md` is updated when a domain term is resolved.
 
 ## Layout
 
@@ -23,13 +24,15 @@ This repo is **single-context**:
 ├── SECURITY.md
 ├── LICENSE-MIT
 ├── LICENSE-APACHE
-├── CONTEXT.md          ← lazily created glossary when needed
+├── CONTEXT.md          ← project glossary
 ├── plans/
 │   ├── product-definition.md
 │   ├── demo-document-catalog.md
 │   └── adr/
 │       ├── 0001-...md
 │       └── ...
+├── docs/
+│   └── contracts/
 └── research/
 ```
 

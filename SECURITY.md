@@ -2,7 +2,11 @@
 
 ## Supported versions
 
-Stunt Double has no released versions yet. The project is in design phase, so there are no supported release lines to patch.
+| Version | Supported |
+| --- | --- |
+| No releases yet | Not applicable |
+
+Stunt Double has no released versions yet. The project is in design phase, so there are no supported release lines to patch. Once the first stable release exists, this table lists the supported lines.
 
 ## Reporting a vulnerability
 
@@ -34,7 +38,9 @@ This project intentionally embeds script runtimes and talks to external systems.
 
 ## Disclosure expectations
 
-We will acknowledge a report, investigate it, and coordinate a disclosure timeline with the reporter. Please give us reasonable time to ship a fix before publishing details.
+We will acknowledge a report within 48 hours, investigate it, and coordinate a disclosure timeline with the reporter. Please give us reasonable time to ship a fix before publishing details.
+
+Security fixes ship in the next patch release. If the issue is critical, an emergency pre-release may be published.
 
 ## Privacy rule
 
