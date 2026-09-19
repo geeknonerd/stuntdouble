@@ -14,6 +14,10 @@ Stunt Double has a deliberately narrow v1 scope to avoid feature creep. Before p
 - Check [plans/adr/](plans/adr/) for related architectural decisions. If your proposal conflicts with an ADR, note it explicitly in your discussion.
 - Keep proposals consistent with the single execution model: `match → source → transform → response`. Avoid introducing a second engine or separate pipeline.
 
+## Code of conduct
+
+This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md). Report unacceptable behavior through the private reporting channel described in that document.
+
 ## Issue workflow
 
 Use GitHub's issue templates for bugs and features. Labels we expect you to apply are defined in [docs/agents/issue-tracker.md](docs/agents/issue-tracker.md).

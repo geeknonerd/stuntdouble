@@ -62,6 +62,7 @@ Stunt Double 是一个计划用 Rust 实现的 Mock Server，面向需要对接�
 
 提出功能前先阅读产品定义与 ADR。v1 范围刻意收窄，新能力必须落在单一执行模型内。
 
+- 遵守 [Code of Conduct](CODE_OF_CONDUCT.md)。
 - Bug 与功能请求使用 GitHub issue 模板。
 - 客户数据不得进入 issue、日志、fixture 或截图。
 - 提交使用 `git commit -s`（DCO）。

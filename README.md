@@ -64,6 +64,7 @@ Most design documents are currently written in Chinese. English translations are
 
 Before proposing a feature, read the product definition and the ADRs. The project has a deliberately narrow v1 scope, and new capabilities must fit the single execution model.
 
+- Follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 - Use the GitHub issue templates for bugs and feature requests.
 - Keep customer data out of issues, logs, fixtures, and screenshots.
 - Sign off commits with `git commit -s` (DCO).

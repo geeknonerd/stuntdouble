@@ -53,7 +53,7 @@ GitHub's community profile recommends these files for public repositories:
 - Issue templates
 - Pull request template
 
-This repository now includes README (English and Chinese), dual license files, CONTRIBUTING, SECURITY, issue templates, and a pull request template. A code of conduct is deferred until there is a private reporting contact.
+This repository now includes README (English and Chinese), dual license files, CONTRIBUTING, CODE_OF_CONDUCT, SECURITY, issue templates, and a pull request template. The code of conduct uses the repository private reporting form until a dedicated conduct email exists.
 
 ## Sources
 
