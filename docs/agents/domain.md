@@ -9,6 +9,7 @@ How the engineering skills should consume this repo's domain documentation when 
 - **`plans/product-definition.md`** — v1 scope, host API contract, and the do-not-build list.
 - **`plans/demo-document-catalog.md`** — the public demo scenario for CSV manifest generation and binary download.
 - **`docs/contracts/`** — configuration, `ctx` API, and CLI contracts.
+- **`docs/development.md`** — Git workflow, CI, versioning, and release rules.
 
 If a file doesn't exist, **proceed silently**. Don't flag its absence. `CONTEXT.md` is updated when a domain term is resolved.
 
@@ -18,22 +19,28 @@ This repo is **single-context**:
 
 ```text
 /
+├── AGENTS.md
 ├── README.md
 ├── README.zh-CN.md
 ├── CONTRIBUTING.md
+├── GOVERNANCE.md
 ├── SECURITY.md
-├── LICENSE-MIT
-├── LICENSE-APACHE
+├── CHANGELOG.md
 ├── CONTEXT.md          ← project glossary
+├── docs/
+│   ├── README.md
+│   ├── development.md
+│   ├── contracts/
+│   └── agents/
 ├── plans/
+│   ├── README.md
 │   ├── product-definition.md
 │   ├── demo-document-catalog.md
 │   └── adr/
-│       ├── 0001-...md
-│       └── ...
-├── docs/
-│   └── contracts/
+│       ├── README.md
+│       └── 0001-...md
 └── research/
+    └── README.md
 ```
 
 ## Use the glossary's vocabulary

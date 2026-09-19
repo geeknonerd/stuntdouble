@@ -52,6 +52,8 @@ See [plans/product-definition.md](plans/product-definition.md) for the full scop
 
 ## Documentation
 
+For detailed workflows and contracts, see [docs/README.md](docs/README.md).
+
 - [Product definition](plans/product-definition.md) — v1 scope, host API, non-goals.
 - [Demo scenario](plans/demo-document-catalog.md) — CSV manifest and PDF download contract.
 - [Architecture decisions](plans/adr/) — ADR 0001–0012.

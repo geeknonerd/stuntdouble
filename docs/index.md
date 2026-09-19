@@ -15,6 +15,7 @@ Design phase. There is no runnable server yet.
 ## Documentation
 
 - [README](https://github.com/geeknonerd/stuntdouble/blob/main/README.md)
+- [Documentation index](https://github.com/geeknonerd/stuntdouble/tree/main/docs)
 - [Product definition](https://github.com/geeknonerd/stuntdouble/blob/main/plans/product-definition.md)
 - [Architecture decisions](https://github.com/geeknonerd/stuntdouble/tree/main/plans/adr)
 - [Research notes](https://github.com/geeknonerd/stuntdouble/tree/main/research)
