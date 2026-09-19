@@ -30,12 +30,28 @@ GitHub shares one number space across issues and PRs, so a bare `#42` may be eit
 
 ## Additional labels
 
-Use these GitHub labels alongside the canonical triage labels:
+Canonical triage labels are defined in `docs/agents/triage-labels.md`; a normal issue should carry exactly one triage label at most.
 
-- Type: `bug`, `enhancement`, `documentation`, `question`
-- Community: `good first issue`, `help wanted`
-- Maintainer: `duplicate`, `invalid`
-- Release: milestone `v1` for the first public version
+Status labels:
+
+- `blocked`: depends on another issue, PR, or external state
+- `security`: security, sandbox, SSRF, path traversal, or trust-boundary concern
+
+Area labels are non-exclusive and normally use one or more of these:
+
+- `area:config`: configuration loading and validation
+- `area:match`: method, path, params, and query matching
+- `area:source`: static files and upstream HTTP data sources
+- `area:transform`: JavaScript or Python transform pipeline
+- `area:response`: status, headers, body, binary response, Range, streaming
+- `area:sandbox`: `ctx` API, host limits, script security boundaries
+- `area:runtime-js`: Boa JavaScript runtime
+- `area:runtime-python`: RustPython runtime
+- `area:files`: static file directory, uploads, file streams
+- `area:observability`: logs, request IDs, metrics, diagnostics
+- `area:distribution`: releases, packages, container images, CI
+
+Use the existing GitHub type and community labels alongside these: `bug`, `enhancement`, `documentation`, `question`, `good first issue`, `help wanted`, `duplicate`, `invalid`, `accessibility`, `wontfix`.
 
 Privacy rule: issues, comments, logs, fixtures, and screenshots must use the public demo names from `plans/demo-document-catalog.md` (`/demo/documents/...`, `DOC-0001`, `metadata.example.com`, `files.example.com`). Do not paste customer paths, hostnames, headers, tokens, production logs, request bodies, or response bodies.
 
