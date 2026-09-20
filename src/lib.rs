@@ -4,3 +4,4 @@ pub mod config;
 pub mod matcher;
 pub mod script;
 pub mod server;
+mod upstream;

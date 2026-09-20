@@ -1,3 +1,13 @@
+[graph]
+# License and advisory checks cover the platforms this project ships.
+# Target-specific dependencies of unsupported platforms (for example the
+# wasm/android certificate bundles of rustls-platform-verifier) are excluded.
+targets = [
+  "x86_64-unknown-linux-gnu",
+  "aarch64-apple-darwin",
+  "x86_64-pc-windows-msvc",
+]
+
 [advisories]
 version = 2
 yanked = "deny"

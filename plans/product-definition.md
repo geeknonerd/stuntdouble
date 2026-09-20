@@ -30,7 +30,7 @@
 | 变换表达力边界 | 完全脚本化，不做私有模板 DSL；脚本语言为 JS（第一版）+ Python | ADR 0003 |
 | 文件 I/O 语义 | 静态文件目录为唯一文件根：配置声明，脚本文件操作只能在该目录内，相对路径默认解析到此根；上传由宿主解析 multipart 并落到每请求独立临时子目录，请求结束清理；响应侧支持流式透传与本地文件流，Range 透传/支持；纯内存响应不支持 Range；上传上限默认 20MB（可配置） | 本轮讨论 |
 | 上游失败语义 | 以"是否拿到 HTTP 响应"为唯一分界：有响应则视为数据、默认透传状态码（脚本可改写）；传输层失败抛异常，未捕获返回 502 + `request_id`；脚本异常返回 500；脚本未调用 `respond` 视为逻辑错误 | [ADR 0005](adr/0005-upstream-failure-semantics.md) |
-| 超时与重试 | 脚本总超时默认 10 秒（可配置），上游超时 = `min(剩余脚本时间, opts.timeout)`；默认不重试，`opts.retries` 显式开启且上限 3 次，只对传输层失败生效 | [ADR 0005](adr/0005-upstream-failure-semantics.md) |
+| 超时与重试 | 脚本总超时默认 10 秒（可配置），上游超时 = `min(剩余脚本时间, opts.timeout_ms)`，并预留最多 100ms 的回复余量以避免与脚本硬超时竞态；默认不重试，`opts.retries` 显式开启且上限 3 次，只对传输层失败生效 | [ADR 0005](adr/0005-upstream-failure-semantics.md) |
 | 可观测性 | 每请求一条结构化日志（request_id/路由/耗时/上游链/状态码/错误分类）；默认不记录请求体与响应体；诊断开关附加 `detail`；堆栈永不进响应 | [ADR 0005](adr/0005-upstream-failure-semantics.md) |
 | 响应推进 | **不进第一版**，列入不做清单；v2 可加声明式响应序列或脚本 `callCount` 数字 | 本轮讨论 |
 | 目标平台与分发 | 核心二进制：Linux x86_64、macOS arm64、Windows x86_64；分发：GitHub Releases 二进制 + 容器镜像；GUI（如未来做）优先 Linux + macOS | 本轮讨论 |
@@ -52,7 +52,7 @@
 | 分组 | API | 约束 |
 | --- | --- | --- |
 | 请求只读 | `ctx.request`: `method` / `path` / `params` / `query` / `headers` / `bodyText` / `bodyBytes` | 只读；不暴露原始 socket |
-| 外部取数 | `ctx.http.get(url, opts)` / `ctx.http.request(method, url, opts)` | 仅白名单 host；`opts` 含 `retries` / `backoff` / `timeout`；返回 `{status, headers, text(), bytes()}` |
+| 外部取数 | `ctx.http.get(url, opts)` / `ctx.http.request(method, url, opts)` | 仅白名单 host；`opts` 含 `timeout_ms`（T4 已实现；`retries` / `backoff` 后续切片）；返回 `{status, headers, text(), bytes()}` |
 | 二进制透传 | `ctx.http.pipe(url, {status, headers})` | 上游响应体直接流到客户端，不进脚本堆内存；可透传 Range/206；不做字节级变换 |
 | 读文件 | `ctx.file.readText(p)` / `ctx.file.readBytes(p)` / `ctx.file.stream(p)` | 只读；路径相对静态文件目录解析；拒绝绝对路径与 `..`；v1 不提供脚本写文件能力（上传由宿主落盘） |
 | 响应 | `ctx.respond(status, headers, body)`；body 为 string / bytes / 文件流引用 | 文件流引用支持 Range；纯内存 body 不支持 Range；不调用则视为未产生响应（固定错误码，不静默 200） |

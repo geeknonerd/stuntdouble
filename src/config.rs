@@ -13,6 +13,7 @@ pub struct Config {
     pub server: ServerConfig,
     pub files: FilesConfig,
     pub sandbox: SandboxConfig,
+    pub upstream: UpstreamConfig,
     pub routes: Vec<Route>,
 }
 
@@ -21,6 +22,13 @@ pub struct Config {
 #[derive(Debug, Clone)]
 pub struct SandboxConfig {
     pub script_timeout_ms: u64,
+}
+
+/// Upstream HTTP access limits for `ctx.http.get`.
+#[derive(Debug, Clone)]
+pub struct UpstreamConfig {
+    pub allow_hosts: Vec<String>,
+    pub timeout_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -126,7 +134,14 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
     let mut v = Vec::new();
     reject_unknown(
         root_table,
-        &["config_version", "server", "files", "sandbox", "routes"],
+        &[
+            "config_version",
+            "server",
+            "files",
+            "sandbox",
+            "upstream",
+            "routes",
+        ],
         "",
         &mut v,
     );
@@ -184,6 +199,9 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
     // Optional: an absent [sandbox] keeps every default.
     let sandbox = parse_sandbox(root_table, &mut v);
 
+    // Optional: an absent [upstream] denies every host by default.
+    let upstream = parse_upstream(root_table, &mut v);
+
     let routes = parse_routes(root_table, path, &mut v);
 
     if !v.is_empty() {
@@ -207,6 +225,7 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
         server,
         files: FilesConfig { root: root_dir },
         sandbox,
+        upstream,
         routes,
     })
 }
@@ -240,6 +259,76 @@ fn parse_sandbox(root: &Table, v: &mut Vec<Violation>) -> SandboxConfig {
         Some(other) => {
             v.push(bad("sandbox", "table", other));
             defaults
+        }
+    }
+}
+
+/// Normalize one allowlist entry to the shape `url::Url::host()` returns:
+/// a lowercase/punycoded domain, or an unbracketed IP literal. Entries use URL
+/// host syntax, so IPv6 literals are bracketed (`"[::1]"`).
+fn normalize_host(raw: &str) -> Option<String> {
+    match url::Host::parse(raw) {
+        Ok(url::Host::Domain(domain)) => Some(domain),
+        Ok(url::Host::Ipv4(ip)) => Some(ip.to_string()),
+        Ok(url::Host::Ipv6(ip)) => Some(ip.to_string()),
+        Err(_) => None,
+    }
+}
+
+/// Parse the optional `[upstream]` table; absent fields keep safe defaults.
+fn parse_upstream(root: &Table, v: &mut Vec<Violation>) -> UpstreamConfig {
+    let defaults = UpstreamConfig {
+        allow_hosts: Vec::new(),
+        timeout_ms: default_upstream_timeout_ms(),
+    };
+    match root.get("upstream") {
+        None => defaults,
+        Some(toml::Value::Table(t)) => {
+            reject_unknown(t, &["allow_hosts", "timeout_ms"], "upstream", v);
+            UpstreamConfig {
+                allow_hosts: opt_host_list(t, "upstream.allow_hosts", v).unwrap_or_default(),
+                timeout_ms: opt_duration_ms(t, "timeout_ms", "upstream.timeout_ms", v)
+                    .unwrap_or_else(default_upstream_timeout_ms),
+            }
+        }
+        Some(other) => {
+            v.push(bad("upstream", "table", other));
+            defaults
+        }
+    }
+}
+
+/// Array of non-empty host names. An omitted allowlist denies every host.
+fn opt_host_list(table: &Table, field: &str, out: &mut Vec<Violation>) -> Option<Vec<String>> {
+    match table.get("allow_hosts") {
+        None => None,
+        Some(toml::Value::Array(items)) => {
+            let mut hosts = Vec::with_capacity(items.len());
+            for (index, item) in items.iter().enumerate() {
+                match item {
+                    toml::Value::String(host) if !host.is_empty() => {
+                        if let Some(host) = normalize_host(host) {
+                            hosts.push(host);
+                        } else {
+                            out.push(Violation {
+                                field: format!("{field}[{index}]"),
+                                expected: "host name or IP literal without scheme or port".into(),
+                                actual: format!("string {host:?}"),
+                            });
+                        }
+                    }
+                    other => out.push(Violation {
+                        field: format!("{field}[{index}]"),
+                        expected: "non-empty host string".into(),
+                        actual: describe(other),
+                    }),
+                }
+            }
+            Some(hosts)
+        }
+        Some(other) => {
+            out.push(bad(field, "array of host strings", other));
+            None
         }
     }
 }
@@ -480,6 +569,10 @@ fn default_script_timeout_ms() -> u64 {
     10_000
 }
 
+fn default_upstream_timeout_ms() -> u64 {
+    15_000
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,6 +598,37 @@ method = "GET"
 path = "/x"
 script = "scripts/x.js"
 "#
+    }
+
+    #[test]
+    fn upstream_allow_hosts_are_normalized_and_reject_non_hosts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let table = "[upstream]\nallow_hosts = [\"Example.COM\", \"[::1]\"]\n\n[files]";
+        let configured = minimal().replace("[files]", table);
+        let config = load(&write_config(dir.path(), &configured)).expect("load hosts");
+        assert_eq!(
+            config.upstream.allow_hosts,
+            vec!["example.com".to_string(), "::1".to_string()]
+        );
+
+        let bad = minimal().replace(
+            "[files]",
+            "[upstream]\nallow_hosts = [\"example.com:8080\"]\n\n[files]",
+        );
+        let error = load(&write_config(dir.path(), &bad)).expect_err("port must fail");
+        assert!(
+            error.to_string().contains("upstream.allow_hosts[0]"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn upstream_defaults_deny_every_host_with_a_fifteen_second_timeout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_config(dir.path(), minimal());
+        let config = load(&path).expect("load");
+        assert!(config.upstream.allow_hosts.is_empty());
+        assert_eq!(config.upstream.timeout_ms, 15_000);
     }
 
     #[test]

@@ -5,7 +5,7 @@
 Stunt Double 是一个计划用 Rust 实现的 Mock Server，面向需要对接真实外部依赖的集成测试。它会读取上游接口、用内置 JavaScript 或 Python 变换数据、返回文件与二进制响应，并且不依赖宿主机上的 Node.js、Python 或 JVM。
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#许可证)
-[![Status: script execution](https://img.shields.io/badge/status-script%20execution-orange.svg)](#当前状态)
+[![Status: upstream HTTP](https://img.shields.io/badge/status-upstream%20http-orange.svg)](#当前状态)
 
 ## 为什么做 Stunt Double
 
@@ -21,7 +21,7 @@ Stunt Double 是一个计划用 Rust 实现的 Mock Server，面向需要对接�
 
 ## 当前状态
 
-**脚本执行（T2）已落地。** `stuntdouble serve` 与 `stuntdouble validate` 读取 TOML 配置，按方法 + 路径匹配路由，并用内置 Boa 执行路由 JavaScript，宿主注入的 `ctx` 提供 `apiVersion` / `request` / `respond` / `log` / `env`。未命中路由返回 404 `not_found`；脚本异常或超时返回 500 `script_error`，未调用 `ctx.respond` 返回 500 `script_no_response`，响应均带 `request_id`。上游数据源与二进制响应待后续切片。见 [plans/adr/](plans/adr/)。
+**脚本执行与上游 HTTP（T4）已落地。** `stuntdouble serve` 与 `stuntdouble validate` 读取 TOML 配置，按方法 + 路径匹配路由，并用内置 Boa 执行路由 JavaScript，宿主注入的 `ctx` 提供 `apiVersion` / `request` / `http.get` / `respond` / `log` / `env`。`ctx.http.get` 只能访问 `[upstream] allow_hosts` 列出的 host，上游 4xx/5xx 视为数据，未捕获的传输层失败映射为 502 `upstream_unreachable`。未命中路由返回 404 `not_found`；脚本异常或超时返回 500 `script_error`，未调用 `ctx.respond` 返回 500 `script_no_response`，响应均带 `request_id`。文件与二进制响应待后续切片。见 [plans/adr/](plans/adr/)。
 
 ## v1 计划范围
 

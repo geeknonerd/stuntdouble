@@ -1,5 +1,5 @@
 // Script execution: run one route script in Boa with a host-injected `ctx`.
-// Contracts: docs/contracts/ctx-api.md (subset implemented by slice T2).
+// Contracts: docs/contracts/ctx-api.md (subset implemented by slices T2–T4).
 //
 // The crate denies `unsafe`, and Boa 0.22 only exposes native closures through
 // `unsafe fn NativeFunction::from_closure`. So instead of registering Rust
@@ -7,15 +7,20 @@
 // on top of a JSON snapshot, then reads the produced response back with
 // `JSON.stringify`. Scripts still see nothing but `ctx`: the realm has no
 // `fetch`, `fs`, `process`, or `require`.
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use axum::http::{HeaderMap, Method};
-use boa_engine::{Context, Source};
+use axum::http::{HeaderMap, Method, StatusCode};
+use boa_engine::native_function::NativeFunction;
+use boa_engine::{js_string, Context, JsError, JsNativeError, JsString, JsValue, Source};
 use serde_json::{json, Value as Json};
 
+use crate::config::UpstreamConfig;
 use crate::matcher::percent_decode;
+use crate::upstream;
 
 /// Value of `ctx.apiVersion`; see docs/contracts/ctx-api.md.
 pub const API_VERSION: &str = "1";
@@ -141,6 +146,8 @@ pub enum Error {
     TimedOut,
     /// Script finished without calling `ctx.respond`.
     NoResponse,
+    /// An uncaught transport failure from `ctx.http.get`.
+    UpstreamUnreachable(String),
 }
 
 impl Error {
@@ -150,6 +157,18 @@ impl Error {
         match self {
             Self::NoResponse => "script_no_response",
             Self::Failed(_) | Self::TimedOut => "script_error",
+            Self::UpstreamUnreachable(_) => "upstream_unreachable",
+        }
+    }
+
+    /// HTTP status used when this error reaches the client uncaught.
+    #[must_use]
+    pub fn status(&self) -> StatusCode {
+        match self {
+            Self::UpstreamUnreachable(_) => StatusCode::BAD_GATEWAY,
+            Self::Failed(_) | Self::TimedOut | Self::NoResponse => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
         }
     }
 
@@ -157,7 +176,7 @@ impl Error {
     #[must_use]
     pub fn detail(&self) -> String {
         match self {
-            Self::Failed(message) => message.clone(),
+            Self::Failed(message) | Self::UpstreamUnreachable(message) => message.clone(),
             Self::TimedOut => "script exceeded sandbox.script_timeout_ms".into(),
             Self::NoResponse => "script finished without calling ctx.respond".into(),
         }
@@ -187,7 +206,7 @@ impl Outcome {
 // The prelude is the only writer of `__sd`; `ctx` is a frozen view over it.
 const PRELUDE: &str = r#"
 var __sd = { response: null, logs: [] };
-var ctx = (function () {
+var ctx = (function (__sd_http_get, __sd_upstream_marker) {
   "use strict";
   var state = __sd;
   function format(value) {
@@ -262,10 +281,95 @@ var ctx = (function () {
     });
     return Object.freeze(value);
   }
+  function makeError(message, code) {
+    var error = new Error(String(message));
+    error.code = code;
+    return error;
+  }
+  function makeUpstreamError(message) {
+    var error = makeError(message, "upstream_unreachable");
+    Object.defineProperty(error, __sd_upstream_marker, { value: true });
+    return error;
+  }
+  var BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  function decodeBase64(text) {
+    var clean = String(text).replace(/=+$/, "");
+    var out = new Uint8Array(Math.floor(clean.length * 3 / 4));
+    var buffer = 0;
+    var bits = 0;
+    var index = 0;
+    for (var i = 0; i < clean.length; i++) {
+      var value = BASE64_ALPHABET.indexOf(clean.charAt(i));
+      if (value < 0) { throw new TypeError("ctx.http.get: invalid base64 body"); }
+      buffer = (buffer << 6) | value;
+      bits += 6;
+      if (bits >= 8) {
+        bits -= 8;
+        out[index] = (buffer >> bits) & 0xff;
+        index += 1;
+      }
+    }
+    return out;
+  }
+  function httpGet(url, opts) {
+    if (typeof url !== "string") {
+      throw new TypeError("ctx.http.get: url must be a string");
+    }
+    var timeout = null;
+    if (opts !== undefined) {
+      if (opts === null || typeof opts !== "object" || Array.isArray(opts)) {
+        throw new TypeError("ctx.http.get: opts must be an object");
+      }
+      var proto = Object.getPrototypeOf(opts);
+      if (proto !== Object.prototype && proto !== null) {
+        throw new TypeError("ctx.http.get: opts must be a plain object");
+      }
+      var symbols = Object.getOwnPropertySymbols(opts);
+      if (symbols.length > 0) {
+        throw new TypeError("ctx.http.get: unknown opts key " + String(symbols[0]));
+      }
+      var keys = Object.getOwnPropertyNames(opts);
+      for (var i = 0; i < keys.length; i++) {
+        if (keys[i] !== "timeout_ms") {
+          throw new TypeError("ctx.http.get: unknown opts key " + JSON.stringify(keys[i]));
+        }
+      }
+      if (Object.prototype.hasOwnProperty.call(opts, "timeout_ms")) {
+        var value = opts.timeout_ms;
+        if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+          throw new TypeError("ctx.http.get: opts.timeout_ms must be a positive integer");
+        }
+        timeout = value;
+      }
+    }
+    var payload = { url: url };
+    if (timeout !== null) { payload.timeout_ms = timeout; }
+    var raw;
+    try {
+      raw = __sd_http_get(JSON.stringify(payload));
+    } catch (bridgeError) {
+      throw makeError("ctx.http.get: host bridge failed", "script_error");
+    }
+    var result = JSON.parse(raw);
+    if (!result.ok) {
+      if (result.code === "upstream_unreachable") {
+        throw makeUpstreamError(result.message);
+      }
+      throw makeError(result.message, result.code);
+    }
+    var upstream = result.response;
+    return Object.freeze({
+      status: upstream.status,
+      headers: Object.freeze(upstream.headers),
+      text: function () { return upstream.text; },
+      bytes: function () { return decodeBase64(upstream.body_base64); }
+    });
+  }
   return Object.freeze({
     apiVersion: "__SD_API_VERSION__",
     request: freezeShallow(__SD_REQUEST__),
     env: Object.freeze(__SD_ENV__),
+    http: Object.freeze({ get: httpGet }),
     log: Object.freeze({
       info: function () { record("info", arguments); },
       warn: function () { record("warn", arguments); },
@@ -284,7 +388,8 @@ var ctx = (function () {
       return true;
     }
   });
-})();
+})(__sd_http_get, __SD_UPSTREAM_MARKER__);
+delete globalThis.__sd_http_get;
 "#;
 
 /// Read the recorded response and log lines back out of the realm.
@@ -296,6 +401,49 @@ fn js_literal(value: &Json) -> String {
         .to_string()
         .replace('\u{2028}', "\\u2028")
         .replace('\u{2029}', "\\u2029")
+}
+
+thread_local! {
+    /// Per-request bridge used by the `__sd_http_get` native callback.
+    static HTTP_HOST: RefCell<Option<upstream::UpstreamAccess>> = const { RefCell::new(None) };
+}
+
+/// Native bridge behind `ctx.http.get`; all policy checks live in `upstream`.
+fn sd_http_get(
+    _this: &JsValue,
+    args: &[JsValue],
+    _context: &mut Context,
+) -> boa_engine::JsResult<JsValue> {
+    let Some(raw) = args.first().and_then(JsValue::as_string) else {
+        return Err(JsNativeError::typ()
+            .with_message("__sd_http_get: expected a JSON string")
+            .into());
+    };
+    let call: Json = serde_json::from_str(&raw.to_std_string_escaped()).map_err(|error| {
+        JsNativeError::typ().with_message(format!("__sd_http_get: invalid payload: {error}"))
+    })?;
+    let result = HTTP_HOST.with(|cell| {
+        let borrowed = cell.borrow();
+        let Some(host) = borrowed.as_ref() else {
+            return json!({
+                "ok": false,
+                "code": "script_error",
+                "message": "ctx.http.get called outside a script request"
+            });
+        };
+        match host.get(&call) {
+            Ok(response) => json!({ "ok": true, "response": upstream::response_json(response) }),
+            Err(error) => json!({
+                "ok": false,
+                "code": error.code(),
+                "message": error.message()
+            }),
+        }
+    });
+    let rendered = serde_json::to_string(&result).map_err(|error| {
+        JsNativeError::error().with_message(format!("__sd_http_get: cannot encode result: {error}"))
+    })?;
+    Ok(JsValue::from(JsString::from(rendered)))
 }
 
 /// Process environment snapshot exposed as `ctx.env`.
@@ -324,36 +472,99 @@ fn parse_query(raw: &str) -> BTreeMap<String, String> {
 }
 
 /// Evaluate one request's script and read back its recorded state.
-fn evaluate(source: &str, request: &RequestSnapshot) -> Outcome {
+fn evaluate(
+    source: &str,
+    request: &RequestSnapshot,
+    upstream: &UpstreamConfig,
+    script_deadline: Instant,
+) -> Outcome {
+    HTTP_HOST.with(|cell| {
+        *cell.borrow_mut() = Some(upstream::UpstreamAccess::new(
+            upstream.allow_hosts.clone(),
+            Duration::from_millis(upstream.timeout_ms),
+            script_deadline,
+        ));
+    });
+    let upstream_marker = upstream_marker();
     let prelude = PRELUDE
         .replace("__SD_API_VERSION__", API_VERSION)
         .replace("__SD_REQUEST__", &js_literal(&request.to_json()))
-        .replace("__SD_ENV__", &js_literal(&env_json()));
+        .replace("__SD_ENV__", &js_literal(&env_json()))
+        .replace(
+            "__SD_UPSTREAM_MARKER__",
+            &js_literal(&Json::String(upstream_marker.clone())),
+        );
     let mut context = Context::default();
     context
         .runtime_limits_mut()
         .set_loop_iteration_limit(LOOP_ITERATION_LIMIT);
     // A Rust-side panic in the engine must not take the request thread down.
-    let staged = catch_unwind(AssertUnwindSafe(|| {
+    let staged = catch_unwind(AssertUnwindSafe(|| -> Result<String, (bool, String)> {
         context
-            .eval(Source::from_bytes(&prelude))
-            .map_err(|error| error.to_string())?;
-        context
-            .eval(Source::from_bytes(source))
-            .map_err(|error| error.to_string())?;
-        let dump = context
-            .eval(Source::from_bytes(EXTRACT))
-            .map_err(|error| error.to_string())?;
-        Ok::<String, String>(match dump.as_string() {
-            Some(text) => text.to_std_string_escaped(),
-            None => "null".to_string(),
-        })
+            .register_global_builtin_callable(
+                js_string!("__sd_http_get"),
+                1,
+                NativeFunction::from_fn_ptr(sd_http_get),
+            )
+            .map_err(|error| (false, error.to_string()))?;
+        let evaluated = (|| -> Result<String, JsError> {
+            context.eval(Source::from_bytes(&prelude))?;
+            context.eval(Source::from_bytes(source))?;
+            let dump = context.eval(Source::from_bytes(EXTRACT))?;
+            Ok(match dump.as_string() {
+                Some(text) => text.to_std_string_escaped(),
+                None => "null".to_string(),
+            })
+        })();
+        match evaluated {
+            Ok(dump) => Ok(dump),
+            Err(error) => {
+                let upstream_unreachable =
+                    is_upstream_unreachable(&error, &upstream_marker, &mut context);
+                let message = error.to_string();
+                Err((upstream_unreachable, message))
+            }
+        }
     }));
+    HTTP_HOST.with(|cell| {
+        cell.borrow_mut().take();
+    });
     match staged {
         Err(_) => Outcome::failed(Error::Failed("script panicked in the engine".into())),
-        Ok(Err(message)) => Outcome::failed(Error::Failed(message)),
+        Ok(Err((true, message))) => Outcome::failed(Error::UpstreamUnreachable(message)),
+        Ok(Err((false, message))) => Outcome::failed(Error::Failed(message)),
         Ok(Ok(dump)) => parse_host_record(&dump),
     }
+}
+
+/// Per-request marker property for host-created transport errors. It is not a
+/// security token; it prevents an unrelated script throw from being classified
+/// as an upstream failure merely by copying the documented `error.code`.
+fn upstream_marker() -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let mut hasher = RandomState::new().build_hasher();
+    hasher.write_u128(nanos);
+    hasher.write_u64(sequence);
+    format!("__sd_upstream_{:016x}", hasher.finish())
+}
+
+/// Recognize an uncaught error created by the `ctx.http.get` transport path.
+/// The script-visible `error.code` is deliberately not trusted on its own.
+fn is_upstream_unreachable(error: &JsError, marker: &str, context: &mut Context) -> bool {
+    let Some(object) = error.as_opaque().and_then(JsValue::as_object) else {
+        return false;
+    };
+    object
+        .has_own_property(JsString::from(marker), context)
+        .unwrap_or(false)
 }
 
 /// Turn the extracted JSON record into an `Outcome`.
@@ -435,10 +646,19 @@ fn parse_host_record(raw: &str) -> Outcome {
 /// Run one script for one request with a wall-clock deadline.
 ///
 /// Must use result: an unreachable engine is reported, never a silent success.
-pub async fn execute(source: String, request: RequestSnapshot, timeout: Duration) -> Outcome {
+pub async fn execute(
+    source: String,
+    request: RequestSnapshot,
+    timeout: Duration,
+    upstream: UpstreamConfig,
+) -> Outcome {
     // tradeoff: `spawn_blocking` cannot be cancelled, so on timeout the host
     // answers immediately and the worker stops at `LOOP_ITERATION_LIMIT`.
-    let worker = tokio::task::spawn_blocking(move || evaluate(&source, &request));
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .unwrap_or_else(Instant::now);
+    let worker =
+        tokio::task::spawn_blocking(move || evaluate(&source, &request, &upstream, deadline));
     match tokio::time::timeout(timeout, worker).await {
         Err(_) => Outcome::failed(Error::TimedOut),
         Ok(Err(_)) => Outcome::failed(Error::Failed("script worker panicked".into())),

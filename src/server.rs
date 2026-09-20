@@ -115,7 +115,8 @@ async fn handle(
                 let outcome = match std::fs::read_to_string(&route.script) {
                     Ok(source) => {
                         let timeout = Duration::from_millis(state.config.sandbox.script_timeout_ms);
-                        script::execute(source, snapshot, timeout).await
+                        script::execute(source, snapshot, timeout, state.config.upstream.clone())
+                            .await
                     }
                     // The path was validated at load time; losing the file now
                     // is a runtime failure, not a silent 404.
@@ -142,8 +143,9 @@ async fn handle(
         ),
         Handled::Failed(error) => {
             let class = error.class();
+            let status = error.status();
             (
-                StatusCode::INTERNAL_SERVER_ERROR,
+                status,
                 class,
                 HeaderMap::new(),
                 error_body(&request_id, class),
@@ -177,6 +179,8 @@ async fn handle(
             .map(|record| json!({ "level": record.level, "message": record.message }))
             .collect::<Vec<_>>());
     }
+    // tradeoff: the upstream call chain and --verbose detail land in T7
+    // (issue #10); this slice logs the final status and error class only.
     log(&payload);
 
     let mut headers = response_headers;
