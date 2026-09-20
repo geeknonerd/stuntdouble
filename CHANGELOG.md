@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Fourth implementation slice (T4): `ctx.http.get` performs allowlisted upstream HTTP GETs from route scripts. `[upstream] allow_hosts`/`timeout_ms` and per-call `opts.timeout_ms` bound access; redirects are followed manually for at most 3 hops with protocol and host re-validation on every hop. Upstream 4xx/5xx responses are data, transport failures are catchable script exceptions, and uncaught transport failures map to 502 `upstream_unreachable` with a `request_id`.
+- New dependencies: `ureq` 3.4 (MIT OR Apache-2.0) with rustls and the platform certificate verifier for HTTPS, `rustls` 0.23 with the ring provider, and `url` 2 (MIT OR Apache-2.0) for URL parsing and redirect resolution; the standard library has no HTTP or TLS client. TLS uses the host trust store instead of a bundled root data set.
 - Second implementation slice (T2): embedded Boa runtime executes each matched route script with a host-injected `ctx` (`apiVersion`, `request`, `respond`, `log`, `env`); script errors, timeouts, and missing responses map to 500 with stable error classes and a `request_id`.
 - Optional `[sandbox]` configuration table with `script_timeout_ms` (default 10000, must be positive). Timeout enforcement is deadline-based with a loop-iteration backstop, because Boa 0.22 exposes no interrupt hook.
 - Route scripts may return text or byte bodies through `ctx.respond`; `ctx.log.*` records stay in server logs and never reach clients.
@@ -23,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bin+lib crate structure enables `cargo test --doc`: src/lib.rs exports config/matcher/server modules; src/main.rs imports from stuntdouble::{config,server}. See [docs/solutions/ci/doctest-lib-target-required.md](docs/solutions/ci/doctest-lib-target-required.md).
 
 ### Changed
+- Dependency license and advisory checks now cover the shipped platforms (Linux x86_64, macOS arm64, Windows x86_64) instead of every target in the lockfile; `rustls-platform-verifier` carries Android/wasm-only root bundles whose data license is outside the project allowlist.
 - Contract documents marked stable for v0.x slice T1: `docs/contracts/config.md` now includes complete route schema and validation rules; `docs/contracts/cli.md` documents implemented commands and exit codes.
 
 

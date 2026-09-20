@@ -5,7 +5,7 @@
 Stunt Double is a Rust-based mock server for integration testing against real external dependencies. It reads upstream APIs, transform data with built-in JavaScript or Python, return files and binary responses, and run with zero host runtime dependencies.
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
-[![Status: script execution](https://img.shields.io/badge/status-script%20execution-orange.svg)](#status)
+[![Status: upstream HTTP](https://img.shields.io/badge/status-upstream%20http-orange.svg)](#status)
 
 ## Why Stunt Double
 
@@ -21,7 +21,7 @@ The design goal is a single binary that behaves like the real dependency closely
 
 ## Status
 
-**Script execution (T2) implemented.** `stuntdouble serve` and `stuntdouble validate` run from a TOML configuration, match routes by method and path (`:param` capture), and execute each matched route's JavaScript in the embedded Boa runtime with a host-injected `ctx` (`apiVersion`, `request`, `respond`, `log`, `env`). Unmatched routes answer 404 `not_found`; scripts that throw or time out answer 500 `script_error`, and scripts that never call `ctx.respond` answer 500 `script_no_response` — always with a `request_id`. Upstream sources and binary responses are the next slices.
+**Script execution and upstream HTTP (T4) implemented.** `stuntdouble serve` and `stuntdouble validate` run from a TOML configuration, match routes by method and path (`:param` capture), and execute each matched route's JavaScript in the embedded Boa runtime with a host-injected `ctx` (`apiVersion`, `request`, `http.get`, `respond`, `log`, `env`). `ctx.http.get` reaches only hosts listed in `[upstream] allow_hosts`, treats upstream 4xx/5xx responses as data, and maps uncaught transport failures to 502 `upstream_unreachable`. Unmatched routes answer 404 `not_found`; scripts that throw or time out answer 500 `script_error`, and scripts that never call `ctx.respond` answer 500 `script_no_response` — always with a `request_id`. File and binary responses are the next slices.
 
 The execution model and security boundaries were fixed before implementation details. See [plans/adr/](plans/adr/) and [docs/solutions/](docs/solutions/).
 

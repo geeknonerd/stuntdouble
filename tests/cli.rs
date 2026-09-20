@@ -4,6 +4,9 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_stuntdouble");
@@ -165,6 +168,149 @@ fn json_string(body: &str, key: &str) -> Option<String> {
     let start = body.find(&marker)? + marker.len();
     let end = start + body[start..].find('"')?;
     Some(body[start..end].to_string())
+}
+
+/// One canned response served by the in-test upstream.
+struct UpstreamResponse {
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+    delay: Duration,
+}
+
+impl UpstreamResponse {
+    fn new(status: u16, body: &[u8]) -> Self {
+        Self {
+            status,
+            headers: Vec::new(),
+            body: body.to_vec(),
+            delay: Duration::ZERO,
+        }
+    }
+
+    fn header(mut self, name: &str, value: &str) -> Self {
+        self.headers.push((name.to_string(), value.to_string()));
+        self
+    }
+
+    fn delay(mut self, delay: Duration) -> Self {
+        self.delay = delay;
+        self
+    }
+}
+
+/// Minimal stdlib HTTP upstream: serves a fixed script of responses, one per
+/// accepted connection, so tests exercise the real network path end to end.
+struct Upstream {
+    port: u16,
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl Upstream {
+    fn start(responses: Vec<UpstreamResponse>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind upstream");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking upstream");
+        let port = listener.local_addr().expect("upstream addr").port();
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            let mut next = 0;
+            while !thread_stop.load(Ordering::Relaxed) && next < responses.len() {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        read_upstream_request(&mut stream);
+                        let response = &responses[next];
+                        next += 1;
+                        let wake = Instant::now() + response.delay;
+                        while Instant::now() < wake && !thread_stop.load(Ordering::Relaxed) {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        if thread_stop.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let reason = match response.status {
+                            200 => "OK",
+                            302 => "Found",
+                            404 => "Not Found",
+                            500 => "Internal Server Error",
+                            _ => "Status",
+                        };
+                        let mut raw = format!(
+                            "HTTP/1.1 {} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n",
+                            response.status,
+                            response.body.len()
+                        );
+                        for (name, value) in &response.headers {
+                            let _ = write!(raw, "{name}: {value}\r\n");
+                        }
+                        raw.push_str("\r\n");
+                        let _ = stream.write_all(raw.as_bytes());
+                        let _ = stream.write_all(&response.body);
+                        let _ = stream.flush();
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Self {
+            port,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("http://127.0.0.1:{}{path}", self.port)
+    }
+}
+
+impl Drop for Upstream {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn read_upstream_request(stream: &mut TcpStream) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let mut head = Vec::new();
+    let mut chunk = [0_u8; 2048];
+    while let Ok(read) = stream.read(&mut chunk) {
+        if read == 0 {
+            break;
+        }
+        head.extend_from_slice(&chunk[..read]);
+        if head.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+    }
+}
+
+/// Add the [upstream] allowlist required by ctx.http.get.
+fn with_upstream(body: &str, allow_hosts: &[&str]) -> String {
+    with_upstream_timeout(body, allow_hosts, None)
+}
+
+/// Add [upstream] with an explicit timeout; `None` keeps the default.
+fn with_upstream_timeout(body: &str, allow_hosts: &[&str], timeout_ms: Option<u64>) -> String {
+    let hosts = allow_hosts
+        .iter()
+        .map(|host| format!("\"{host}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let timeout = timeout_ms.map_or(String::new(), |ms| format!("timeout_ms = {ms}\n"));
+    body.replace(
+        "[files]",
+        &format!("[upstream]\nallow_hosts = [{hosts}]\n{timeout}\n[files]"),
+    )
 }
 
 fn with_server<T>(config_body: &str, run_tests: impl FnOnce(u16) -> T) -> (T, String) {
@@ -568,4 +714,417 @@ ctx.respond(200, {}, "done");
     assert!(stderr.contains("hello from the script"), "stderr: {stderr}");
     assert!(stderr.contains("\"script_logs\""), "stderr: {stderr}");
     assert!(!response.body.contains("hello from the script"));
+}
+
+#[test]
+fn ctx_http_get_returns_status_headers_text_and_bytes() {
+    let upstream = Upstream::start(vec![UpstreamResponse::new(200, br#"{"hello":"world"}"#)
+        .header("Content-Type", "application/json")
+        .header("X-Upstream", "yes")]);
+    let script = r#"
+var r = ctx.http.get(ctx.env.UPSTREAM_URL);
+ctx.respond(200, { "Content-Type": "application/json" }, JSON.stringify({
+  status: r.status,
+  type: r.headers["content-type"],
+  upstream: r.headers["x-upstream"],
+  text: r.text(),
+  bytes: Array.from(r.bytes())
+}));
+"#;
+    let url = upstream.url("/meta");
+    let (response, _) = with_server_full(
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+        &[("UPSTREAM_URL", url.as_str())],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(json["status"], 200);
+    assert_eq!(json["type"], "application/json");
+    assert_eq!(json["upstream"], "yes");
+    assert_eq!(json["text"], r#"{"hello":"world"}"#);
+    assert_eq!(
+        json["bytes"],
+        serde_json::json!([
+            123, 34, 104, 101, 108, 108, 111, 34, 58, 34, 119, 111, 114, 108, 100, 34, 125
+        ])
+    );
+}
+
+fn closed_port() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+    let port = listener.local_addr().expect("local addr").port();
+    drop(listener);
+    port
+}
+
+fn error_class(body: &str) -> Option<String> {
+    json_string(body, "error")
+}
+
+#[test]
+fn ctx_http_get_treats_4xx_and_5xx_as_data() {
+    let upstream = Upstream::start(vec![
+        UpstreamResponse::new(404, b"missing"),
+        UpstreamResponse::new(500, b"boom"),
+    ]);
+    let script = r#"
+var missing = ctx.http.get(ctx.env.UPSTREAM_URL + "/missing");
+var broken = ctx.http.get(ctx.env.UPSTREAM_URL + "/broken");
+ctx.respond(299, {}, String(missing.status) + ":" + missing.text() + "|" + String(broken.status) + ":" + broken.text());
+"#;
+    let url = upstream.url("");
+    let (response, _) = with_server_full(
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+        &[("UPSTREAM_URL", url.as_str())],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 299, "body: {}", response.body);
+    assert_eq!(response.body, "404:missing|500:boom");
+}
+
+#[test]
+fn ctx_http_get_rejects_non_http_protocol_as_script_error() {
+    let script = r#"
+ctx.http.get("file:///etc/passwd");
+ctx.respond(200, {}, "should not respond");
+"#;
+    let (response, _) = with_server_full(good_config(), script, &[], |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 500, "body: {}", response.body);
+    assert_eq!(error_class(&response.body).as_deref(), Some("script_error"));
+}
+
+#[test]
+fn ctx_http_get_denies_hosts_without_an_upstream_allowlist() {
+    let script = r#"
+ctx.http.get("http://127.0.0.1:1/");
+ctx.respond(200, {}, "should not respond");
+"#;
+    let (response, _) = with_server_full(good_config(), script, &[], |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 500, "body: {}", response.body);
+    assert_eq!(error_class(&response.body).as_deref(), Some("script_error"));
+}
+
+#[test]
+fn ctx_http_get_rejects_host_not_in_allowlist_as_script_error() {
+    let script = r#"
+ctx.http.get("http://127.0.0.1:1/");
+ctx.respond(200, {}, "should not respond");
+"#;
+    let (response, _) = with_server_full(
+        &with_upstream(good_config(), &["allowed.example"]),
+        script,
+        &[],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 500, "body: {}", response.body);
+    assert_eq!(error_class(&response.body).as_deref(), Some("script_error"));
+}
+
+#[test]
+fn ctx_http_get_rejects_unknown_opts_key_as_script_error() {
+    let script = r#"
+ctx.http.get("http://127.0.0.1:1/", { retries: 1 });
+ctx.respond(200, {}, "should not respond");
+"#;
+    let (response, _) = with_server_full(
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+        &[],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 500, "body: {}", response.body);
+    assert_eq!(error_class(&response.body).as_deref(), Some("script_error"));
+}
+
+#[test]
+fn ctx_http_get_rejects_non_positive_timeout_as_script_error() {
+    let script = r#"
+ctx.http.get("http://127.0.0.1:1/", { timeout_ms: 0 });
+ctx.respond(200, {}, "should not respond");
+"#;
+    let (response, _) = with_server_full(
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+        &[],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 500, "body: {}", response.body);
+    assert_eq!(error_class(&response.body).as_deref(), Some("script_error"));
+}
+
+#[test]
+fn ctx_http_get_rejects_null_timeout_as_script_error() {
+    let script = r#"
+ctx.http.get("http://127.0.0.1:1/", { timeout_ms: null });
+ctx.respond(200, {}, "should not respond");
+"#;
+    let (response, _) = with_server_full(
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+        &[],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 500, "body: {}", response.body);
+    assert_eq!(error_class(&response.body).as_deref(), Some("script_error"));
+}
+
+#[test]
+fn ctx_http_get_rejects_non_finite_timeout_as_script_error() {
+    let script = r#"
+ctx.http.get("http://127.0.0.1:1/", { timeout_ms: Infinity });
+ctx.respond(200, {}, "should not respond");
+"#;
+    let (response, _) = with_server_full(
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+        &[],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 500, "body: {}", response.body);
+    assert_eq!(error_class(&response.body).as_deref(), Some("script_error"));
+}
+
+#[test]
+fn ctx_http_get_rejects_symbol_opts_key_as_script_error() {
+    let script = r#"
+var opts = {};
+opts[Symbol("retries")] = 1;
+ctx.http.get("http://127.0.0.1:1/", opts);
+ctx.respond(200, {}, "should not respond");
+"#;
+    let (response, _) = with_server_full(
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+        &[],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 500, "body: {}", response.body);
+    assert_eq!(error_class(&response.body).as_deref(), Some("script_error"));
+}
+
+#[test]
+fn ctx_http_get_rejects_inherited_opts_keys_as_script_error() {
+    let script = r#"
+var opts = Object.create({ retries: 1 });
+ctx.http.get("http://127.0.0.1:1/", opts);
+ctx.respond(200, {}, "should not respond");
+"#;
+    let (response, _) = with_server_full(
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+        &[],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 500, "body: {}", response.body);
+    assert_eq!(error_class(&response.body).as_deref(), Some("script_error"));
+}
+
+#[test]
+fn ctx_http_get_follows_up_to_three_allowlisted_redirects() {
+    let upstream = Upstream::start(vec![
+        UpstreamResponse::new(302, b"").header("Location", "/one"),
+        UpstreamResponse::new(302, b"").header("Location", "/two"),
+        UpstreamResponse::new(302, b"").header("Location", "/three"),
+        UpstreamResponse::new(200, b"done"),
+    ]);
+    let script = r"
+var r = ctx.http.get(ctx.env.UPSTREAM_URL);
+ctx.respond(200, {}, r.text());
+";
+    let url = upstream.url("/start");
+    let (response, _) = with_server_full(
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+        &[("UPSTREAM_URL", url.as_str())],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(response.body, "done");
+}
+
+#[test]
+fn ctx_http_get_rejects_redirect_chain_longer_than_three_hops() {
+    let upstream = Upstream::start(vec![
+        UpstreamResponse::new(302, b"").header("Location", "/one"),
+        UpstreamResponse::new(302, b"").header("Location", "/two"),
+        UpstreamResponse::new(302, b"").header("Location", "/three"),
+        UpstreamResponse::new(302, b"").header("Location", "/four"),
+        UpstreamResponse::new(200, b"should not be reached"),
+    ]);
+    let script = r#"
+ctx.http.get(ctx.env.UPSTREAM_URL);
+ctx.respond(200, {}, "should not respond");
+"#;
+    let url = upstream.url("/start");
+    let (response, _) = with_server_full(
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+        &[("UPSTREAM_URL", url.as_str())],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 500, "body: {}", response.body);
+    assert_eq!(error_class(&response.body).as_deref(), Some("script_error"));
+}
+
+#[test]
+fn ctx_http_get_rejects_redirect_to_non_allowlisted_host() {
+    let upstream = Upstream::start(vec![
+        UpstreamResponse::new(302, b"").header("Location", "http://localhost:1/nope")
+    ]);
+    let script = r#"
+ctx.http.get(ctx.env.UPSTREAM_URL);
+ctx.respond(200, {}, "should not respond");
+"#;
+    let url = upstream.url("/start");
+    let (response, _) = with_server_full(
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+        &[("UPSTREAM_URL", url.as_str())],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 500, "body: {}", response.body);
+    assert_eq!(error_class(&response.body).as_deref(), Some("script_error"));
+}
+
+#[test]
+fn ctx_http_get_transport_failure_is_catchable() {
+    let port = closed_port();
+    let url = format!("http://127.0.0.1:{port}/meta");
+    let script = r#"
+try {
+  ctx.http.get(ctx.env.UPSTREAM_URL);
+  ctx.respond(500, {}, "expected a transport failure");
+} catch (error) {
+  ctx.respond(200, {}, error.code);
+}
+"#;
+    let (response, _) = with_server_full(
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+        &[("UPSTREAM_URL", url.as_str())],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(response.body, "upstream_unreachable");
+}
+
+#[test]
+fn uncaught_ctx_http_get_transport_failure_maps_to_502() {
+    let port = closed_port();
+    let url = format!("http://127.0.0.1:{port}/meta");
+    let script = r#"
+ctx.http.get(ctx.env.UPSTREAM_URL);
+ctx.respond(200, {}, "should not respond");
+"#;
+    let (response, _) = with_server_full(
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+        &[("UPSTREAM_URL", url.as_str())],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 502, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("upstream_unreachable")
+    );
+    assert!(json_string(&response.body, "request_id").is_some());
+    assert!(response.header("x-request-id").is_some());
+}
+
+#[test]
+fn ctx_http_get_per_call_timeout_maps_to_502() {
+    let upstream = Upstream::start(vec![
+        UpstreamResponse::new(200, b"late").delay(Duration::from_secs(30))
+    ]);
+    let script = r#"
+ctx.http.get(ctx.env.UPSTREAM_URL, { timeout_ms: 100 });
+ctx.respond(200, {}, "should not respond");
+"#;
+    let url = upstream.url("/slow");
+    let (response, _) = with_server_full(
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+        &[("UPSTREAM_URL", url.as_str())],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 502, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("upstream_unreachable")
+    );
+}
+
+#[test]
+fn ctx_http_get_uses_upstream_timeout_config() {
+    let upstream = Upstream::start(vec![
+        UpstreamResponse::new(200, b"late").delay(Duration::from_secs(30))
+    ]);
+    let script = r#"
+ctx.http.get(ctx.env.UPSTREAM_URL);
+ctx.respond(200, {}, "should not respond");
+"#;
+    let url = upstream.url("/slow");
+    let (response, _) = with_server_full(
+        &with_upstream_timeout(good_config(), &["127.0.0.1"], Some(100)),
+        script,
+        &[("UPSTREAM_URL", url.as_str())],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 502, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("upstream_unreachable")
+    );
+}
+
+#[test]
+fn validate_accepts_upstream_configuration() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = fixture(
+        dir.path(),
+        3000,
+        &with_upstream_timeout(good_config(), &["metadata.example.com"], Some(500)),
+    );
+    let (code, _, stderr) = run(&["validate", "--config", config.to_str().unwrap()]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+}
+
+#[test]
+fn validate_rejects_unknown_upstream_keys() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let body = good_config().replace(
+        "[files]",
+        "[upstream]\nallow_hosts = [\"example.com\"]\nbogus = true\n\n[files]",
+    );
+    let config = fixture(dir.path(), 3000, &body);
+    let (code, _, stderr) = run(&["validate", "--config", config.to_str().unwrap()]);
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert!(
+        stderr.contains("upstream.bogus: expected one of"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn validate_rejects_invalid_allow_hosts() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let body = good_config().replace("[files]", "[upstream]\nallow_hosts = [\"\", 7]\n\n[files]");
+    let config = fixture(dir.path(), 3000, &body);
+    let (code, _, stderr) = run(&["validate", "--config", config.to_str().unwrap()]);
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert!(
+        stderr.contains("upstream.allow_hosts[0]"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("upstream.allow_hosts[1]"),
+        "stderr: {stderr}"
+    );
 }

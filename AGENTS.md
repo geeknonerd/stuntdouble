@@ -14,8 +14,8 @@
 
 ## 项目快照
 
-Stunt Double 是 Rust 实现的 Mock Server，面向对接真实外部依赖的集成联调。T1 落地 `serve`/`validate` 子命令、TOML 配置加载、路由匹配与结构化日志；T2 起命中路由会在内置 Boa 运行时执行 JavaScript，宿主注入的 `ctx`（`apiVersion`/`request`/`respond`/`log`/`env`）产生响应，脚本异常映射为 500 `script_error` 或 `script_no_response`；上游数据源、文件与二进制响应待后续切片完善。
-仓库采用 bin+lib 结构：src/lib.rs 暴露公共模块（config/matcher/script/server），src/main.rs 作为 CLI entry point。详见 [docs/solutions/ci/doctest-lib-target-required.md](docs/solutions/ci/doctest-lib-target-required.md)）。
+Stunt Double 是 Rust 实现的 Mock Server，面向对接真实外部依赖的集成联调。T1 落地 `serve`/`validate` 子命令、TOML 配置加载、路由匹配与结构化日志；T2 起命中路由会在内置 Boa 运行时执行 JavaScript，宿主注入的 `ctx`（`apiVersion`/`request`/`respond`/`log`/`env`）产生响应，脚本异常映射为 500 `script_error` 或 `script_no_response`；T4 增加 allowlist 约束的 `ctx.http.get`，上游 4xx/5xx 视为数据，未捕获的传输层失败映射为 502 `upstream_unreachable`；文件与二进制响应待后续切片完善。
+仓库采用 bin+lib 结构：src/lib.rs 暴露公共模块（config/matcher/script/server/upstream），src/main.rs 作为 CLI entry point。详见 [docs/solutions/ci/doctest-lib-target-required.md](docs/solutions/ci/doctest-lib-target-required.md)）。
 - 核心能力：外部数据源、脚本变换、文件与二进制响应、内置 JS/Python、零外部运行时依赖。
 - 所有接口只有一条执行模型：`match → source → transform → response`。
 - 详细范围见 [plans/product-definition.md](plans/product-definition.md)。
