@@ -6,17 +6,19 @@ title: Stunt Double
 
 **A test double that plays the whole show.**
 
-Stunt Double is a planned Rust mock server for integration testing against real external dependencies. It reads upstream APIs, transforms data with built-in JavaScript or Python, returns files and binary responses, and runs without host runtime dependencies.
+Stunt Double is a Rust-based mock server for integration testing against real external dependencies. It reads upstream APIs, transforms data with built-in JavaScript, returns files and binary responses, and runs without host runtime dependencies.
 
 ## Status
 
-Design phase. There is no runnable server yet.
+Slices T1–T4 are implemented. `stuntdouble serve` and `stuntdouble validate` run from a TOML configuration; matched routes execute JavaScript in the embedded Boa runtime with a host-injected `ctx` (`apiVersion`, `request`, `http.get`, `respond`, `log`, `env`); and `ctx.http.get` performs allowlisted upstream HTTP calls. Unmatched routes return 404 `not_found`; script failures return 500 `script_error` or `script_no_response`; uncaught upstream transport failures return 502 `upstream_unreachable`. File and binary responses are the next slices.
 
 ## Documentation
 
 - [README](https://github.com/geeknonerd/stuntdouble/blob/main/README.md)
 - [Documentation index](https://github.com/geeknonerd/stuntdouble/tree/main/docs)
 - [Product definition](https://github.com/geeknonerd/stuntdouble/blob/main/plans/product-definition.md)
+- [Public contracts](https://github.com/geeknonerd/stuntdouble/tree/main/docs/contracts)
+- [ctx API type definitions](https://github.com/geeknonerd/stuntdouble/blob/main/types/ctx-api-v1.d.ts)
 - [Architecture decisions](https://github.com/geeknonerd/stuntdouble/tree/main/plans/adr)
 - [Research notes](https://github.com/geeknonerd/stuntdouble/tree/main/research)
 - [Contributing](https://github.com/geeknonerd/stuntdouble/blob/main/CONTRIBUTING.md)

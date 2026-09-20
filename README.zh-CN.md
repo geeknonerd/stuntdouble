@@ -2,7 +2,7 @@
 
 > **A test double that plays the whole show.**
 
-Stunt Double 是一个计划用 Rust 实现的 Mock Server，面向需要对接真实外部依赖的集成测试。它会读取上游接口、用内置 JavaScript 或 Python 变换数据、返回文件与二进制响应，并且不依赖宿主机上的 Node.js、Python 或 JVM。
+Stunt Double 是一个用 Rust 实现的 Mock Server，面向需要对接真实外部依赖的集成测试。它会读取上游接口、用内置 JavaScript 或 Python 变换数据、返回文件与二进制响应，并且不依赖宿主机上的 Node.js、Python 或 JVM。
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#许可证)
 [![Status: upstream HTTP](https://img.shields.io/badge/status-upstream%20http-orange.svg)](#当前状态)
@@ -29,7 +29,7 @@ Stunt Double 是一个计划用 Rust 实现的 Mock Server，面向需要对接�
 - 内置 JavaScript 运行时：Boa。
 - 内置 Python 运行时：RustPython stdlib 子集。
 - 宿主注入 `ctx` API，不暴露裸 `fetch`、`fs`、`os`、`subprocess`、`socket`。
-- 上游 HTTP、静态文件读取、文件流、上传、Range 响应。
+- 上游 HTTP（`ctx.http.get` 已实现，request/pipe 待后续切片）、静态文件读取、文件流、上传、Range 响应。
 - 唯一静态文件根，并阻止路径穿越。
 - 静态配置 + 重启。热重载与 Admin API 推迟。
 - Linux x86_64、macOS arm64、Windows x86_64 二进制与容器镜像。

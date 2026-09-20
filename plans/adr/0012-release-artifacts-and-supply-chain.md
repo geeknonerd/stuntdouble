@@ -14,6 +14,7 @@ Every release provides a verifiable artifact set:
 
 - source archives from GitHub
 - Linux x86_64, macOS arm64, and Windows x86_64 binaries
+- `ctx` API `.d.ts` type definitions for every supported `apiVersion`
 - `SHA256SUMS`
 - GitHub artifact attestation
 - SBOM in CycloneDX or SPDX format

@@ -1,12 +1,13 @@
 // Script execution: run one route script in Boa with a host-injected `ctx`.
 // Contracts: docs/contracts/ctx-api.md (subset implemented by slices T2–T4).
 //
-// The crate denies `unsafe`, and Boa 0.22 only exposes native closures through
-// `unsafe fn NativeFunction::from_closure`. So instead of registering Rust
-// callbacks, the host evaluates a small prelude that builds `ctx` in the realm
-// on top of a JSON snapshot, then reads the produced response back with
-// `JSON.stringify`. Scripts still see nothing but `ctx`: the realm has no
-// `fetch`, `fs`, `process`, or `require`.
+// The crate denies `unsafe`. Boa 0.22 only exposes native closures through
+// `unsafe fn NativeFunction::from_closure`, so the only Rust callback is a safe
+// `NativeFunction::from_fn_ptr` bridge with per-request state in a thread-local.
+// The prelude builds `ctx` in the realm from JSON snapshots and reads the
+// produced response back with `JSON.stringify`. Scripts still see nothing but
+// `ctx`: the realm has no `fetch`, `fs`, `process`, or `require`, and the raw
+// bridge global is deleted before the route script runs.
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::panic::{catch_unwind, AssertUnwindSafe};

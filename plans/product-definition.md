@@ -52,7 +52,7 @@
 | 分组 | API | 约束 |
 | --- | --- | --- |
 | 请求只读 | `ctx.request`: `method` / `path` / `params` / `query` / `headers` / `bodyText` / `bodyBytes` | 只读；不暴露原始 socket |
-| 外部取数 | `ctx.http.get(url, opts)` / `ctx.http.request(method, url, opts)` | 仅白名单 host；`opts` 含 `timeout_ms`（T4 已实现；`retries` / `backoff` 后续切片）；返回 `{status, headers, text(), bytes()}` |
+| 外部取数 | `ctx.http.get(url, opts)` / `ctx.http.request(method, url, opts)` | 仅白名单 host；`ctx.http.get` 于 T4 实现（`timeout_ms`；`retries` / `backoff` 后续切片），`ctx.http.request` 后续切片；返回 `{status, headers, text(), bytes()}` |
 | 二进制透传 | `ctx.http.pipe(url, {status, headers})` | 上游响应体直接流到客户端，不进脚本堆内存；可透传 Range/206；不做字节级变换 |
 | 读文件 | `ctx.file.readText(p)` / `ctx.file.readBytes(p)` / `ctx.file.stream(p)` | 只读；路径相对静态文件目录解析；拒绝绝对路径与 `..`；v1 不提供脚本写文件能力（上传由宿主落盘） |
 | 响应 | `ctx.respond(status, headers, body)`；body 为 string / bytes / 文件流引用 | 文件流引用支持 Range；纯内存 body 不支持 Range；不调用则视为未产生响应（固定错误码，不静默 200） |
