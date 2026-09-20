@@ -138,4 +138,4 @@ Note: MSRV (`rust-version`) is already declared in [Cargo.toml](../Cargo.toml) a
 
 Rust crate uses bin+lib structure: src/lib.rs defines the library; src/main.rs imports from stuntdouble::{config,server}. This setup enables `cargo test --doc` and `cargo doc --no-deps` to find a library target. When adding new crates later, ensure this pattern continues so CI gates remain green.
 
-See [docs/solutions/ci/doctest-lib-target-required.md](docs/solutions/ci/doctest-lib-target-required.md) for troubleshooting.
+See [solutions/ci/doctest-lib-target-required.md](solutions/ci/doctest-lib-target-required.md) for troubleshooting.
