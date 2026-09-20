@@ -5,7 +5,7 @@
 Stunt Double 是一个计划用 Rust 实现的 Mock Server，面向需要对接真实外部依赖的集成测试。它会读取上游接口、用内置 JavaScript 或 Python 变换数据、返回文件与二进制响应，并且不依赖宿主机上的 Node.js、Python 或 JVM。
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#许可证)
-[![Status: design phase](https://img.shields.io/badge/status-design%20phase-orange.svg)](#当前状态)
+[![Status: script execution](https://img.shields.io/badge/status-script%20execution-orange.svg)](#当前状态)
 
 ## 为什么做 Stunt Double
 
@@ -21,9 +21,7 @@ Stunt Double 是一个计划用 Rust 实现的 Mock Server，面向需要对接�
 
 ## 当前状态
 
-**设计阶段。** 目前还没有可运行的服务。仓库包含产品定义、架构决策和公开演示场景。
-
-项目先收敛执行模型与安全边界，再决定实现细节。见 [plans/adr/](plans/adr/)。
+**脚本执行（T2）已落地。** `stuntdouble serve` 与 `stuntdouble validate` 读取 TOML 配置，按方法 + 路径匹配路由，并用内置 Boa 执行路由 JavaScript，宿主注入的 `ctx` 提供 `apiVersion` / `request` / `respond` / `log` / `env`。未命中路由返回 404 `not_found`；脚本异常或超时返回 500 `script_error`，未调用 `ctx.respond` 返回 500 `script_no_response`，响应均带 `request_id`。上游数据源与二进制响应待后续切片。见 [plans/adr/](plans/adr/)。
 
 ## v1 计划范围
 

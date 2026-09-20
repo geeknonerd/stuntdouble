@@ -1,6 +1,6 @@
 # CLI contract
 
-- **Status**: stable for v0.x slice T1
+- **Status**: stable for v0.x slice T2
 - **Applies to**: v0.1.0-alpha.1 and later within the same configuration family
 - **Stability**: breaking changes allowed before 1.0 with a deprecation window
 
@@ -19,7 +19,7 @@ Usage:
 stuntdouble serve --config <path> [--verbose]
 ```
 
-Starts the mock server binding to the configured address. The `--verbose` flag is currently accepted but does not emit extra diagnostics; full detail payloads land in a later slice.
+Starts the mock server binding to the configured address. Matched routes execute their JavaScript in the embedded Boa runtime with a host-injected `ctx`; unmatched routes answer 404 `not_found`. Script failures answer 500 with `script_error` or `script_no_response`. The `--verbose` flag is currently accepted but does not emit extra diagnostics; full detail payloads land in a later slice.
 
 Default config path is `stuntdouble.toml`. Configuration must include `[[routes]]`; each route specifies method, path, script location, optional name.
 
@@ -56,7 +56,7 @@ The `-c, --config` flag is global and applies to all commands:
 | --- | --- | --- |
 | `-c, --config <path>` | Select a configuration file (default `stuntdouble.toml`) | implemented |
 | `-h, --help` | Print help | implemented |
-| `-V, --version` | Print version metadata | reserved; not implemented in T1 |
+| `-V, --version` | Print version metadata (`stuntdouble <version>`) | implemented |
 
 ## Exit codes
 

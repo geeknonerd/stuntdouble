@@ -4,7 +4,7 @@
 
 Stunt Double is maintained by `@geeknonerd`. The maintainer owns merge, release, label, and security decisions.
 
-The project uses a lightweight model while it is in design phase. Decisions are made in public issues and recorded in ADRs when they are hard to reverse.
+The project uses a lightweight model while it is in early development. Decisions are made in public issues and recorded in ADRs when they are hard to reverse.
 
 ## Maintainer responsibilities
 

@@ -6,7 +6,7 @@
 | --- | --- |
 | No releases yet | Not applicable |
 
-Stunt Double has no released versions yet. The project is in design phase, so there are no supported release lines to patch. Once the first stable release exists, this table lists the supported lines.
+Stunt Double has no released versions yet. The project is in early development, with slices T1 and T2 implemented on `main`, so there are no supported release lines to patch. Once the first stable release exists, this table lists the supported lines.
 
 ## Reporting a vulnerability
 

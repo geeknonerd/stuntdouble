@@ -81,7 +81,7 @@
 
 ## 6. 待定
 
-- 实际 MSRV：候选 Rust 1.82，待 Boa 与 RustPython 版本定稿后校准。
+- 实际 MSRV：Rust 1.91（由 Boa 0.22 决定；clap 4.6 与 toml 1.x 要求 1.85）。策略是工具链跟随 stable、MSRV 取“安全门槛 + 依赖树”共同确定的实际最低值：不允许为压低 MSRV 保留未修复的 advisory 或未维护依赖。RustPython 接入后需重新校准。
 - v2 路线：SQLite 共享状态（ADR 0001 预留）、声明式响应序列、资源模型预设生成器、Admin API（模式 3）、内置 TLS。
 - crates.io 包名保留与首个发布凭据配置。
 - 独立治理邮箱；当前 Code of Conduct 使用 GitHub 私密报告。
