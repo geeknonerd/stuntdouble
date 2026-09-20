@@ -60,7 +60,7 @@ Breaking changes use `!` or a `BREAKING CHANGE:` footer.
 4. Merge the release PR. That merge authorises the release.
 5. `release-plz` creates the tag and optionally publishes to crates.io.
 6. `cargo-dist` builds release artifacts from the tag.
-7. GitHub Release, container image, checksums, attestation, and SBOM are published.
+7. GitHub Release, container image, checksums, attestation, SBOM, and the `ctx` API `.d.ts` type definitions are published.
 8. Announce the release in the repository.
 
 A failed release does not reuse or overwrite a tag. Fix the problem and publish a new patch or pre-release version. Use `cargo yank` only for a broken crates.io release; never delete a published version.
@@ -78,6 +78,7 @@ Every release includes:
 - SBOM (CycloneDX or SPDX)
 - container image `ghcr.io/geeknonerd/stuntdouble:<tag>` with a published digest
 - GitHub Release notes
+- `ctx` API `.d.ts` type definitions for every supported `apiVersion` (source: `types/ctx-api-v1.d.ts`)
 
 Build artifacts only from tags. Never publish binaries built from `main`.
 

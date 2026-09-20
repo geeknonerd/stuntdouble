@@ -9,6 +9,7 @@ How the engineering skills should consume this repo's domain documentation when 
 - **`plans/product-definition.md`** — v1 scope, host API contract, and the do-not-build list.
 - **`plans/demo-document-catalog.md`** — the public demo scenario for CSV manifest generation and binary download.
 - **`docs/contracts/`** — configuration, `ctx` API, and CLI contracts.
+- **`types/ctx-api-v1.d.ts`** — source type definitions for the implemented `ctx` apiVersion 1 subset.
 - **`docs/development.md`** — Git workflow, CI, versioning, and release rules.
 
 If a file doesn't exist, **proceed silently**. Don't flag its absence. `CONTEXT.md` is updated when a domain term is resolved.
@@ -27,13 +28,16 @@ This repo is **single-context**:
 ├── SECURITY.md
 ├── CHANGELOG.md
 ├── CONTEXT.md          ← project glossary
+├── types/              ← apiVersion 1 `ctx` type definitions
 ├── src/                ← config, matcher, script, server, upstream (internal) modules
 ├── tests/              ← end-to-end checks through the built binary
 ├── docs/
 │   ├── README.md
+│   ├── index.md
 │   ├── development.md
 │   ├── contracts/
-│   └── agents/
+│   ├── agents/
+│   └── solutions/
 ├── plans/
 │   ├── README.md
 │   ├── product-definition.md

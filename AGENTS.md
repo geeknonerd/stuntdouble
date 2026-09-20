@@ -26,16 +26,20 @@ Stunt Double 是 Rust 实现的 Mock Server，面向对接真实外部依赖的�
 /
 ├── AGENTS.md              # 本文件
 ├── CONTRIBUTING.md        # 贡献指南
-├── ... (see REAMDE.md for full list)
+├── ... (see README.md for full list)
 ├── src/
-│   ├── lib.rs            # 公共模块：config, matcher, server
-│   └── main.rs           # CLI entry point
-├── tests/                # e2e & unit tests
+│   ├── lib.rs            # 公共模块：config, matcher, script, server；upstream 为内部模块
+│   ├── main.rs           # CLI entry point
+│   └── ...               # config, matcher, script, server, upstream 实现
+├── tests/                # 通过构建出的二进制做端到端测试
+├── types/
+│   └── ctx-api-v1.d.ts   # apiVersion 1 类型定义（T8 发布）
 ├── docs/
 │   ├── README.md                     # 文档索引
+│   ├── index.md                      # GitHub Pages 首页
 │   ├── development.md                # 开发与发布流程
 │   ├── contracts/                    # 公开契约（配置、ctx API、CLI）
-│   └── agents/                       # issue tracker、labels、domain 文档
+│   ├── agents/                       # issue tracker、labels、domain 文档
 │   └── solutions/                    # 已解决问题的学习记录（ce-compound）
 ├── plans/
 │   ├── product-definition.md

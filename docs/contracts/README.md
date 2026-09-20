@@ -4,9 +4,9 @@ Stunt Double exposes three public contracts. They evolve separately and are trac
 
 | Contract | Status | Applies to | Stability |
 | --- | --- | --- | --- |
-| [Configuration](config.md) | draft | v0.x | Breaking changes allowed before 1.0 with a deprecation window |
-| [`ctx` API](ctx-api.md) | draft | `apiVersion` 1 | Additive within an `apiVersion`; removals require a new version |
-| [CLI](cli.md) | draft | v0.x | Breaking changes allowed before 1.0 with a deprecation window |
+| [Configuration](config.md) | stable for v0.x slice T4 | v0.x | Breaking changes allowed before 1.0 with a deprecation window |
+| [`ctx` API](ctx-api.md) | draft (T4 subset implemented) | `apiVersion` 1 | Additive within an `apiVersion`; removals require a new version |
+| [CLI](cli.md) | stable for v0.x slice T4 | v0.x | Breaking changes allowed before 1.0 with a deprecation window |
 
 ## Change process
 
@@ -14,7 +14,7 @@ Stunt Double exposes three public contracts. They evolve separately and are trac
 2. Update `CHANGELOG.md` with the user-visible change and migration note.
 3. Warn for at least one minor version before removing or renaming a public surface.
 4. Record a hard-to-reverse compatibility decision as an ADR under `plans/adr/`.
-5. For the `ctx` API, update the matching `.d.ts` file when the contract changes.
+5. For the `ctx` API, update the matching `.d.ts` file when the contract changes. The apiVersion 1 source definition lives at [`types/ctx-api-v1.d.ts`](../../types/ctx-api-v1.d.ts).
 
 ## Versioning rules
 

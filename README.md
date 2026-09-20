@@ -2,7 +2,7 @@
 
 > **A test double that plays the whole show.**
 
-Stunt Double is a Rust-based mock server for integration testing against real external dependencies. It reads upstream APIs, transform data with built-in JavaScript or Python, return files and binary responses, and run with zero host runtime dependencies.
+Stunt Double is a Rust-based mock server for integration testing against real external dependencies. It reads upstream APIs, transforms data with built-in JavaScript or Python, returns files and binary responses, and runs with zero host runtime dependencies.
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![Status: upstream HTTP](https://img.shields.io/badge/status-upstream%20http-orange.svg)](#status)
@@ -35,7 +35,7 @@ cargo install --path .   # or: cargo run -- serve --config stuntdouble.toml
 - Built-in JavaScript runtime: Boa.
 - Built-in Python runtime: RustPython with a stdlib subset.
 - Host-injected `ctx` API. No raw `fetch`, `fs`, `os`, `subprocess`, or `socket`.
-- Upstream HTTP, static file reads, file streaming, uploads, and Range responses.
+- Upstream HTTP (`ctx.http.get` implemented; request/pipe pending), static file reads, file streaming, uploads, and Range responses.
 - One static file root with path traversal protection.
 - Static configuration with restart. Hot reload and Admin API are deferred.
 - Linux x86_64, macOS arm64, and Windows x86_64 binaries plus a container image.
