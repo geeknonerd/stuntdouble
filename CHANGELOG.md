@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `stuntdouble serve` starts the mock server, accepts numeric bind addresses (127.0.0.1 default) and port (3000 default). Unmatched routes return 404; matched routes return 501 `script_unimplemented` pending transform slices.
 - Each request generates unique request_id (non-crypto), logged per-request and included in error responses (404/501) via body and `X-Request-ID` header.
 - CI gates activated for fmt, clippy (pedantic), tests, docs, deny, audit, MSRV (1.82 candidate).
+- Bin+lib crate structure enables `cargo test --doc`: src/lib.rs exports config/matcher/server modules; src/main.rs imports from stuntdouble::{config,server}. See [docs/solutions/ci/doctest-lib-target-required.md](docs/solutions/ci/doctest-lib-target-required.md).
 
 ### Changed
 - Contract documents marked stable for v0.x slice T1: `docs/contracts/config.md` now includes complete route schema and validation rules; `docs/contracts/cli.md` documents implemented commands and exit codes.

@@ -4,7 +4,7 @@ This document describes how to contribute code and changes to the repository. Pl
 
 ## Project status
 
-The project is in design phase: there is no runnable server yet. The repository currently contains product definition, architecture decisions (ADRs), and research notes.
+The first slice (T1) is implemented: `stuntdouble serve` and `stuntdouble validate` run against a TOML configuration and answer 404/501 with `request_id`. Script transforms, upstream sources, and binary responses land in later slices. Product definition, architecture decisions (ADRs), and research notes remain the design source of truth.
 
 ## Scope alignment
 

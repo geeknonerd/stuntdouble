@@ -14,8 +14,8 @@
 
 ## 项目快照
 
-- Stunt Double 是 Rust 实现的 Mock Server，面向对接真实外部依赖的集成联调。
-- 当前处于设计阶段，尚无 Rust 实现代码。
+Stunt Double 是 Rust 实现的 Mock Server，面向对接真实外部依赖的集成联调。第一版（T1）已落地 `serve`/`validate` 子命令与 TOML 配置加载、路由匹配、HTTP 404/501 响应以及结构化日志；脚本运行时和上游数据源待后续切片完善。
+仓库采用 bin+lib 结构：src/lib.rs 暴露公共模块（config/matcher/server），src/main.rs 作为 CLI entry point。详见 [docs/solutions/ci/doctest-lib-target-required.md](docs/solutions/ci/doctest-lib-target-required.md)）。
 - 核心能力：外部数据源、脚本变换、文件与二进制响应、内置 JS/Python、零外部运行时依赖。
 - 所有接口只有一条执行模型：`match → source → transform → response`。
 - 详细范围见 [plans/product-definition.md](plans/product-definition.md)。
@@ -25,21 +25,23 @@
 ```text
 /
 ├── AGENTS.md              # 本文件
-├── README.md              # 英文主 README
-├── README.zh-CN.md        # 中文 README
-├── CONTEXT.md             # 领域词汇表
-├── GOVERNANCE.md          # 治理与响应预期
-├── CHANGELOG.md           # 变更日志
+├── CONTRIBUTING.md        # 贡献指南
+├── ... (see REAMDE.md for full list)
+├── src/
+│   ├── lib.rs            # 公共模块：config, matcher, server
+│   └── main.rs           # CLI entry point
+├── tests/                # e2e & unit tests
 ├── docs/
-│   ├── README.md          # 文档索引
-│   ├── development.md     # 开发与发布流程
-│   ├── contracts/         # 公开契约
-│   └── agents/            # issue tracker、labels、domain 文档
+│   ├── README.md                     # 文档索引
+│   ├── development.md                # 开发与发布流程
+│   ├── contracts/                    # 公开契约（配置、ctx API、CLI）
+│   └── agents/                       # issue tracker、labels、domain 文档
+│   └── solutions/                    # 已解决问题的学习记录（ce-compound）
 ├── plans/
 │   ├── product-definition.md
 │   ├── demo-document-catalog.md
-│   └── adr/               # ADR 0001–0012
-└── research/              # 调研与选型证据
+│   └── adr/                          # ADR 0001–0012
+└── research/                         # 调研与选型证据
 ```
 
 ## 不可破坏约束

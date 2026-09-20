@@ -16,6 +16,8 @@ This directory holds the operational, contractual, and agent-facing documentatio
 - [Product definition](../plans/product-definition.md) — v1 scope and non-goals.
 - [Architecture decisions](../plans/adr/) — ADR 0001–0012.
 - [Research](../research/) — mock server landscape, runtime selection, and open-source baseline.
+- [Solutions](../docs/solutions/) — learnings and resolved problems via ce-compound.
+
 - [Governance](../GOVERNANCE.md) — maintainer model and response expectations.
 - [Security policy](../SECURITY.md) — vulnerability reporting and security expectations.
 - [Changelog](../CHANGELOG.md) — release history.
