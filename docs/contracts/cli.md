@@ -47,11 +47,14 @@ Exit code `2` when the configuration fails. `0` otherwise.
 
 ## Global flags
 
-Global flags apply to all commands.
+The `-c, --config` flag is global and applies to all commands:
+
+- `stuntdouble --config x serve` — equivalent to `stuntdouble serve --config x`
+- `stuntdouble --config x validate` — equivalent to `stuntdouble validate --config x`
 
 | Flag | Purpose | Status |
 | --- | --- | --- |
-| `-c, --config <path>` | Select a configuration file | implemented |
+| `-c, --config <path>` | Select a configuration file (default `stuntdouble.toml`) | implemented |
 | `-h, --help` | Print help | implemented |
 | `-V, --version` | Print version metadata | reserved; not implemented in T1 |
 

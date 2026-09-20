@@ -18,6 +18,9 @@ const DEFAULT_CONFIG: &str = "stuntdouble.toml";
     about = "Mock server for integration testing"
 )]
 struct Cli {
+    /// Configuration file
+    #[arg(short = 'c', long, global = true, default_value = DEFAULT_CONFIG)]
+    config: PathBuf,
     #[command(subcommand)]
     command: Commands,
 }
@@ -26,26 +29,20 @@ struct Cli {
 enum Commands {
     /// Start the mock server
     Serve {
-        /// Configuration file
-        #[arg(short, long, default_value = DEFAULT_CONFIG)]
-        config: PathBuf,
         /// Attach a detail field to 502/500 responses
         #[arg(long)]
         verbose: bool,
     },
     /// Validate the configuration file and exit
-    Validate {
-        /// Configuration file
-        #[arg(short, long, default_value = DEFAULT_CONFIG)]
-        config: PathBuf,
-    },
+    Validate,
 }
 
 fn main() {
     let cli = Cli::parse();
+    let path = cli.config.as_path();
     let code = match cli.command {
-        Commands::Serve { config, verbose } => serve(&config, verbose),
-        Commands::Validate { config } => validate(&config),
+        Commands::Serve { verbose } => serve(path, verbose),
+        Commands::Validate => validate(path),
     };
     std::process::exit(code);
 }
@@ -82,7 +79,6 @@ fn serve(path: &Path, verbose: bool) -> i32 {
             return 2;
         }
     };
-    eprintln!("stuntdouble listening on http://{addr}");
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -93,7 +89,8 @@ fn serve(path: &Path, verbose: bool) -> i32 {
             return 3;
         }
     };
-    match runtime.block_on(server::run(config)) {
+    // run() binds the socket and only then announces the listening address.
+    match runtime.block_on(server::run(config, addr)) {
         Ok(()) => 0,
         Err(err) => {
             eprintln!("runtime error: {err}");

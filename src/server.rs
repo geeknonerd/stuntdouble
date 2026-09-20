@@ -10,20 +10,23 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::io;
 use std::io::Write;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 pub struct AppState {
     config: Config,
+    host: String,
     sequence: AtomicU64,
 }
 
 impl AppState {
-    fn new(config: Config) -> Self {
+    fn new(config: Config, addr: SocketAddr) -> Self {
+        let host = addr.to_string();
         Self {
             config,
+            host,
             sequence: AtomicU64::new(0),
         }
     }
@@ -42,7 +45,7 @@ impl AppState {
 
 /// Bind address from configuration. Only numeric IP accepted in T1.
 pub fn bind_address(config: &Config) -> io::Result<SocketAddr> {
-    let ip: IpAddr = config.server.bind.parse().map_err(|_| {
+    let ip: std::net::IpAddr = config.server.bind.parse().map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
@@ -54,10 +57,12 @@ pub fn bind_address(config: &Config) -> io::Result<SocketAddr> {
     Ok(SocketAddr::new(ip, config.server.port))
 }
 
-pub async fn run(config: Config) -> io::Result<()> {
-    let addr = bind_address(&config)?;
+pub async fn run(config: Config, addr: SocketAddr) -> io::Result<()> {
+    // Tradeoff: only log "listening" after socket binds successfully.
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    let state = Arc::new(AppState::new(config));
+    let bound = listener.local_addr()?;
+    eprintln!("stuntdouble listening on http://{bound}");
+    let state = Arc::new(AppState::new(config, bound));
     let app = Router::new().fallback(any(handle)).with_state(state);
     axum::serve(listener, app).await
 }
@@ -109,6 +114,7 @@ async fn handle(
         "elapsed_ms": (elapsed_ms * 100.0).round() / 100.0,
         "params": params,
         "client_request_id": client_request_id,
+        "host": state.host.clone(),
     });
     log(&payload);
 

@@ -1,4 +1,3 @@
-#![allow(clippy::struct_field_names, clippy::single_match_else)]
 // Configuration contract: docs/contracts/config.md
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -6,6 +5,9 @@ use std::path::{Path, PathBuf};
 const HTTP_METHODS: [&str; 7] = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"];
 
 #[derive(Debug, Clone)]
+// Field mirrors the public TOML key `config_version`; renaming it would break
+// the configuration contract, so the pedantic lint is suppressed here only.
+#[allow(clippy::struct_field_names)]
 pub struct Config {
     pub config_version: String,
     pub server: ServerConfig,

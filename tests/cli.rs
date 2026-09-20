@@ -247,6 +247,10 @@ fn validate_reports_toml_syntax_position() {
     let (code, _, stderr) = run(&["validate", "--config", config.to_str().unwrap()]);
     assert_eq!(code, 2, "stderr: {stderr}");
     assert!(stderr.contains("invalid TOML"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("line") && stderr.contains("column"),
+        "position missing: {stderr}"
+    );
 }
 
 #[test]
@@ -343,6 +347,11 @@ fn each_request_writes_one_structured_log_line() {
     assert!(
         lines[0].contains("\"elapsed_ms\":"),
         "duration missing: {}",
+        lines[0]
+    );
+    assert!(
+        lines[0].contains("\"host\":"),
+        "listen host missing: {}",
         lines[0]
     );
 }
