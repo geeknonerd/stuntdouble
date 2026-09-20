@@ -2,10 +2,10 @@
 
 > **A test double that plays the whole show.**
 
-Stunt Double is a planned Rust-based mock server for integration testing against real external dependencies. It is designed to read upstream APIs, transform data with built-in JavaScript or Python, return files and binary responses, and run with zero host runtime dependencies.
+Stunt Double is a Rust-based mock server for integration testing against real external dependencies. It reads upstream APIs, transform data with built-in JavaScript or Python, return files and binary responses, and run with zero host runtime dependencies.
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
-[![Status: design phase](https://img.shields.io/badge/status-design%20phase-orange.svg)](#status)
+[![Status: first slice](https://img.shields.io/badge/status-first%20slice-orange.svg)](#status)
 
 ## Why Stunt Double
 
@@ -21,9 +21,13 @@ The design goal is a single binary that behaves like the real dependency closely
 
 ## Status
 
-**Design phase.** There is no runnable server yet. The repository currently contains product definition, architecture decisions, and a public demo scenario.
+**First slice (T1) implemented.** `stuntdouble serve` and `stuntdouble validate` run from a TOML configuration, match routes by method and path (`:param` capture), and answer 404 `not_found` or 501 `script_unimplemented` with a `request_id`. Script transforms, upstream sources, and binary responses are the next slices.
 
-The project is intentionally starting with the execution model and security boundaries before choosing implementation details. See [plans/adr/](plans/adr/).
+The execution model and security boundaries were fixed before implementation details. See [plans/adr/](plans/adr/) and [docs/solutions/](docs/solutions/).
+
+```bash
+cargo install --path .   # or: cargo run -- serve --config stuntdouble.toml
+```
 
 ## Planned v1
 

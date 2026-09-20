@@ -125,12 +125,17 @@ Non-trivial logic needs one small runnable check. Sandbox, path traversal, and u
 
 ## Release automation activation
 
-The following items are intentionally deferred until the first crate exists:
+All items below must be added after the first crate lands:
 
 - `release-plz` workflow and `CARGO_REGISTRY_TOKEN`
 - `cargo-dist` configuration and release workflow
 - container build and GHCR publishing
-- MSRV value in `Cargo.toml`
 - CodeQL or other advanced code scanning
 
-Add them in the first implementation slice, before the first public release.
+Note: MSRV (`rust-version`) is already declared in [Cargo.toml](../Cargo.toml) as a candidate for validation.
+
+## Build notes
+
+Rust crate uses bin+lib structure: src/lib.rs defines the library; src/main.rs imports from stuntdouble::{config,server}. This setup enables `cargo test --doc` and `cargo doc --no-deps` to find a library target. When adding new crates later, ensure this pattern continues so CI gates remain green.
+
+See [docs/solutions/ci/doctest-lib-target-required.md](docs/solutions/ci/doctest-lib-target-required.md) for troubleshooting.
