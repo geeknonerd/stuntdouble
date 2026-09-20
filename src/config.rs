@@ -293,6 +293,8 @@ fn validate_script_extension(script: &str, prefix: &str, v: &mut Vec<Violation>)
     }
 }
 
+/// Must use result to avoid silent failures.
+#[must_use]
 pub fn normalize_method(method: &str) -> Option<String> {
     let upper = method.to_ascii_uppercase();
     HTTP_METHODS.contains(&upper.as_str()).then_some(upper)

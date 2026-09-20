@@ -8,6 +8,8 @@ pub struct Match {
 }
 
 /// Return the first route that handles this method and path. Declaration order wins.
+/// Must use result to avoid silent drop of matched routes.
+#[must_use]
 pub fn match_route(routes: &[Route], method: &str, path: &str) -> Option<Match> {
     let method = method.to_ascii_uppercase();
     let segments = split(path);

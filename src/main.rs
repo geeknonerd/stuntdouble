@@ -4,10 +4,7 @@
 
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
-
-mod config;
-mod matcher;
-mod server;
+use stuntdouble::{config, server};
 
 const DEFAULT_CONFIG: &str = "stuntdouble.toml";
 
