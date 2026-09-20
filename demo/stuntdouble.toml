@@ -1,0 +1,24 @@
+# Demo fixture for the manifest scenario in plans/demo-document-catalog.md §3.1.
+#
+#   METADATA_API_URL=https://metadata.example.com/demo/documents \
+#     stuntdouble serve --config demo/stuntdouble.toml
+#
+# METADATA_API_URL is optional: the script falls back to the same public demo
+# URL. Only hosts listed in [upstream] allow_hosts can be reached.
+config_version = "1"
+
+[server]
+bind = "127.0.0.1"
+port = 3000
+
+[files]
+root = "./files"
+
+[upstream]
+allow_hosts = ["metadata.example.com"]
+
+[[routes]]
+name = "document-manifest"
+method = "GET"
+path = "/demo/documents/manifest/:group"
+script = "scripts/manifest.js"

@@ -5,7 +5,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -205,6 +205,7 @@ struct Upstream {
     port: u16,
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
+    requests: Arc<Mutex<Vec<String>>>,
 }
 
 impl Upstream {
@@ -216,12 +217,18 @@ impl Upstream {
         let port = listener.local_addr().expect("upstream addr").port();
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let thread_requests = Arc::clone(&requests);
         let handle = std::thread::spawn(move || {
             let mut next = 0;
             while !thread_stop.load(Ordering::Relaxed) && next < responses.len() {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        read_upstream_request(&mut stream);
+                        let head = read_upstream_request_head(&mut stream);
+                        thread_requests
+                            .lock()
+                            .expect("upstream requests lock")
+                            .push(head);
                         let response = &responses[next];
                         next += 1;
                         let wake = Instant::now() + response.delay;
@@ -262,11 +269,20 @@ impl Upstream {
             port,
             stop,
             handle: Some(handle),
+            requests,
         }
     }
 
     fn url(&self, path: &str) -> String {
         format!("http://127.0.0.1:{}{path}", self.port)
+    }
+
+    /// Request heads received so far, in arrival order.
+    fn requests(&self) -> Vec<String> {
+        self.requests
+            .lock()
+            .expect("upstream requests lock")
+            .clone()
     }
 }
 
@@ -279,7 +295,7 @@ impl Drop for Upstream {
     }
 }
 
-fn read_upstream_request(stream: &mut TcpStream) {
+fn read_upstream_request_head(stream: &mut TcpStream) -> String {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let mut head = Vec::new();
     let mut chunk = [0_u8; 2048];
@@ -292,6 +308,7 @@ fn read_upstream_request(stream: &mut TcpStream) {
             break;
         }
     }
+    String::from_utf8_lossy(&head).into_owned()
 }
 
 /// Add the [upstream] allowlist required by ctx.http.get.
@@ -326,7 +343,17 @@ fn with_server_full<T>(
     let dir = tempfile::tempdir().expect("tempdir");
     let port = reserve_port();
     let config = fixture_with_script(dir.path(), port, config_body, script);
-    let mut child = serve_with_env(&config, env);
+    serve_and_run(&config, port, env, run_tests)
+}
+
+/// Serve one configuration and hand back the test result plus server stderr.
+fn serve_and_run<T>(
+    config: &Path,
+    port: u16,
+    env: &[(&str, &str)],
+    run_tests: impl FnOnce(u16) -> T,
+) -> (T, String) {
+    let mut child = serve_with_env(config, env);
     wait_ready(port, &mut child);
     let value = run_tests(port);
     child.kill().expect("kill server");
@@ -1149,5 +1176,184 @@ fn validate_rejects_invalid_allow_hosts() {
     assert!(
         stderr.contains("upstream.allow_hosts[1]"),
         "stderr: {stderr}"
+    );
+}
+
+// Demo fixture: the in-repo configuration plus script from
+// plans/demo-document-catalog.md §3.1 must produce the catalog contract
+// through the built binary and a stdlib fake upstream.
+
+/// Root of the in-repo demo fixture.
+const DEMO_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/demo");
+
+/// Copy the repository demo fixture into `dir`, moving it onto the test port
+/// and allowlisting the loopback fake upstream. Returns the config path.
+fn demo_fixture(dir: &Path, port: u16) -> PathBuf {
+    let source = Path::new(DEMO_DIR);
+    let config =
+        std::fs::read_to_string(source.join("stuntdouble.toml")).expect("read demo config");
+    let port_marker = "port = 3000";
+    let hosts_marker = "allow_hosts = [\"metadata.example.com\"]";
+    assert!(config.contains(port_marker), "demo config moved: {config}");
+    assert!(config.contains(hosts_marker), "demo config moved: {config}");
+    let config = config
+        .replacen(port_marker, &format!("port = {port}"), 1)
+        .replacen(
+            hosts_marker,
+            "allow_hosts = [\"metadata.example.com\", \"127.0.0.1\"]",
+            1,
+        );
+    std::fs::create_dir_all(dir.join("files")).expect("files dir");
+    std::fs::create_dir_all(dir.join("scripts")).expect("scripts dir");
+    std::fs::copy(
+        source.join("scripts/manifest.js"),
+        dir.join("scripts/manifest.js"),
+    )
+    .expect("copy demo script");
+    let path = dir.join("stuntdouble.toml");
+    std::fs::write(&path, config).expect("write demo config");
+    path
+}
+
+/// Serve a copy of the repository demo fixture with `env` set.
+fn with_demo<T>(env: &[(&str, &str)], run_tests: impl FnOnce(u16) -> T) -> (T, String) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let port = reserve_port();
+    let config = demo_fixture(dir.path(), port);
+    serve_and_run(&config, port, env, run_tests)
+}
+
+fn demo_manifest_request(port: u16, headers: &[(&str, &str)]) -> Response {
+    request(port, "GET", "/demo/documents/manifest/group-a", headers)
+}
+
+/// Run one manifest request against a served demo fixture whose
+/// `METADATA_API_URL` points at `upstream`.
+fn manifest_response(upstream: &Upstream, headers: &[(&str, &str)]) -> Response {
+    let url = upstream.url("/demo/documents");
+    let (response, _) = with_demo(&[("METADATA_API_URL", url.as_str())], |port| {
+        demo_manifest_request(port, headers)
+    });
+    response
+}
+
+fn assert_metadata_bad_gateway(response: &Response) {
+    assert_eq!(response.status, 502, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("metadata_bad_gateway"),
+        "body: {}",
+        response.body
+    );
+}
+
+#[test]
+fn repository_demo_configuration_validates() {
+    let config = format!("{DEMO_DIR}/stuntdouble.toml");
+    let (code, _, stderr) = run(&["validate", "--config", &config]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+}
+
+#[test]
+fn demo_manifest_route_returns_the_catalog_csv() {
+    let metadata = r#"{"data":[
+{"code":"DOC-0001","title":"示例设备 A 安装手册","system_code":"SYS-A","pdf_url":"http://files.example.com/demo/documents/DOC-0001.pdf"},
+{"code":"DOC-0002","title":"示例设备 B 运行手册","system_code":"SYS-B","pdf_url":"http://files.example.com/demo/documents/DOC-0002.pdf"}
+]}"#;
+    let upstream = Upstream::start(vec![UpstreamResponse::new(200, metadata.as_bytes())]);
+    let response = manifest_response(&upstream, &[]);
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(
+        response.header("content-type"),
+        Some("text/plain; charset=utf-8")
+    );
+    assert_eq!(
+        response.body,
+        "文件编码,文件标题,系统代码\n\
+         DOC-0001,示例设备 A 安装手册,SYS-A\n\
+         DOC-0002,示例设备 B 运行手册,SYS-B\n"
+    );
+}
+
+#[test]
+fn demo_manifest_route_escapes_csv_fields() {
+    let metadata = r#"{"data":[
+{"code":"DOC-0003","title":"示例,设备 \"A\"\n第二行","system_code":"SYS,C"},
+{"code":"DOC-0004","title":"回车\r换行","system_code":"SYS-D"}
+]}"#;
+    let upstream = Upstream::start(vec![UpstreamResponse::new(200, metadata.as_bytes())]);
+    let response = manifest_response(&upstream, &[]);
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(
+        response.body,
+        "文件编码,文件标题,系统代码\n\
+         DOC-0003,\"示例,设备 \"\"A\"\"\n第二行\",\"SYS,C\"\n\
+         DOC-0004,\"回车\r换行\",SYS-D\n"
+    );
+}
+
+#[test]
+fn demo_manifest_route_returns_header_only_for_empty_data() {
+    let upstream = Upstream::start(vec![UpstreamResponse::new(200, b"{\"data\":[]}")]);
+    let response = manifest_response(&upstream, &[]);
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(response.body, "文件编码,文件标题,系统代码\n");
+}
+
+#[test]
+fn demo_manifest_route_maps_metadata_non_2xx_to_502() {
+    let upstream = Upstream::start(vec![
+        UpstreamResponse::new(404, b"missing"),
+        UpstreamResponse::new(503, b"unavailable"),
+    ]);
+    assert_metadata_bad_gateway(&manifest_response(&upstream, &[]));
+    assert_metadata_bad_gateway(&manifest_response(&upstream, &[]));
+}
+
+#[test]
+fn demo_manifest_route_maps_unusable_metadata_to_502() {
+    let upstream = Upstream::start(vec![
+        UpstreamResponse::new(200, b"not-json"),
+        UpstreamResponse::new(200, b"{}"),
+        UpstreamResponse::new(200, b"{\"data\":{}}"),
+    ]);
+    assert_metadata_bad_gateway(&manifest_response(&upstream, &[]));
+    assert_metadata_bad_gateway(&manifest_response(&upstream, &[]));
+    assert_metadata_bad_gateway(&manifest_response(&upstream, &[]));
+}
+
+#[test]
+fn demo_manifest_route_maps_unreachable_metadata_to_502() {
+    let url = format!("http://127.0.0.1:{}/demo/documents", closed_port());
+    let (response, _) = with_demo(&[("METADATA_API_URL", url.as_str())], |port| {
+        demo_manifest_request(port, &[])
+    });
+    assert_metadata_bad_gateway(&response);
+}
+
+#[test]
+fn demo_manifest_route_does_not_forward_client_request_id() {
+    let upstream = Upstream::start(vec![UpstreamResponse::new(200, b"{\"data\":[]}")]);
+    let response = manifest_response(&upstream, &[("X-Request-ID", "key")]);
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert!(
+        response.header("x-request-id").is_some(),
+        "server must still mint its own request id"
+    );
+    let requests = upstream.requests();
+    assert_eq!(requests.len(), 1, "upstream calls: {requests:?}");
+    let head = requests[0].to_ascii_lowercase();
+    // Positive control: the capture holds a real request head, so the
+    // negative assertions below cannot pass on an empty recording.
+    assert!(head.contains("host:"), "recorded head: {}", requests[0]);
+    assert!(
+        head.starts_with("get /demo/documents "),
+        "unexpected upstream request: {}",
+        requests[0]
+    );
+    assert!(
+        !head.contains("x-request-id"),
+        "client header leaked upstream: {}",
+        requests[0]
     );
 }
