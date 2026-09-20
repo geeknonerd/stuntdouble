@@ -85,10 +85,12 @@ Signing starts with GitHub artifact attestation. Add Sigstore/cosign only when o
 
 ## Rust toolchain and MSRV
 
-- `rust-toolchain.toml` pins the development toolchain and required components.
-- `Cargo.toml` declares `rust-version` once the crate exists.
-- CI runs stable on Linux, macOS, and Windows, plus an MSRV job on Linux.
-- The initial MSRV candidate is Rust 1.82, to be re-checked when Boa and RustPython are wired in.
+- `rust-toolchain.toml` selects the `stable` channel plus the required components, so local builds and CI always use the latest stable Rust (1.98 at the time of writing). It never pins a fixed older version.
+- `Cargo.toml` declares `rust-version`, the MSRV floor rather than the toolchain used to build. Any stable release at or above that floor is supported.
+- CI runs the main gates on stable across Linux, macOS, and Windows, plus one MSRV job that builds with the exact `rust-version` to catch accidental use of newer language features.
+- The MSRV is the lowest version that satisfies both the dependency tree and the security gates, currently Rust 1.91 (set by Boa 0.22; clap 4.6 and toml 1.x require 1.85).
+- Never lower the MSRV by holding a dependency at a version with an unfixed advisory or by depending on an unmaintained crate. Boa 0.20 / 0.21 still pull in the archived `paste` crate and need a `time` version affected by RUSTSEC-2026-0009, so `cargo deny check advisories` fails for those lines; the advisory-clean Boa line wins even though its MSRV is higher.
+- A dependency upgrade that raises the MSRV must state that cost in the PR and update `Cargo.toml`, this document, and `plans/product-definition.md` together.
 - `unsafe` is denied by default. Any exception needs a comment explaining the invariant.
 
 ## Required local checks
@@ -132,7 +134,7 @@ All items below must be added after the first crate lands:
 - container build and GHCR publishing
 - CodeQL or other advanced code scanning
 
-Note: MSRV (`rust-version`) is already declared in [Cargo.toml](../Cargo.toml) as a candidate for validation.
+Note: MSRV (`rust-version`) is declared in [Cargo.toml](../Cargo.toml) and must stay equal to the highest requirement in the dependency tree; the MSRV CI job builds with exactly that version.
 
 ## Build notes
 

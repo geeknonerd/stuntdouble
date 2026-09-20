@@ -27,6 +27,8 @@ This repo is **single-context**:
 ├── SECURITY.md
 ├── CHANGELOG.md
 ├── CONTEXT.md          ← project glossary
+├── src/                ← config, matcher, script, server modules
+├── tests/              ← end-to-end checks through the built binary
 ├── docs/
 │   ├── README.md
 │   ├── development.md

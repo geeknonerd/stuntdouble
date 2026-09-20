@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Second implementation slice (T2): embedded Boa runtime executes each matched route script with a host-injected `ctx` (`apiVersion`, `request`, `respond`, `log`, `env`); script errors, timeouts, and missing responses map to 500 with stable error classes and a `request_id`.
+- Optional `[sandbox]` configuration table with `script_timeout_ms` (default 10000, must be positive). Timeout enforcement is deadline-based with a loop-iteration backstop, because Boa 0.22 exposes no interrupt hook.
+- Route scripts may return text or byte bodies through `ctx.respond`; `ctx.log.*` records stay in server logs and never reach clients.
+- Dependencies refreshed on latest compatible releases: `toml` upgraded to 1.x (the loader now calls `toml::from_str`, because toml 1.x `FromStr` parses a single value rather than a document); clap, tokio, axum, and serde_json were already current.
+- MSRV is Rust 1.91, set by Boa 0.22 (clap 4.6 and toml 1.x require 1.85). Boa 0.20 / 0.21 were evaluated for their lower MSRV, but their dependency chain still uses the archived `paste` crate and keeping the MSRV low would pin `time` to a version affected by RUSTSEC-2026-0009; `cargo deny check advisories` must pass, so the advisory-clean Boa line wins.
 - First implementation slice (T1): Cargo project with clap CLI (`serve`/`validate`), TOML config loader with fail-closed schema, route matching (method + path/:param), HTTP 404/501 responses with request_id correlation, and per-request structured logging.
 - `stuntdouble validate` command checks configuration syntax and semantics without binding sockets; reports violations with dotted field paths, expected shapes, and actual values.
 - Global `-c/--config` flag usable before or after the subcommand (`stuntdouble --config x serve` and `stuntdouble serve --config x`); defaults to `stuntdouble.toml`.

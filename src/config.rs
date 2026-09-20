@@ -12,7 +12,15 @@ pub struct Config {
     pub config_version: String,
     pub server: ServerConfig,
     pub files: FilesConfig,
+    pub sandbox: SandboxConfig,
     pub routes: Vec<Route>,
+}
+
+/// Script execution limits. The timeout is a wall-clock deadline enforced by
+/// the host; see `script::execute` for the Boa 0.22 interruption ceiling.
+#[derive(Debug, Clone)]
+pub struct SandboxConfig {
+    pub script_timeout_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -101,13 +109,15 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
         reason: e.to_string(),
     })?;
 
-    let root: toml::Value = text
-        .parse()
-        .map_err(|e: toml::de::Error| ConfigError::Syntax {
+    // NOTE: `toml::from_str` parses a document; `str::parse::<toml::Value>`
+    // parses a single inline value as of toml 1.x and rejects whole documents.
+    let root: toml::Value = toml::from_str(&text).map_err(|e: toml::de::Error| {
+        ConfigError::Syntax {
             path: path.to_path_buf(),
-            // toml_edit renders syntax errors with line and column.
+            // the parser renders syntax errors with line and column.
             message: e.to_string(),
-        })?;
+        }
+    })?;
 
     let Some(root_table) = root.as_table() else {
         return Err(schema_error(path, vec![bad("(root)", "table", &root)]));
@@ -116,7 +126,7 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
     let mut v = Vec::new();
     reject_unknown(
         root_table,
-        &["config_version", "server", "files", "routes"],
+        &["config_version", "server", "files", "sandbox", "routes"],
         "",
         &mut v,
     );
@@ -171,6 +181,9 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
         }
     };
 
+    // Optional: an absent [sandbox] keeps every default.
+    let sandbox = parse_sandbox(root_table, &mut v);
+
     let routes = parse_routes(root_table, path, &mut v);
 
     if !v.is_empty() {
@@ -193,6 +206,7 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
         config_version,
         server,
         files: FilesConfig { root: root_dir },
+        sandbox,
         routes,
     })
 }
@@ -201,6 +215,32 @@ fn schema_error(path: &Path, violations: Vec<Violation>) -> ConfigError {
     ConfigError::Schema {
         path: path.to_path_buf(),
         violations,
+    }
+}
+
+/// Parse the optional `[sandbox]` table; absent fields keep their defaults.
+fn parse_sandbox(root: &Table, v: &mut Vec<Violation>) -> SandboxConfig {
+    let defaults = SandboxConfig {
+        script_timeout_ms: default_script_timeout_ms(),
+    };
+    match root.get("sandbox") {
+        None => defaults,
+        Some(toml::Value::Table(t)) => {
+            reject_unknown(t, &["script_timeout_ms"], "sandbox", v);
+            SandboxConfig {
+                script_timeout_ms: opt_duration_ms(
+                    t,
+                    "script_timeout_ms",
+                    "sandbox.script_timeout_ms",
+                    v,
+                )
+                .unwrap_or_else(default_script_timeout_ms),
+            }
+        }
+        Some(other) => {
+            v.push(bad("sandbox", "table", other));
+            defaults
+        }
     }
 }
 
@@ -368,6 +408,29 @@ fn opt_port(table: &Table, field: &str, out: &mut Vec<Violation>) -> Option<u16>
     }
 }
 
+/// Millisecond duration: a positive integer, because 0 would make every
+/// request time out before the script can run.
+fn opt_duration_ms(table: &Table, key: &str, field: &str, out: &mut Vec<Violation>) -> Option<u64> {
+    match table.get(key) {
+        None => None,
+        Some(toml::Value::Integer(n)) => match u64::try_from(*n) {
+            Ok(0) | Err(_) => {
+                out.push(Violation {
+                    field: field.into(),
+                    expected: "integer number of milliseconds greater than 0".into(),
+                    actual: n.to_string(),
+                });
+                None
+            }
+            Ok(ms) => Some(ms),
+        },
+        Some(other) => {
+            out.push(bad(field, "integer number of milliseconds", other));
+            None
+        }
+    }
+}
+
 fn missing(field: &str, expected: &str) -> Violation {
     Violation {
         field: field.into(),
@@ -411,4 +474,60 @@ fn default_bind() -> String {
 
 fn default_port() -> u16 {
     3000
+}
+
+fn default_script_timeout_ms() -> u64 {
+    10_000
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_config(dir: &Path, body: &str) -> PathBuf {
+        std::fs::create_dir_all(dir.join("files")).expect("files dir");
+        let path = dir.join("stuntdouble.toml");
+        std::fs::write(&path, body).expect("write config");
+        path
+    }
+
+    fn minimal() -> &'static str {
+        r#"
+config_version = "1"
+
+[server]
+
+[files]
+root = "./files"
+
+[[routes]]
+method = "GET"
+path = "/x"
+script = "scripts/x.js"
+"#
+    }
+
+    #[test]
+    fn sandbox_timeout_defaults_to_ten_seconds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_config(dir.path(), minimal());
+        let config = load(&path).expect("load");
+        assert_eq!(config.sandbox.script_timeout_ms, 10_000);
+    }
+
+    #[test]
+    fn sandbox_timeout_is_read_and_validated() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let table = "[sandbox]\nscript_timeout_ms = {value}\n\n[files]";
+        let configured = minimal().replace("[files]", &table.replace("{value}", "250"));
+        let config = load(&write_config(dir.path(), &configured)).expect("load 250");
+        assert_eq!(config.sandbox.script_timeout_ms, 250);
+
+        let zero = minimal().replace("[files]", &table.replace("{value}", "0"));
+        let error = load(&write_config(dir.path(), &zero)).expect_err("zero must fail");
+        assert!(
+            error.to_string().contains("sandbox.script_timeout_ms"),
+            "{error}"
+        );
+    }
 }

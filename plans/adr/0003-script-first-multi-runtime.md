@@ -24,6 +24,7 @@
 2. **实现语言 Rust；脚本运行时第一版支持 JS/TS + Python。**
 3. **运行时全部内置（in-process），零外部环境依赖**（无需安装 Node.js / CPython）：
    - **JS/TS：Boa**（纯 Rust ECMAScript 引擎，boa_engine 0.22.x，官方自述覆盖 90%+ 最新 ECMAScript 规范）+ **boa_runtime**（启用 `fetch` / `interval` / `url` 等 WebAPI 扩展；fetch 由 `BlockingReqwestFetcher` 提供）。
+   - 版本选择规则：Rust 工具链跟随 stable；MSRV 取“安全门槛 + 依赖树”共同确定的实际最低值，而不是单纯最小化。0.20 / 0.21 曾因 MSRV 更低（1.82 / 1.88）被评估，但其依赖链仍使用已归档的 `paste`（RUSTSEC-2024-0436），且压低 MSRV 必须把 `time` 锁在受 RUSTSEC-2026-0009 影响的版本，`cargo deny check advisories` 无法通过；0.22 改用 `pastey` 并可搭配已修复的 `time 0.3.47+`。因此选择 0.22.x，MSRV 为 1.91。Boa 升级必须在 PR 中重新校验 MSRV，并同步 `Cargo.toml` 与本文档。
    - **Python：RustPython**（纯 Rust Python 解释器，CPython 3.14 兼容子集）。接受不支持 C 扩展（无 numpy/pandas），标准库核心模块够用。
    - **TypeScript：第一版不支持**。Boa 只执行 ECMAScript，运行 `.ts` 必须先做类型剥离；第一版不引入 swc_core / oxc_transformer。需要 TS 的用户自行用 `tsc`/esbuild 编译出 `.js` 交给产品，产品不做任何转译。产品仍可发布脚本 API 的 `.d.ts` 类型定义（纯文档产物，零运行时成本），供编辑器补全使用。
 4. **脚本生态边界**：第一版不支持 `import`/`require` 第三方包（无 npm/pip）；仅内置少量常用库（如 Python `requests` 语义的 HTTP 封装、`csv`、`json`）。

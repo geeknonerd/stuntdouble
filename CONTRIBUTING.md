@@ -4,7 +4,7 @@ This document describes how to contribute code and changes to the repository. Pl
 
 ## Project status
 
-The first slice (T1) is implemented: `stuntdouble serve` and `stuntdouble validate` run against a TOML configuration and answer 404/501 with `request_id`. Script transforms, upstream sources, and binary responses land in later slices. Product definition, architecture decisions (ADRs), and research notes remain the design source of truth.
+The first two slices are implemented: `stuntdouble serve` and `stuntdouble validate` run against a TOML configuration, matched routes execute their JavaScript in the embedded Boa runtime with a host-injected `ctx`, and every response carries a `request_id`. Unmatched routes answer 404 `not_found`; script failures answer 500 `script_error` or `script_no_response`. Upstream sources, files, and binary responses land in later slices. Product definition, architecture decisions (ADRs), and research notes remain the design source of truth.
 
 ## Scope alignment
 
