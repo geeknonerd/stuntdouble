@@ -41,15 +41,31 @@ script = "scripts/manifest.js"
 "#
 }
 
+/// Script every fixture route runs unless a test supplies its own.
+const OK_SCRIPT: &str = r#"ctx.respond(200, { "Content-Type": "text/plain; charset=utf-8" }, "ok");
+"#;
+
 /// Write a config plus the directories it references. Returns the config path.
 fn fixture(dir: &Path, port: u16, body: &str) -> PathBuf {
+    fixture_with_script(dir, port, body, OK_SCRIPT)
+}
+
+fn fixture_with_script(dir: &Path, port: u16, body: &str, script: &str) -> PathBuf {
     std::fs::create_dir_all(dir.join("files")).expect("files dir");
     std::fs::create_dir_all(dir.join("scripts")).expect("scripts dir");
-    std::fs::write(dir.join("scripts/manifest.js"), "// placeholder").expect("script");
+    std::fs::write(dir.join("scripts/manifest.js"), script).expect("script");
     let config = dir.join("stuntdouble.toml");
     let text = body.replace("{port}", &port.to_string());
     std::fs::write(&config, text).expect("config");
     config
+}
+
+/// Insert a `[sandbox]` table into a fixture config.
+fn with_sandbox(body: &str, timeout_ms: u64) -> String {
+    body.replace(
+        "[files]",
+        &format!("[sandbox]\nscript_timeout_ms = {timeout_ms}\n\n[files]"),
+    )
 }
 
 fn reserve_port() -> u16 {
@@ -66,14 +82,17 @@ fn run(args: &[&str]) -> (i32, String, String) {
     )
 }
 
-fn serve(config: &Path) -> Child {
-    Command::new(BIN)
+fn serve_with_env(config: &Path, env: &[(&str, &str)]) -> Child {
+    let mut command = Command::new(BIN);
+    command
         .args(["serve", "--config"])
         .arg(config)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn serve")
+        .stderr(Stdio::piped());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    command.spawn().expect("spawn serve")
 }
 
 fn wait_ready(port: u16, child: &mut Child) {
@@ -91,6 +110,16 @@ fn wait_ready(port: u16, child: &mut Child) {
 }
 
 fn request(port: u16, method: &str, path: &str, headers: &[(&str, &str)]) -> Response {
+    request_with_body(port, method, path, headers, "")
+}
+
+fn request_with_body(
+    port: u16,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+) -> Response {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
@@ -98,12 +127,14 @@ fn request(port: u16, method: &str, path: &str, headers: &[(&str, &str)]) -> Res
     let mut raw = String::new();
     let _ = write!(
         raw,
-        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n"
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: {}\r\n",
+        body.len()
     );
     for (name, value) in headers {
         let _ = write!(raw, "{name}: {value}\r\n");
     }
     raw.push_str("\r\n");
+    raw.push_str(body);
     stream.write_all(raw.as_bytes()).expect("write request");
     stream.flush().expect("flush");
 
@@ -137,10 +168,19 @@ fn json_string(body: &str, key: &str) -> Option<String> {
 }
 
 fn with_server<T>(config_body: &str, run_tests: impl FnOnce(u16) -> T) -> (T, String) {
+    with_server_full(config_body, OK_SCRIPT, &[], run_tests)
+}
+
+fn with_server_full<T>(
+    config_body: &str,
+    script: &str,
+    env: &[(&str, &str)],
+    run_tests: impl FnOnce(u16) -> T,
+) -> (T, String) {
     let dir = tempfile::tempdir().expect("tempdir");
     let port = reserve_port();
-    let config = fixture(dir.path(), port, config_body);
-    let mut child = serve(&config);
+    let config = fixture_with_script(dir.path(), port, config_body, script);
+    let mut child = serve_with_env(&config, env);
     wait_ready(port, &mut child);
     let value = run_tests(port);
     child.kill().expect("kill server");
@@ -272,20 +312,19 @@ fn unmatched_request_gets_404_with_request_id() {
 }
 
 #[test]
-fn matched_route_reports_script_unimplemented_not_a_second_path() {
+fn matched_route_runs_the_route_script() {
     let (response, _) = with_server(good_config(), |port| {
         request(port, "GET", "/demo/documents/manifest/group-a", &[])
     });
-    assert_eq!(response.status, 501, "body: {}", response.body);
-    assert!(
-        response.body.contains("script_unimplemented"),
-        "body: {}",
-        response.body
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(response.body, "ok");
+    assert_eq!(
+        response.header("content-type"),
+        Some("text/plain; charset=utf-8")
     );
     assert!(
-        json_string(&response.body, "request_id").is_some(),
-        "body: {}",
-        response.body
+        response.header("x-request-id").is_some(),
+        "correlation header missing"
     );
 }
 
@@ -319,7 +358,7 @@ fn each_request_writes_one_structured_log_line() {
             request(port, "GET", "/nope", &[]).status,
         ]
     });
-    assert_eq!(statuses, vec![501, 404]);
+    assert_eq!(statuses, vec![200, 404]);
     let lines: Vec<&str> = stderr
         .lines()
         .filter(|line| line.contains("\"request_id\""))
@@ -354,4 +393,179 @@ fn each_request_writes_one_structured_log_line() {
         "listen host missing: {}",
         lines[0]
     );
+}
+
+#[test]
+fn validate_accepts_sandbox_timeout() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = fixture(dir.path(), 3000, &with_sandbox(good_config(), 250));
+    let (code, _, stderr) = run(&["validate", "--config", config.to_str().unwrap()]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+}
+
+#[test]
+fn validate_rejects_non_positive_sandbox_timeout() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = fixture(dir.path(), 3000, &with_sandbox(good_config(), 0));
+    let (code, _, stderr) = run(&["validate", "--config", config.to_str().unwrap()]);
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert!(
+        stderr.contains("sandbox.script_timeout_ms"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn script_reads_the_ctx_request_snapshot() {
+    let script = r#"
+ctx.respond(200, { "Content-Type": "application/json" }, JSON.stringify({
+  apiVersion: ctx.apiVersion,
+  method: ctx.request.method,
+  path: ctx.request.path,
+  params: ctx.request.params,
+  query: ctx.request.query,
+  headers: ctx.request.headers,
+  bodyText: ctx.request.bodyText
+}));
+"#;
+    let body = r#"config_version = "1"
+
+[server]
+bind = "127.0.0.1"
+port = {port}
+
+[files]
+root = "./files"
+
+[[routes]]
+name = "echo"
+method = "POST"
+path = "/echo/:name"
+script = "scripts/manifest.js"
+"#;
+    let (response, _) = with_server_full(body, script, &[], |port| {
+        request_with_body(
+            port,
+            "POST",
+            "/echo/abc?x=1&y=two",
+            &[("X-Trace", "t-1")],
+            "payload",
+        )
+    });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(json["apiVersion"], "1");
+    assert_eq!(json["method"], "POST");
+    assert_eq!(json["path"], "/echo/abc");
+    assert_eq!(json["params"]["name"], "abc");
+    assert_eq!(json["query"]["x"], "1");
+    assert_eq!(json["query"]["y"], "two");
+    assert_eq!(json["headers"]["x-trace"], "t-1");
+    assert_eq!(json["bodyText"], "payload");
+}
+
+#[test]
+fn second_respond_call_is_ignored_and_logged() {
+    let script = r#"
+ctx.respond(201, { "X-First": "yes" }, "first");
+ctx.respond(500, {}, "second");
+"#;
+    let (response, stderr) = with_server_full(good_config(), script, &[], |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 201, "body: {}", response.body);
+    assert_eq!(response.body, "first");
+    assert_eq!(response.header("x-first"), Some("yes"));
+    assert!(stderr.contains("already produced"), "stderr: {stderr}");
+}
+
+#[test]
+fn script_env_reflects_process_environment() {
+    let script = r"ctx.respond(200, {}, ctx.env.METADATA_API_URL);";
+    let (response, _) = with_server_full(
+        good_config(),
+        script,
+        &[(
+            "METADATA_API_URL",
+            "https://metadata.example.com/demo/documents",
+        )],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(response.body, "https://metadata.example.com/demo/documents");
+}
+
+#[test]
+fn uncaught_script_error_maps_to_500_with_request_id() {
+    let script = r#"throw new Error("secret stack detail");"#;
+    let (response, _) = with_server_full(good_config(), script, &[], |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 500, "body: {}", response.body);
+    assert!(
+        response.body.contains("\"error\":\"script_error\""),
+        "body: {}",
+        response.body
+    );
+    assert!(
+        json_string(&response.body, "request_id").is_some(),
+        "body: {}",
+        response.body
+    );
+    assert!(
+        !response.body.contains("secret stack detail"),
+        "script detail leaked to the client: {}",
+        response.body
+    );
+    assert!(response.header("x-request-id").is_some());
+}
+
+#[test]
+fn script_without_respond_maps_to_script_no_response() {
+    let script = r#"ctx.log.info("nothing produced");"#;
+    let (response, _) = with_server_full(good_config(), script, &[], |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 500, "body: {}", response.body);
+    assert!(
+        response.body.contains("\"error\":\"script_no_response\""),
+        "body: {}",
+        response.body
+    );
+    assert!(
+        json_string(&response.body, "request_id").is_some(),
+        "body: {}",
+        response.body
+    );
+}
+
+#[test]
+fn script_timeout_maps_to_500_script_error() {
+    let script = "while (true) {}";
+    let (response, _) = with_server_full(&with_sandbox(good_config(), 200), script, &[], |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 500, "body: {}", response.body);
+    assert!(
+        response.body.contains("\"error\":\"script_error\""),
+        "body: {}",
+        response.body
+    );
+}
+
+#[test]
+fn script_logs_reach_server_logs_but_not_the_client() {
+    let script = r#"
+ctx.log.info("hello from the script");
+ctx.log.error("problem", { code: 7 });
+ctx.respond(200, {}, "done");
+"#;
+    let (response, stderr) = with_server_full(good_config(), script, &[], |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(response.body, "done");
+    assert!(stderr.contains("hello from the script"), "stderr: {stderr}");
+    assert!(stderr.contains("\"script_logs\""), "stderr: {stderr}");
+    assert!(!response.body.contains("hello from the script"));
 }

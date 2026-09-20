@@ -45,8 +45,7 @@ fn match_segments(pattern: &str, segments: &[&str]) -> Option<HashMap<String, St
             if name.is_empty() {
                 return None; // malformed param like ':'
             }
-            // tradeoff: path parameters stay percent-encoded until transform slice
-            params.insert(name.to_string(), (*actual).to_string());
+            params.insert(name.to_string(), percent_decode(actual.as_bytes()));
         } else if expected != actual {
             return None;
         }
@@ -54,9 +53,55 @@ fn match_segments(pattern: &str, segments: &[&str]) -> Option<HashMap<String, St
     Some(params)
 }
 
+/// Percent-decode one path segment or query token. Invalid escapes and
+/// non-UTF-8 bytes are replaced rather than rejected, because a mock server
+/// must answer instead of failing on a malformed client request.
+///
+/// Must use result to avoid silent failures.
+#[must_use]
+pub fn percent_decode(bytes: &[u8]) -> String {
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+                if let Some(byte) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                    out.push(byte);
+                    i += 3;
+                } else {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            other => {
+                out.push(other);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn percent_decode_handles_escapes_and_falls_back() {
+        assert_eq!(percent_decode(b"a%20b"), "a b");
+        assert_eq!(percent_decode(b"DOC%2D0001"), "DOC-0001");
+        assert_eq!(percent_decode(b"plain"), "plain");
+        assert_eq!(percent_decode(b"bad%zz%"), "bad%zz%");
+        assert_eq!(percent_decode(b"tail%2"), "tail%2");
+    }
+
+    #[test]
+    fn path_params_are_decoded() {
+        let routes = vec![route("GET", "/x/:id")];
+        let found = match_route(&routes, "GET", "/x/a%20b").unwrap();
+        assert_eq!(found.params.get("id").map(String::as_str), Some("a b"));
+    }
 
     fn route(method: &str, path: &str) -> Route {
         Route {
