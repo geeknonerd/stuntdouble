@@ -113,7 +113,7 @@ Non-trivial logic needs one small runnable check. Sandbox, path traversal, and u
 - Prefer the standard library, then platform features, then existing dependencies.
 - A new dependency needs a reason, maintenance check, and license check.
 - GPL and AGPL dependencies are not allowed.
-- `cargo-deny` checks licenses, sources, duplicate versions, and advisories.
+- `cargo-deny` checks licenses, sources, duplicate versions, and advisories. Its graph is scoped to the shipped targets (Linux x86_64, macOS arm64, Windows x86_64) via `[graph] targets` in `deny.toml`, so target-specific dependencies of unsupported platforms do not fail the license gate.
 - Dependabot checks Cargo and GitHub Actions weekly.
 - Security fixes are not held back for a paid tier.
 

@@ -38,9 +38,10 @@ Within one `apiVersion`:
 - `ctx.http.get(url, opts)` performs an allowlisted upstream GET and returns `{status, headers, text(), bytes()}`.
   - `url` must be an absolute `http` or `https` URL whose host matches `upstream.allow_hosts` case-insensitively; the port is not part of the match, and IP literals and `localhost` require an explicit entry.
   - `opts` must be a plain object and accepts only `{ timeout_ms }`. Unknown string or symbol keys, inherited keys, non-object values, and explicit `null`, `NaN`, `Infinity`, non-integer, or non-positive `timeout_ms` values are script errors (fail-closed).
-  - The timeout defaults to `upstream.timeout_ms` (15000) and `opts.timeout_ms` overrides it per call. The effective upstream timeout is capped by the remaining script budget, with a small reply margin reserved so a timeout can surface as an upstream failure.
+  - The timeout defaults to `upstream.timeout_ms` (15000) and `opts.timeout_ms` overrides it per call. `opts.timeout_ms` is an upper bound: the effective upstream timeout is capped by the remaining script budget, with a small reply margin reserved so a timeout can surface as an upstream failure.
   - Redirects are followed manually, at most 3 hops; protocol and host allowlist are re-validated before every hop.
-  - `status` and `headers` are snapshots; header names are lowercased and a repeated name keeps the last value. `text()` decodes UTF-8 lossily; `bytes()` returns a `Uint8Array`.
+  - `status` and `headers` are snapshots; header names are lowercased and a repeated name keeps the last value. `text()` decodes UTF-8 lossily; `bytes()` returns a `Uint8Array`. Response bodies are capped at 8 MiB per call; larger or binary payloads belong to `ctx.http.pipe` (T6).
+  - Upstream requests are direct. Environment proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and lowercase variants) are not used.
   - Upstream 4xx/5xx responses are data and are never thrown. DNS, connection, TLS, and timeout failures throw a catchable error whose `error.code` is `"upstream_unreachable"`; if uncaught, the request returns 502 `upstream_unreachable` with a `request_id`.
 - `ctx.env` is the process environment snapshot. No `.env` file is loaded.
 - `ctx.log.info` / `warn` / `error` write to server logs only and never to the client response.
@@ -60,6 +61,8 @@ Scripts receive no raw `fetch`, `fs`, `os`, `subprocess`, or `socket`. All exter
 ## Type definitions
 
 The product publishes `.d.ts` files for each supported `apiVersion`. The type file is part of the public contract.
+
+The `apiVersion` 1 source definition for the currently implemented subset lives at [`types/ctx-api-v1.d.ts`](../../types/ctx-api-v1.d.ts). T8 (#11) publishes it with release artifacts and extends it as later capability groups land.
 
 ## Deprecation
 

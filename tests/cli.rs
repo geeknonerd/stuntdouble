@@ -763,6 +763,16 @@ fn error_class(body: &str) -> Option<String> {
     json_string(body, "error")
 }
 
+/// Run a script expected to fail before responding and assert the stable
+/// script-error contract used by policy and validation failures.
+fn assert_script_error(config_body: &str, script: &str) {
+    let (response, _) = with_server_full(config_body, script, &[], |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 500, "body: {}", response.body);
+    assert_eq!(error_class(&response.body).as_deref(), Some("script_error"));
+}
+
 #[test]
 fn ctx_http_get_treats_4xx_and_5xx_as_data() {
     let upstream = Upstream::start(vec![
@@ -791,11 +801,7 @@ fn ctx_http_get_rejects_non_http_protocol_as_script_error() {
 ctx.http.get("file:///etc/passwd");
 ctx.respond(200, {}, "should not respond");
 "#;
-    let (response, _) = with_server_full(good_config(), script, &[], |port| {
-        request(port, "GET", "/demo/documents/manifest/group-a", &[])
-    });
-    assert_eq!(response.status, 500, "body: {}", response.body);
-    assert_eq!(error_class(&response.body).as_deref(), Some("script_error"));
+    assert_script_error(good_config(), script);
 }
 
 #[test]
@@ -804,11 +810,7 @@ fn ctx_http_get_denies_hosts_without_an_upstream_allowlist() {
 ctx.http.get("http://127.0.0.1:1/");
 ctx.respond(200, {}, "should not respond");
 "#;
-    let (response, _) = with_server_full(good_config(), script, &[], |port| {
-        request(port, "GET", "/demo/documents/manifest/group-a", &[])
-    });
-    assert_eq!(response.status, 500, "body: {}", response.body);
-    assert_eq!(error_class(&response.body).as_deref(), Some("script_error"));
+    assert_script_error(good_config(), script);
 }
 
 #[test]
@@ -817,14 +819,7 @@ fn ctx_http_get_rejects_host_not_in_allowlist_as_script_error() {
 ctx.http.get("http://127.0.0.1:1/");
 ctx.respond(200, {}, "should not respond");
 "#;
-    let (response, _) = with_server_full(
-        &with_upstream(good_config(), &["allowed.example"]),
-        script,
-        &[],
-        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
-    );
-    assert_eq!(response.status, 500, "body: {}", response.body);
-    assert_eq!(error_class(&response.body).as_deref(), Some("script_error"));
+    assert_script_error(&with_upstream(good_config(), &["allowed.example"]), script);
 }
 
 #[test]
@@ -833,14 +828,7 @@ fn ctx_http_get_rejects_unknown_opts_key_as_script_error() {
 ctx.http.get("http://127.0.0.1:1/", { retries: 1 });
 ctx.respond(200, {}, "should not respond");
 "#;
-    let (response, _) = with_server_full(
-        &with_upstream(good_config(), &["127.0.0.1"]),
-        script,
-        &[],
-        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
-    );
-    assert_eq!(response.status, 500, "body: {}", response.body);
-    assert_eq!(error_class(&response.body).as_deref(), Some("script_error"));
+    assert_script_error(&with_upstream(good_config(), &["127.0.0.1"]), script);
 }
 
 #[test]
@@ -849,14 +837,7 @@ fn ctx_http_get_rejects_non_positive_timeout_as_script_error() {
 ctx.http.get("http://127.0.0.1:1/", { timeout_ms: 0 });
 ctx.respond(200, {}, "should not respond");
 "#;
-    let (response, _) = with_server_full(
-        &with_upstream(good_config(), &["127.0.0.1"]),
-        script,
-        &[],
-        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
-    );
-    assert_eq!(response.status, 500, "body: {}", response.body);
-    assert_eq!(error_class(&response.body).as_deref(), Some("script_error"));
+    assert_script_error(&with_upstream(good_config(), &["127.0.0.1"]), script);
 }
 
 #[test]
@@ -865,14 +846,7 @@ fn ctx_http_get_rejects_null_timeout_as_script_error() {
 ctx.http.get("http://127.0.0.1:1/", { timeout_ms: null });
 ctx.respond(200, {}, "should not respond");
 "#;
-    let (response, _) = with_server_full(
-        &with_upstream(good_config(), &["127.0.0.1"]),
-        script,
-        &[],
-        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
-    );
-    assert_eq!(response.status, 500, "body: {}", response.body);
-    assert_eq!(error_class(&response.body).as_deref(), Some("script_error"));
+    assert_script_error(&with_upstream(good_config(), &["127.0.0.1"]), script);
 }
 
 #[test]
@@ -881,14 +855,7 @@ fn ctx_http_get_rejects_non_finite_timeout_as_script_error() {
 ctx.http.get("http://127.0.0.1:1/", { timeout_ms: Infinity });
 ctx.respond(200, {}, "should not respond");
 "#;
-    let (response, _) = with_server_full(
-        &with_upstream(good_config(), &["127.0.0.1"]),
-        script,
-        &[],
-        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
-    );
-    assert_eq!(response.status, 500, "body: {}", response.body);
-    assert_eq!(error_class(&response.body).as_deref(), Some("script_error"));
+    assert_script_error(&with_upstream(good_config(), &["127.0.0.1"]), script);
 }
 
 #[test]
@@ -899,14 +866,7 @@ opts[Symbol("retries")] = 1;
 ctx.http.get("http://127.0.0.1:1/", opts);
 ctx.respond(200, {}, "should not respond");
 "#;
-    let (response, _) = with_server_full(
-        &with_upstream(good_config(), &["127.0.0.1"]),
-        script,
-        &[],
-        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
-    );
-    assert_eq!(response.status, 500, "body: {}", response.body);
-    assert_eq!(error_class(&response.body).as_deref(), Some("script_error"));
+    assert_script_error(&with_upstream(good_config(), &["127.0.0.1"]), script);
 }
 
 #[test]
@@ -916,14 +876,77 @@ var opts = Object.create({ retries: 1 });
 ctx.http.get("http://127.0.0.1:1/", opts);
 ctx.respond(200, {}, "should not respond");
 "#;
+    assert_script_error(&with_upstream(good_config(), &["127.0.0.1"]), script);
+}
+
+#[test]
+fn ctx_http_get_script_thrown_upstream_code_is_not_mapped_to_502() {
+    assert_script_error(
+        good_config(),
+        r#"
+throw { code: "upstream_unreachable" };
+"#,
+    );
+}
+
+#[test]
+fn ctx_http_get_bytes_preserve_binary_values() {
+    let upstream = Upstream::start(vec![UpstreamResponse::new(200, &[0x00, 0xFF, 0x10, 0x80])]);
+    let script = r"
+var bytes = ctx.http.get(ctx.env.UPSTREAM_URL).bytes();
+ctx.respond(200, {}, JSON.stringify(Array.from(bytes)));
+";
+    let url = upstream.url("/binary");
     let (response, _) = with_server_full(
         &with_upstream(good_config(), &["127.0.0.1"]),
         script,
-        &[],
+        &[("UPSTREAM_URL", url.as_str())],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(response.body, "[0,255,16,128]");
+}
+
+#[test]
+fn ctx_http_get_rejects_oversized_body_as_script_error() {
+    let body = vec![b'x'; 8 * 1024 * 1024 + 1];
+    let upstream = Upstream::start(vec![UpstreamResponse::new(200, &body)]);
+    let script = r#"
+ctx.http.get(ctx.env.UPSTREAM_URL);
+ctx.respond(200, {}, "should not respond");
+"#;
+    let url = upstream.url("/large");
+    let (response, _) = with_server_full(
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+        &[("UPSTREAM_URL", url.as_str())],
         |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
     );
     assert_eq!(response.status, 500, "body: {}", response.body);
     assert_eq!(error_class(&response.body).as_deref(), Some("script_error"));
+}
+
+#[test]
+fn ctx_http_get_ignores_proxy_environment() {
+    let upstream = Upstream::start(vec![UpstreamResponse::new(200, b"direct")]);
+    let script = r"
+var r = ctx.http.get(ctx.env.UPSTREAM_URL);
+ctx.respond(200, {}, r.text());
+";
+    let url = upstream.url("/meta");
+    let (response, _) = with_server_full(
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+        &[
+            ("UPSTREAM_URL", url.as_str()),
+            ("HTTP_PROXY", "http://127.0.0.1:1"),
+            ("HTTPS_PROXY", "http://127.0.0.1:1"),
+            ("ALL_PROXY", "http://127.0.0.1:1"),
+        ],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(response.body, "direct");
 }
 
 #[test]

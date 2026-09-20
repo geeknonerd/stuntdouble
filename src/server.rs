@@ -143,10 +143,7 @@ async fn handle(
         ),
         Handled::Failed(error) => {
             let class = error.class();
-            let status = match error {
-                script::Error::UpstreamUnreachable(_) => StatusCode::BAD_GATEWAY,
-                _ => StatusCode::INTERNAL_SERVER_ERROR,
-            };
+            let status = error.status();
             (
                 status,
                 class,

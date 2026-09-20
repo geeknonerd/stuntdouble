@@ -1718,6 +1718,7 @@ name = "stuntdouble"
 version = "0.1.0-alpha.1"
 dependencies = [
  "axum",
+ "base64",
  "boa_engine",
  "clap",
  "rustls",

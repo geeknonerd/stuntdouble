@@ -10,9 +10,10 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use axum::http::{HeaderMap, Method};
+use axum::http::{HeaderMap, Method, StatusCode};
 use boa_engine::native_function::NativeFunction;
 use boa_engine::{js_string, Context, JsError, JsNativeError, JsString, JsValue, Source};
 use serde_json::{json, Value as Json};
@@ -160,6 +161,17 @@ impl Error {
         }
     }
 
+    /// HTTP status used when this error reaches the client uncaught.
+    #[must_use]
+    pub fn status(&self) -> StatusCode {
+        match self {
+            Self::UpstreamUnreachable(_) => StatusCode::BAD_GATEWAY,
+            Self::Failed(_) | Self::TimedOut | Self::NoResponse => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        }
+    }
+
     /// Operator-facing reason; only exposed to clients under `--verbose` (T7).
     #[must_use]
     pub fn detail(&self) -> String {
@@ -194,7 +206,7 @@ impl Outcome {
 // The prelude is the only writer of `__sd`; `ctx` is a frozen view over it.
 const PRELUDE: &str = r#"
 var __sd = { response: null, logs: [] };
-var ctx = (function (__sd_http_get) {
+var ctx = (function (__sd_http_get, __sd_upstream_marker) {
   "use strict";
   var state = __sd;
   function format(value) {
@@ -274,6 +286,31 @@ var ctx = (function (__sd_http_get) {
     error.code = code;
     return error;
   }
+  function makeUpstreamError(message) {
+    var error = makeError(message, "upstream_unreachable");
+    Object.defineProperty(error, __sd_upstream_marker, { value: true });
+    return error;
+  }
+  var BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  function decodeBase64(text) {
+    var clean = String(text).replace(/=+$/, "");
+    var out = new Uint8Array(Math.floor(clean.length * 3 / 4));
+    var buffer = 0;
+    var bits = 0;
+    var index = 0;
+    for (var i = 0; i < clean.length; i++) {
+      var value = BASE64_ALPHABET.indexOf(clean.charAt(i));
+      if (value < 0) { throw new TypeError("ctx.http.get: invalid base64 body"); }
+      buffer = (buffer << 6) | value;
+      bits += 6;
+      if (bits >= 8) {
+        bits -= 8;
+        out[index] = (buffer >> bits) & 0xff;
+        index += 1;
+      }
+    }
+    return out;
+  }
   function httpGet(url, opts) {
     if (typeof url !== "string") {
       throw new TypeError("ctx.http.get: url must be a string");
@@ -315,6 +352,9 @@ var ctx = (function (__sd_http_get) {
     }
     var result = JSON.parse(raw);
     if (!result.ok) {
+      if (result.code === "upstream_unreachable") {
+        throw makeUpstreamError(result.message);
+      }
       throw makeError(result.message, result.code);
     }
     var upstream = result.response;
@@ -322,7 +362,7 @@ var ctx = (function (__sd_http_get) {
       status: upstream.status,
       headers: Object.freeze(upstream.headers),
       text: function () { return upstream.text; },
-      bytes: function () { return new Uint8Array(upstream.bytes); }
+      bytes: function () { return decodeBase64(upstream.body_base64); }
     });
   }
   return Object.freeze({
@@ -348,7 +388,7 @@ var ctx = (function (__sd_http_get) {
       return true;
     }
   });
-})(__sd_http_get);
+})(__sd_http_get, __SD_UPSTREAM_MARKER__);
 delete globalThis.__sd_http_get;
 "#;
 
@@ -445,10 +485,15 @@ fn evaluate(
             script_deadline,
         ));
     });
+    let upstream_marker = upstream_marker();
     let prelude = PRELUDE
         .replace("__SD_API_VERSION__", API_VERSION)
         .replace("__SD_REQUEST__", &js_literal(&request.to_json()))
-        .replace("__SD_ENV__", &js_literal(&env_json()));
+        .replace("__SD_ENV__", &js_literal(&env_json()))
+        .replace(
+            "__SD_UPSTREAM_MARKER__",
+            &js_literal(&Json::String(upstream_marker.clone())),
+        );
     let mut context = Context::default();
     context
         .runtime_limits_mut()
@@ -475,7 +520,7 @@ fn evaluate(
             Ok(dump) => Ok(dump),
             Err(error) => {
                 let upstream_unreachable =
-                    error_code(&error, &mut context).as_deref() == Some("upstream_unreachable");
+                    is_upstream_unreachable(&error, &upstream_marker, &mut context);
                 let message = error.to_string();
                 Err((upstream_unreachable, message))
             }
@@ -492,11 +537,34 @@ fn evaluate(
     }
 }
 
-/// Read the stable `error.code` marker set by the `ctx.http.get` wrapper.
-fn error_code(error: &JsError, context: &mut Context) -> Option<String> {
-    let object = error.as_opaque()?.as_object()?;
-    let value = object.get(js_string!("code"), context).ok()?;
-    value.as_string().map(|code| code.to_std_string_escaped())
+/// Per-request marker property for host-created transport errors. It is not a
+/// security token; it prevents an unrelated script throw from being classified
+/// as an upstream failure merely by copying the documented `error.code`.
+fn upstream_marker() -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let mut hasher = RandomState::new().build_hasher();
+    hasher.write_u128(nanos);
+    hasher.write_u64(sequence);
+    format!("__sd_upstream_{:016x}", hasher.finish())
+}
+
+/// Recognize an uncaught error created by the `ctx.http.get` transport path.
+/// The script-visible `error.code` is deliberately not trusted on its own.
+fn is_upstream_unreachable(error: &JsError, marker: &str, context: &mut Context) -> bool {
+    let Some(object) = error.as_opaque().and_then(JsValue::as_object) else {
+        return false;
+    };
+    object
+        .has_own_property(JsString::from(marker), context)
+        .unwrap_or(false)
 }
 
 /// Turn the extracted JSON record into an `Outcome`.

@@ -20,6 +20,7 @@ boa_engine = { version = "0.22", default-features = false }
 url = "2"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 ureq = { version = "3.4", default-features = false, features = ["rustls-no-provider", "platform-verifier"] }
+base64 = "0.23"
 
 [dev-dependencies]
 tempfile = "3"

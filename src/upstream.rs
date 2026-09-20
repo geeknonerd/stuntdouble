@@ -7,11 +7,18 @@
 use std::cell::OnceCell;
 use std::time::{Duration, Instant};
 
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use serde_json::{json, Value as Json};
 use url::{Host as UrlHost, Url};
 
 /// Maximum redirects followed after the initial request.
 const MAX_REDIRECTS: u8 = 3;
+
+/// `ctx.http.get` carries metadata-scale payloads. Larger or binary bodies use
+/// the streaming pipe API (T6); this cap keeps the JavaScript bridge within the
+/// script memory budget.
+const MAX_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Per-request allowlist and timeout guard for upstream calls.
 #[derive(Debug)]
@@ -142,7 +149,12 @@ impl UpstreamAccess {
                         .map(|value| (name.as_str().to_ascii_lowercase(), value.to_string()))
                 })
                 .collect();
-            let body = response.into_body().read_to_vec().map_err(map_ureq_error)?;
+            let body = response
+                .into_body()
+                .into_with_config()
+                .limit(MAX_RESPONSE_BYTES)
+                .read_to_vec()
+                .map_err(map_ureq_error)?;
             return Ok(Response {
                 status: status.as_u16(),
                 headers,
@@ -275,15 +287,18 @@ fn map_ureq_error(error: ureq::Error) -> Error {
         ureq::Error::HostNotFound => {
             Error::Transport("ctx.http.get: upstream host not found".into())
         }
+        ureq::Error::BodyExceedsLimit(limit) => Error::Policy(format!(
+            "ctx.http.get: upstream response body exceeds the {limit}-byte limit"
+        )),
         other => Error::Transport(format!("ctx.http.get: {other}")),
     }
 }
 
 /// Serialize one response for the JS bridge.
 ///
-/// tradeoff: bodies cross the bridge as JSON byte arrays (roughly 3-4x the
-/// body size in memory). T6's `ctx.http.pipe` streams around the script heap;
-/// revisit if `ctx.http.get` must carry large bodies directly.
+/// Bodies cross as base64 (about 1.33x) instead of a JSON number array
+/// (roughly 3-4x); `bytes()` decodes into a `Uint8Array` only when called.
+/// T6's `ctx.http.pipe` streams large bodies around the script heap entirely.
 #[must_use]
 pub fn response_json(response: Response) -> Json {
     let headers = response
@@ -295,6 +310,6 @@ pub fn response_json(response: Response) -> Json {
         "status": response.status,
         "headers": headers,
         "text": String::from_utf8_lossy(&response.body),
-        "bytes": response.body,
+        "body_base64": BASE64.encode(&response.body),
     })
 }
