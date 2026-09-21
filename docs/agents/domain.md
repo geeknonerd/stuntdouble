@@ -7,7 +7,7 @@ How the engineering skills should consume this repo's domain documentation when 
 - **`CONTEXT.md`** at the repo root — the project glossary.
 - **`plans/adr/`** — read ADRs that touch the area you're about to work in. This repo keeps ADRs there instead of `docs/adr/`.
 - **`plans/product-definition.md`** — v1 scope, host API contract, and the do-not-build list.
-- **`plans/demo-document-catalog.md`** — the public demo scenario for CSV manifest generation and binary download.
+- **`plans/demo-document-catalog.md`** — the public demo scenario for CSV manifest generation and binary download; the runnable Stunt Double fixture for it lives in `demo/`.
 - **`docs/contracts/`** — configuration, `ctx` API, and CLI contracts.
 - **`types/ctx-api-v1.d.ts`** — source type definitions for the implemented `ctx` apiVersion 1 subset.
 - **`docs/development.md`** — Git workflow, CI, versioning, and release rules.
@@ -28,6 +28,7 @@ This repo is **single-context**:
 ├── SECURITY.md
 ├── CHANGELOG.md
 ├── CONTEXT.md          ← project glossary
+├── demo/               ← runnable fixture for the document manifest demo scenario
 ├── types/              ← apiVersion 1 `ctx` type definitions
 ├── src/                ← config, matcher, script, server, upstream (internal) modules
 ├── tests/              ← end-to-end checks through the built binary

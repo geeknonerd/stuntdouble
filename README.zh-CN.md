@@ -21,7 +21,7 @@ Stunt Double 是一个用 Rust 实现的 Mock Server，面向需要对接真实�
 
 ## 当前状态
 
-**脚本执行与上游 HTTP（T4）已落地。** `stuntdouble serve` 与 `stuntdouble validate` 读取 TOML 配置，按方法 + 路径匹配路由，并用内置 Boa 执行路由 JavaScript，宿主注入的 `ctx` 提供 `apiVersion` / `request` / `http.get` / `respond` / `log` / `env`。`ctx.http.get` 只能访问 `[upstream] allow_hosts` 列出的 host，上游 4xx/5xx 视为数据，未捕获的传输层失败映射为 502 `upstream_unreachable`。未命中路由返回 404 `not_found`；脚本异常或超时返回 500 `script_error`，未调用 `ctx.respond` 返回 500 `script_no_response`，响应均带 `request_id`。文件与二进制响应待后续切片。见 [plans/adr/](plans/adr/)。
+**脚本执行与上游 HTTP（T4）已落地。** `stuntdouble serve` 与 `stuntdouble validate` 读取 TOML 配置，按方法 + 路径匹配路由，并用内置 Boa 执行路由 JavaScript，宿主注入的 `ctx` 提供 `apiVersion` / `request` / `http.get` / `respond` / `log` / `env`。`ctx.http.get` 只能访问 `[upstream] allow_hosts` 列出的 host，上游 4xx/5xx 视为数据，未捕获的传输层失败映射为 502 `upstream_unreachable`。未命中路由返回 404 `not_found`；脚本异常或超时返回 500 `script_error`，未调用 `ctx.respond` 返回 500 `script_no_response`，响应均带 `request_id`。文档清单场景已提供可运行夹具 [demo/](demo/README.md)：经 `ctx.http.get` 读取上游元数据并返回 CSV 清单。文件与二进制响应待后续切片。见 [plans/adr/](plans/adr/)。
 
 ## v1 计划范围
 
@@ -54,6 +54,7 @@ Stunt Double 是一个用 Rust 实现的 Mock Server，面向需要对接真实�
 
 - [产品功能定义](plans/product-definition.md)
 - [公开演示场景](plans/demo-document-catalog.md)
+- [演示夹具](demo/README.md)
 - [架构决策](plans/adr/)
 - [开发和发布流程](docs/development.md)
 - [治理规范](GOVERNANCE.md)

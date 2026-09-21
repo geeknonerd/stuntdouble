@@ -14,6 +14,7 @@ This directory holds the operational, contractual, and agent-facing documentatio
 - [README](../README.md) — project overview and status.
 - [Chinese README](../README.zh-CN.md) — 中文项目说明.
 - [Product definition](../plans/product-definition.md) — v1 scope and non-goals.
+- [Demo fixture](../demo/README.md) — runnable manifest scenario, upstream override, contract, and error mapping.
 - [Architecture decisions](../plans/adr/) — ADR 0001–0012.
 - [Research](../research/) — mock server landscape, runtime selection, and open-source baseline.
 - [Solutions](solutions/) — learnings and resolved problems via ce-compound.
