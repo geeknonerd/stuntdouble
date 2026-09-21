@@ -10,6 +10,7 @@
 - **`plans/demo-document-catalog.md`** —— 生成 CSV 清单与二进制下载的公开演示场景；对应的可运行夹具在 `demo/`。
 - **`docs/contracts/`** —— 配置、`ctx` API 与 CLI 契约。
 - **`types/ctx-api-v1.d.ts`** —— 已实现的 `ctx` apiVersion 1 子集的源码类型定义。
+- **`docs/guide/`** —— 面向使用者的快速开始与任务说明（B 层，英文 + `.zh-CN.md` 译本）。
 - **`docs/development.md`** —— Git 工作流、CI、版本号与发布规则。
 
 文件不存在就**静默跳过**，不要指出缺失。领域术语收敛后更新 `CONTEXT.md`。
@@ -33,10 +34,11 @@
 ├── src/                ← config、matcher、script、server、upstream（内部）模块
 ├── tests/              ← 通过构建出的二进制做端到端检查
 ├── docs/
-│   ├── README.md
-│   ├── index.md
+│   ├── README.md       ← 维护者文档索引（中文）
+│   ├── index.md        ← GitHub Pages 首页（配 index.zh-CN.md）
+│   ├── guide/          ← 使用指南（英文 + .zh-CN.md 译本）
 │   ├── development.md
-│   ├── contracts/
+│   ├── contracts/      ← 公开契约（各配 .zh-CN.md 译本）
 │   ├── agents/
 │   └── solutions/
 ├── plans/

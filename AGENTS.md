@@ -36,17 +36,18 @@ Stunt Double 是 Rust 实现的 Mock Server，面向对接真实外部依赖的�
 ├── types/
 │   └── ctx-api-v1.d.ts   # apiVersion 1 类型定义（T8 发布）
 ├── docs/
-│   ├── README.md                     # 文档索引
-│   ├── index.md                      # GitHub Pages 首页
-│   ├── development.md                # 开发与发布流程
-│   ├── contracts/                    # 公开契约（配置、ctx API、CLI）
-│   ├── agents/                       # issue tracker、labels、domain 文档
+│   ├── README.md                     # 维护者文档索引（C 层）
+│   ├── index.md                      # GitHub Pages 首页（B 层，配 index.zh-CN.md）
+│   ├── guide/                        # 使用指南（B 层，英文 + .zh-CN.md 译本）
+│   ├── development.md                # 开发与发布流程（C 层）
+│   ├── contracts/                    # 公开契约（B 层，各配 .zh-CN.md 译本）
+│   ├── agents/                       # issue tracker、labels、domain 文档（C 层）
 │   └── solutions/                    # 已解决问题的学习记录（ce-compound）；按类别归档，frontmatter 含 module/tags/problem_type，实现或排障前可先检索
-├── plans/
+├── plans/                            # 产品定义、演示场景与 ADR（C 层）
 │   ├── product-definition.md
 │   ├── demo-document-catalog.md
 │   └── adr/                          # ADR 0001–0013
-└── research/                         # 调研与选型证据
+└── research/                         # 调研与选型证据（C 层）
 ```
 
 ## 不可破坏约束

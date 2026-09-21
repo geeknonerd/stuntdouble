@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `docs/guide/getting-started.md` and its `.zh-CN.md` translation walk through the first route, `validate`/`serve`, and an allowlisted `ctx.http.get` call; the Chinese translations of the public contracts, the Pages landing page, and the demo README ship alongside it.
 - Sixth implementation slice (T6): `ctx.http.pipe(url, {status, headers})` streams one allowlisted
   upstream 2xx body straight to the client without entering the script heap. The client `Range` request
   header is forwarded, an upstream 206 keeps its `Content-Range` header and status, `status` defaults
@@ -51,6 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bin+lib crate structure enables `cargo test --doc`: src/lib.rs exports config/matcher/server modules; src/main.rs imports from stuntdouble::{config,server}. See [docs/solutions/ci/doctest-lib-target-required.md](docs/solutions/ci/doctest-lib-target-required.md).
 
 ### Changed
+- Documentation now follows the three-tier language model recorded in ADR 0013: community and legal documents stay English, public documents (README, Pages landing page, `docs/guide/`, `docs/contracts/`, `demo/README.md`) ship English plus a `.zh-CN.md` translation, and development documents are Chinese. A new `docs-links` CI gate checks local Markdown links and translation pairs.
 - Dependency license and advisory checks now cover the shipped platforms (Linux x86_64, macOS arm64, Windows x86_64) instead of every target in the lockfile; `rustls-platform-verifier` carries Android/wasm-only root bundles whose data license is outside the project allowlist.
 - Contract documents marked stable for v0.x slice T1: `docs/contracts/config.md` now includes complete route schema and validation rules; `docs/contracts/cli.md` documents implemented commands and exit codes.
 

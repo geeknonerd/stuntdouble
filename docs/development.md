@@ -149,6 +149,12 @@ cargo audit
 
 `docs-links` CI 门槛做两件事：`lychee --offline` 检查全部 Markdown 的本地链接；脚本检查每个 `.zh-CN.md` 都有同名英文文件，且两页都含语言切换链接。外链与译文漂移不做自动检查。
 
+本地预检：
+
+```bash
+lychee --offline --no-progress --exclude-path target --exclude-path .git './**/*.md'
+```
+
 其余约定：公开契约在 `docs/contracts/`；领域词汇在 `CONTEXT.md`，不含实现细节；难以逆转的决策写入 `plans/adr/`。
 
 ## 发布自动化启用
