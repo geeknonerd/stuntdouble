@@ -12,7 +12,7 @@ applies_when:
   - "Changing channel capacity, chunk size, or client-disconnect handling for ctx.http.pipe"
   - "Deciding when response status and headers must be finalized relative to the first body frame"
 related_components: [script, server]
-tags: [streaming, backpressure, axum, tokio, spawn-blocking, ureq, ctx-http-pipe, range]
+tags: [streaming, backpressure, axum, tokio, spawn-blocking, ureq, ctx-http-pipe, range, observability]
 ---
 
 # 把阻塞式上游读取桥接进异步流式响应
@@ -142,7 +142,7 @@ fn script_body(body: ResponseBody) -> Body {
 
 3. **它让策略失败与上游失败保持可区分。** allowlist 拒绝仍是 `script_error`，而 URL 畸形、不可跟随的重定向、传输层失败与上游最终状态各有可捕获错误码（`src/upstream.rs:82-92`、`src/upstream.rs:401-429`）。因此路由可以答业务 502，同时不掩盖运维配置故障。
 
-4. **它提供背压与清理信号，而不引入第二套执行模型。** 有界 channel 限制预读，receiver 丢弃既是客户端断开信号，也是生产者退出信号（`src/upstream.rs:455-471`）。脚本保持同步，HTTP 层保持异步，唯一的共享对象是由宿主持有的 stream。
+4. **它提供背压与清理信号，而不引入第二套执行模型。** 有界 channel 限制预读；T6 时 receiver 丢弃既是客户端断开信号也是生产者退出信号，T7 起改由 `relay_stream` 的 `sender.closed()` 显式观察客户端断开，channel 仍是生产者退出信号（`pump_body` / `relay_stream`）。脚本保持同步，HTTP 层保持异步，唯一的共享对象是由宿主持有的 stream。
 
 ## 何时适用
 
@@ -203,11 +203,14 @@ fn pump_body(
 
 ### 异步适配器
 
+T6 时 body 直接由这一行适配：
+
 ```rust
+// T6 形态；T7 起由 server::stream_body/relay_stream 接管，见「T7 扩展」。
 ResponseBody::Stream(stream) => Body::from_stream(ReceiverStream::new(stream)),
 ```
 
-这是 `src/server.rs:200`。该适配器是宿主 stream 变成 axum `Body` 的唯一位置；每一帧以 `Vec<u8>` 通过 channel，axum 在 body 边界把它转成 `Bytes`，因此帧既不会被合并成单个缓冲，也不会交给 JavaScript。
+从 T7 开始，`ResponseBody::Stream` 携带 `PipeBody { stream, call }`：`server::stream_body` 先经过一个 relay channel 把字节转发给 axum，并在流结束时写完成日志、定稿上游调用记录。每一帧仍以 `Vec<u8>` 通过 channel，axum 在 body 边界把它转成 `Bytes`；帧既不会被合并成单个缓冲，也不会交给 JavaScript。完整设计见下方「T7 扩展」。
 
 ### 路由脚本：只捕获该路由负责的错误类别
 
@@ -244,6 +247,8 @@ try {
 | 不变量 | 测试／证据 |
 | --- | --- |
 | 脚本 status/headers、上游字节与上游 `Content-Length` 随流一起传递 | `ctx_http_pipe_streams_upstream_bytes_with_status_and_headers`（`tests/cli.rs:1198-1223`） |
+| 完成日志在 body 结束后写出，并记录转发字节数 | `ctx_http_pipe_streams_upstream_bytes_with_status_and_headers` |
+| 中途上游读取失败记为 `upstream_stream_error`，不改变已发出的状态 | `ctx_http_pipe_mid_stream_failure_is_logged_after_headers` |
 | 最终非 2xx 可作为 `upstream_http_error` 捕获，未捕获时为 500 `script_error` | `tests/cli.rs:1266-1301` |
 | 传输层失败可作为 `upstream_unreachable` 捕获 | `tests/cli.rs:1303-1323` |
 | 默认状态是上游 2xx 状态，不是硬编码 200 | `ctx_http_pipe_defaults_to_the_upstream_2xx_status`（`tests/cli.rs:1423-1435`） |
@@ -254,9 +259,22 @@ try {
 | demo 中 allowlist 拒绝仍是对客户端可见的 `script_error` | `tests/cli.rs:1760-1769` |
 | 缺失 `Location` 目前经最终状态路径变成客户端可见的 502 | `tests/cli.rs:1793-1808`；按本次会话的结论，它没有断言 `error.code`，因此无法区分 `upstream_http_error` 与 `upstream_redirect_error` |
 
+## T7 扩展：完成日志与客户端断开（issue #10）
+
+T6 在响应头确定后就把 stream 交给 axum，日志也在那时写出；这会把中途截断记录成成功。T7 在桥上再加一段宿主 relay，把「响应已经发出」与「请求已经结束」分开：
+
+- `PipeResponse.body` 改为 `PipeBody { stream, call }`；`call` 是带一次性定稿保护的 `StreamCall`。
+- `server::stream_body` 用第二个有界 channel 把上游 stream 转发给 axum；`relay_stream` 在 body 正常结束、上游读失败或 `sender.closed()`（客户端断开）时调用 `StreamCall::finish`，随后写请求日志。
+- 中途上游读失败记为 `upstream_stream_error`，客户端先离开记为 `client_disconnected`；状态码已经发出，日志不会改写客户端状态。
+- 脚本丢弃 pipe 响应（例如 pipe 之后抛错）时，`StreamCall` 的 Drop 以「已放弃」定稿，避免调用链留下半开记录。
+- 该设计由截断 `Content-Length` 的端到端测试锁定，见下方验证矩阵。
+
+T6 段落中的代码行号会随代码演进漂移；行为以公开契约与本节为准。
+
 ## 相关
 
-- `plans/adr/0005-upstream-failure-semantics.md` —— T6 修订记录流式偏差，以及流前／流后的失败划分。
+- `plans/adr/0005-upstream-failure-semantics.md` —— T6 修订记录流式偏差与流前／流后的失败划分，T7 修订记录完成日志与日志专用错误类。
+- `docs/contracts/cli.md` —— per-request 日志字段、流式完成分类与 `--verbose` 行为。
 - `docs/contracts/ctx-api.md` —— `ctx.http.pipe` 的公开契约，含状态默认值、错误码、Range 转发与 body 中途截断。
 - `docs/solutions/conventions/script-owned-upstream-error-mapping.md` —— 路由级业务错误映射；本文有意把那张表留给它。
 - `tests/cli.rs` —— 针对传输、重定向、URL、状态、大小与 Range 不变量的端到端 fake-upstream 覆盖。

@@ -97,7 +97,7 @@ if (upstream.status >= 400) {
 stuntdouble serve --config stuntdouble.toml --verbose
 ```
 
-此时 500/502 JSON body 会多出一个稳定的 `detail` 字符串，例如 `upstream transport failure: timeout`；它绝不包含堆栈、脚本消息、上游 body 或内部地址。把 `detail` 当作本地诊断输出，不要在共享环境开启 `--verbose`。`serve` 还会为每个请求向 stderr 写出一条结构化日志，包含上游调用链、body 大小与白名单 header。
+此时 500/502 JSON body 会多出一个稳定的 `detail` 字符串，例如 `upstream transport failure: timeout`；它绝不包含堆栈、脚本消息、上游 body 或内部地址。把 `detail` 当作本地诊断输出，不要在共享环境开启 `--verbose`。`serve` 还会为每个请求向 stderr 写出一条结构化日志，包含上游调用链、body 大小与白名单 header。流式响应的日志在 body 结束时写出；中途上游失败记为 `upstream_stream_error`。
 
 ## 下一步
 

@@ -29,6 +29,11 @@ curl -i -H 'Range: bytes=0-1023' \
   http://127.0.0.1:3000/demo/documents/download/DOC-0001
 ```
 
+Add `--verbose` to `serve` when diagnosing an engine-generated 500/502: the
+JSON body then carries a stable `detail` field. The demo's own 502 bodies
+(`metadata_bad_gateway`, `pdf_url_invalid`, `pdf_bad_gateway`) are
+script-authored mappings, so the host does not inject `detail` into them.
+
 Files:
 
 - `stuntdouble.toml` — route declarations plus the upstream allowlist.
@@ -68,7 +73,8 @@ Files:
 - The body streams as it arrives: an upstream `Content-Length` is passed
   through, while a chunked upstream response reaches the client chunked and
   without one. Once the response head is on the wire, a mid-body upstream
-  failure can only truncate the body.
+  failure can only truncate the body; the host records it in the request log
+  as `upstream_stream_error` when the stream ends.
 - PDF transport failures, non-2xx PDF answers, and redirect chains the host
   cannot follow (more than 3 hops, an unusable `Location`, or a 3xx answer
   without one) all answer 502 `{"error":"pdf_bad_gateway"}`; metadata failures
