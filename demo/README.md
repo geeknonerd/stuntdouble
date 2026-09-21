@@ -1,5 +1,7 @@
 # Document manifest and download demo
 
+**English** | [中文](./README.zh-CN.md)
+
 Runnable Stunt Double fixture for the document contracts in
 [plans/demo-document-catalog.md](../plans/demo-document-catalog.md) §3. The
 route `GET /demo/documents/manifest/:group` reads upstream metadata and answers
