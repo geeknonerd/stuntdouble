@@ -38,6 +38,7 @@ _Avoid_: file root, document root, upload directory
 
 **Upstream failure**:
 A failure to obtain an HTTP response from an upstream call. A non-2xx HTTP response is data, not an upstream failure.
+Exception: a streaming capability that hands the body to the client instead of the script cannot treat a final non-2xx response as data; it surfaces that response as a catchable error so the script can still own the client-visible status.
 _Avoid_: upstream error, backend error
 
 **Request-local state**:

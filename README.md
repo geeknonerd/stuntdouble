@@ -21,7 +21,7 @@ The design goal is a single binary that behaves like the real dependency closely
 
 ## Status
 
-**Script execution and upstream HTTP (T4) implemented.** `stuntdouble serve` and `stuntdouble validate` run from a TOML configuration, match routes by method and path (`:param` capture), and execute each matched route's JavaScript in the embedded Boa runtime with a host-injected `ctx` (`apiVersion`, `request`, `http.get`, `respond`, `log`, `env`). `ctx.http.get` reaches only hosts listed in `[upstream] allow_hosts`, treats upstream 4xx/5xx responses as data, and maps uncaught transport failures to 502 `upstream_unreachable`. Unmatched routes answer 404 `not_found`; scripts that throw or time out answer 500 `script_error`, and scripts that never call `ctx.respond` answer 500 `script_no_response` — always with a `request_id`. The document manifest scenario from `plans/demo-document-catalog.md` runs from the in-repo fixture in [`demo/`](demo/README.md), which answers the CSV manifest from upstream metadata through `ctx.http.get`. File and binary responses are the next slices.
+**Script execution and upstream HTTP (T6) implemented.** `stuntdouble serve` and `stuntdouble validate` run from a TOML configuration, match routes by method and path (`:param` capture), and execute each matched route's JavaScript in the embedded Boa runtime with a host-injected `ctx` (`apiVersion`, `request`, `http.get`, `http.pipe`, `respond`, `log`, `env`). Both upstream calls reach only hosts listed in `[upstream] allow_hosts`: `ctx.http.get` treats upstream 4xx/5xx responses as data and maps uncaught transport failures to 502 `upstream_unreachable`, while `ctx.http.pipe` streams a 2xx body to the client around the script heap, forwards `Range`, and keeps 206 `Content-Range`. Unmatched routes answer 404 `not_found`; scripts that throw or time out answer 500 `script_error`, and scripts that never call `ctx.respond` answer 500 `script_no_response` — always with a `request_id`. The document manifest and PDF download scenarios from `plans/demo-document-catalog.md` run from the in-repo fixture in [`demo/`](demo/README.md). Local static files, uploads, and file responses are the next slices.
 
 The execution model and security boundaries were fixed before implementation details. See [plans/adr/](plans/adr/) and [docs/solutions/](docs/solutions/).
 
@@ -35,7 +35,7 @@ cargo install --path .   # or: cargo run -- serve --config stuntdouble.toml
 - Built-in JavaScript runtime: Boa.
 - Built-in Python runtime: RustPython with a stdlib subset.
 - Host-injected `ctx` API. No raw `fetch`, `fs`, `os`, `subprocess`, or `socket`.
-- Upstream HTTP (`ctx.http.get` implemented; request/pipe pending), static file reads, file streaming, uploads, and Range responses.
+- Upstream HTTP (`ctx.http.get` plus streaming `ctx.http.pipe` with Range passthrough; `ctx.http.request` pending), static file reads, file streaming, uploads, and local file Range responses.
 - One static file root with path traversal protection.
 - Static configuration with restart. Hot reload and Admin API are deferred.
 - Linux x86_64, macOS arm64, and Windows x86_64 binaries plus a container image.

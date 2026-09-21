@@ -21,7 +21,7 @@ Stunt Double 是一个用 Rust 实现的 Mock Server，面向需要对接真实�
 
 ## 当前状态
 
-**脚本执行与上游 HTTP（T4）已落地。** `stuntdouble serve` 与 `stuntdouble validate` 读取 TOML 配置，按方法 + 路径匹配路由，并用内置 Boa 执行路由 JavaScript，宿主注入的 `ctx` 提供 `apiVersion` / `request` / `http.get` / `respond` / `log` / `env`。`ctx.http.get` 只能访问 `[upstream] allow_hosts` 列出的 host，上游 4xx/5xx 视为数据，未捕获的传输层失败映射为 502 `upstream_unreachable`。未命中路由返回 404 `not_found`；脚本异常或超时返回 500 `script_error`，未调用 `ctx.respond` 返回 500 `script_no_response`，响应均带 `request_id`。文档清单场景已提供可运行夹具 [demo/](demo/README.md)：经 `ctx.http.get` 读取上游元数据并返回 CSV 清单。文件与二进制响应待后续切片。见 [plans/adr/](plans/adr/)。
+**脚本执行与上游 HTTP（T6）已落地。** `stuntdouble serve` 与 `stuntdouble validate` 读取 TOML 配置，按方法 + 路径匹配路由，并用内置 Boa 执行路由 JavaScript，宿主注入的 `ctx` 提供 `apiVersion` / `request` / `http.get` / `http.pipe` / `respond` / `log` / `env`。两类上游调用都只能访问 `[upstream] allow_hosts` 列出的 host：`ctx.http.get` 把上游 4xx/5xx 视为数据，未捕获的传输层失败映射为 502 `upstream_unreachable`；`ctx.http.pipe` 把上游 2xx 响应体绕开脚本堆直接流给客户端，转发 `Range` 并保留 206 `Content-Range`。未命中路由返回 404 `not_found`；脚本异常或超时返回 500 `script_error`，未调用 `ctx.respond` 返回 500 `script_no_response`，响应均带 `request_id`。文档清单与 PDF 下载场景已提供可运行夹具 [demo/](demo/README.md)。本地静态文件、上传与文件响应待后续切片。见 [plans/adr/](plans/adr/)。
 
 ## v1 计划范围
 
@@ -29,7 +29,7 @@ Stunt Double 是一个用 Rust 实现的 Mock Server，面向需要对接真实�
 - 内置 JavaScript 运行时：Boa。
 - 内置 Python 运行时：RustPython stdlib 子集。
 - 宿主注入 `ctx` API，不暴露裸 `fetch`、`fs`、`os`、`subprocess`、`socket`。
-- 上游 HTTP（`ctx.http.get` 已实现，request/pipe 待后续切片）、静态文件读取、文件流、上传、Range 响应。
+- 上游 HTTP（`ctx.http.get` 与支持 Range 透传的流式 `ctx.http.pipe` 已实现，`ctx.http.request` 待后续切片）、静态文件读取、文件流、上传、本地文件 Range 响应。
 - 唯一静态文件根，并阻止路径穿越。
 - 静态配置 + 重启。热重载与 Admin API 推迟。
 - Linux x86_64、macOS arm64、Windows x86_64 二进制与容器镜像。

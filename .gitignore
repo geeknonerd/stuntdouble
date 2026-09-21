@@ -4,3 +4,4 @@
 private/
 *.local
 *.local.md
+.codegraph/

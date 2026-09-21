@@ -42,6 +42,19 @@
 
 **约束**：客户端永不看到堆栈、上游响应体或内部地址。
 
+## 修订（T6，#9）：`ctx.http.pipe` 的非 2xx 语义
+
+`ctx.http.pipe` 无法沿用"拿到响应即视为数据"的默认透传：body 由宿主直接流向客户端，脚本拿不到字节，也就无法在检查之后改写状态。修订后的语义：
+
+- 上游 2xx：立即开始流式转发，客户端状态默认透传上游 2xx 状态（普通路径 200，Range 路径 206 等）。
+- 上游最终非 2xx：抛出可捕获错误 `upstream_http_error`，由脚本决定客户端错误码（demo 映射为 502 `pdf_bad_gateway`）。未捕获时为 500 `script_error`，不会伪装成 502 `upstream_unreachable`。
+- URL 无法解析或协议不是 http/https：抛出可捕获错误 `upstream_url_invalid`；重定向链无法继续（超过 3 跳或 `Location` 不可用）抛出可捕获错误 `upstream_redirect_error`；allowlist 拒绝仍为 `script_error`，不得伪装成上游故障。
+- 传输层失败：语义不变，抛 `upstream_unreachable`。
+
+原因：流式路径上"有响应即数据"无法同时满足"脚本拥有业务错误码"；把非 2xx 表现为可捕获错误，是脚本能在开始写响应体之前决定客户端错误码的唯一方式。
+
+流已经开始后，读取中断只能截断客户端 body，无法再改写状态；demo 文档中"PDF 读取失败 → `pdf_bad_gateway`"因此只覆盖开始流之前的失败。
+
 ## 替代方案
 
 - 全部失败统一映射为固定错误码（拒绝：丢失保真，且脚本已能自行实现）

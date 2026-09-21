@@ -1,10 +1,13 @@
-//! Allowlisted upstream HTTP calls for `ctx.http.get`.
+//! Allowlisted upstream HTTP calls for `ctx.http.get` and `ctx.http.pipe`.
 //! Contract: docs/contracts/ctx-api.md
 //!
 //! The script host is synchronous, so this module uses ureq's blocking client.
 //! Redirects are disabled at the client and followed here, one hop at a time,
 //! so every target is re-validated against the allowlist before it is fetched.
+//! `ctx.http.pipe` hands the upstream body to the HTTP layer as a bounded
+//! channel of frames, so bytes never enter the script heap.
 use std::cell::OnceCell;
+use std::io::Read;
 use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -16,9 +19,14 @@ use url::{Host as UrlHost, Url};
 const MAX_REDIRECTS: u8 = 3;
 
 /// `ctx.http.get` carries metadata-scale payloads. Larger or binary bodies use
-/// the streaming pipe API (T6); this cap keeps the JavaScript bridge within the
-/// script memory budget.
+/// `ctx.http.pipe`, which streams them around the script heap.
 const MAX_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Bounded frames in flight between the upstream reader and the HTTP response.
+const PIPE_CHANNEL_CAPACITY: usize = 4;
+
+/// Read size for one pipe frame.
+const PIPE_CHUNK_BYTES: usize = 64 * 1024;
 
 /// Per-request allowlist and timeout guard for upstream calls.
 #[derive(Debug)]
@@ -26,6 +34,8 @@ pub struct UpstreamAccess {
     allow_hosts: Vec<String>,
     default_timeout: Duration,
     script_deadline: Instant,
+    /// Client `Range` request header; only `ctx.http.pipe` forwards it.
+    client_range: Option<String>,
 }
 
 /// HTTP response returned to the script as `{status, headers, text(), bytes()}`.
@@ -36,13 +46,37 @@ pub struct Response {
     pub body: Vec<u8>,
 }
 
+/// Streamed body frames for `ctx.http.pipe`; they never enter the script heap.
+pub type BodyStream = tokio::sync::mpsc::Receiver<Result<Vec<u8>, std::io::Error>>;
+
+/// Client response produced by `ctx.http.pipe`: status and headers are decided
+/// here, the body streams from the upstream connection as it arrives.
+#[derive(Debug)]
+pub struct PipeResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: BodyStream,
+}
+
 /// Why `ctx.http.get` did not return a response.
 #[derive(Debug)]
 pub enum Error {
     /// Rejected before the network, or a fail-closed script error.
     Policy(String),
+    /// The script passed a URL the host cannot use: it does not parse, or its
+    /// scheme is not http/https. Raised only by `ctx.http.pipe`, so a route
+    /// script can answer its own invalid-URL business code.
+    InvalidUrl(String),
+    /// The upstream answered with a redirect chain the host cannot follow:
+    /// more than 3 hops, or a Location it cannot resolve. Raised only by
+    /// `ctx.http.pipe`; an allowlist rejection stays a policy error.
+    Redirect(String),
     /// DNS, connection, TLS, or timeout failure.
     Transport(String),
+    /// The upstream answered with a final non-2xx status. `ctx.http.pipe`
+    /// cannot hand a streaming body to the script, so it raises this
+    /// catchable error and the script maps the route's client-visible code.
+    Status(u16),
 }
 
 impl Error {
@@ -51,15 +85,22 @@ impl Error {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Policy(_) => "script_error",
+            Self::InvalidUrl(_) => "upstream_url_invalid",
+            Self::Redirect(_) => "upstream_redirect_error",
             Self::Transport(_) => "upstream_unreachable",
+            Self::Status(_) => "upstream_http_error",
         }
     }
 
     /// Operator-facing reason; never sent to the client body.
     #[must_use]
-    pub fn message(&self) -> &str {
+    pub fn message(&self) -> String {
         match self {
-            Self::Policy(message) | Self::Transport(message) => message,
+            Self::Policy(message)
+            | Self::InvalidUrl(message)
+            | Self::Redirect(message)
+            | Self::Transport(message) => message.clone(),
+            Self::Status(status) => format!("ctx.http.pipe: upstream returned status {status}"),
         }
     }
 }
@@ -67,30 +108,121 @@ impl Error {
 impl UpstreamAccess {
     /// Build one request-scoped host from configuration.
     #[must_use]
-    pub fn new(allow_hosts: Vec<String>, timeout: Duration, script_deadline: Instant) -> Self {
+    pub fn new(
+        allow_hosts: Vec<String>,
+        timeout: Duration,
+        script_deadline: Instant,
+        client_range: Option<String>,
+    ) -> Self {
         Self {
             allow_hosts,
             default_timeout: timeout,
             script_deadline,
+            client_range,
         }
     }
 
     /// Perform one `ctx.http.get` call from its JSON bridge payload.
     pub fn get(&self, call: &Json) -> Result<Response, Error> {
         let call = self.parse_get_call(call)?;
-        let mut url = Url::parse(&call.url)
+        let url = Url::parse(&call.url)
             .map_err(|error| Error::Policy(format!("ctx.http.get: invalid URL: {error}")))?;
-        self.validate(&url)?;
+        self.validate(&url, Error::Policy)?;
 
+        let deadline = Instant::now() + self.budget(call.timeout)?;
+        let response =
+            self.send_following_redirects(url, deadline, None, "ctx.http.get", Error::Policy)?;
+
+        let status = response.status();
+        let headers = response
+            .headers()
+            .iter()
+            .filter_map(|(name, value)| {
+                value
+                    .to_str()
+                    .ok()
+                    .map(|value| (name.as_str().to_ascii_lowercase(), value.to_string()))
+            })
+            .collect();
+        let body = response
+            .into_body()
+            .into_with_config()
+            .limit(MAX_RESPONSE_BYTES)
+            .read_to_vec()
+            .map_err(map_ureq_error)?;
+        Ok(Response {
+            status: status.as_u16(),
+            headers,
+            body,
+        })
+    }
+
+    /// Perform one `ctx.http.pipe` call from its JSON bridge payload.
+    ///
+    /// Success means the upstream answered 2xx: the client status and headers
+    /// are fixed here and the body is streamed by a background reader. A final
+    /// non-2xx answer is a catchable `upstream_http_error`, because a piped
+    /// body cannot be inspected by the script.
+    pub fn pipe(&self, call: &Json) -> Result<PipeResponse, Error> {
+        let call = self.parse_pipe_call(call)?;
+        let url = Url::parse(&call.url)
+            .map_err(|error| Error::InvalidUrl(format!("ctx.http.pipe: invalid URL: {error}")))?;
+        self.validate(&url, Error::InvalidUrl)?;
+        // `ctx.http.pipe` keeps the configured upstream timeout; its opts are
+        // (status, headers) only, so a pipe borrows the whole remaining budget.
+        let deadline = Instant::now() + self.budget(None)?;
+        let response = self.send_following_redirects(
+            url,
+            deadline,
+            self.client_range.as_deref(),
+            "ctx.http.pipe",
+            Error::Redirect,
+        )?;
+        let upstream_status = response.status().as_u16();
+        if !(200..=299).contains(&upstream_status) {
+            return Err(Error::Status(upstream_status));
+        }
+
+        // The script owns Content-Type and Content-Disposition; the upstream
+        // Range contract travels with the stream. The upstream 2xx status is
+        // the default, so a Range 206 keeps its partial-response semantics.
+        let client_status = call.status;
+        let mut headers = call.headers;
+        for (name, value) in response.headers() {
+            let name = name.as_str().to_ascii_lowercase();
+            let passthrough = name == "content-range" || name == "content-length";
+            let already_set = headers
+                .iter()
+                .any(|(existing, _)| existing.eq_ignore_ascii_case(&name));
+            if passthrough && !already_set {
+                if let Ok(value) = value.to_str() {
+                    headers.push((name, value.to_string()));
+                }
+            }
+        }
+        let status = client_status.unwrap_or(upstream_status);
+        let (sender, body) = tokio::sync::mpsc::channel(PIPE_CHANNEL_CAPACITY);
+        let reader = response.into_body().into_reader();
+        tokio::task::spawn_blocking(move || pump_body(reader, sender));
+        Ok(PipeResponse {
+            status,
+            headers,
+            body,
+        })
+    }
+
+    /// Effective upstream budget for one call: the smaller of the remaining
+    /// script time and the requested timeout, less a reply margin.
+    ///
+    /// tradeoff: when the upstream timeout would consume the whole script
+    /// budget, the call is cut slightly early so the transport error can
+    /// surface as a catchable failure instead of racing the outer script
+    /// timeout. Ceiling: upgrade when Boa exposes an in-engine interrupt hook.
+    fn budget(&self, requested: Option<Duration>) -> Result<Duration, Error> {
         let remaining = self
             .script_deadline
             .saturating_duration_since(Instant::now());
-        let requested = call.timeout.unwrap_or(self.default_timeout);
-        // tradeoff: when the upstream timeout would consume the whole script
-        // budget, reserve a small margin so the transport error can surface as
-        // 502 upstream_unreachable instead of racing the outer script timeout.
-        // Ceiling: a slow upstream is cut slightly earlier than requested;
-        // upgrade when Boa exposes an in-engine interrupt hook.
+        let requested = requested.unwrap_or(self.default_timeout);
         let budget = if requested >= remaining {
             remaining.saturating_sub(reply_margin(remaining))
         } else {
@@ -99,68 +231,68 @@ impl UpstreamAccess {
         if budget.is_zero() {
             return Err(timeout_error());
         }
-        let deadline = Instant::now() + budget;
-        let agent = agent();
-        let mut redirects = 0_u8;
+        Ok(budget)
+    }
 
+    /// Send one GET and follow up to `MAX_REDIRECTS` redirects. Every hop is
+    /// re-validated against the allowlist; `redirect_error` classifies a chain
+    /// the caller cannot follow, while an allowlist rejection stays a policy
+    /// error and never masquerades as an upstream failure.
+    fn send_following_redirects(
+        &self,
+        mut url: Url,
+        deadline: Instant,
+        range: Option<&str>,
+        call: &str,
+        redirect_error: fn(String) -> Error,
+    ) -> Result<ureq::http::Response<ureq::Body>, Error> {
+        let mut redirects = 0_u8;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return Err(timeout_error());
             }
-            let response = agent
-                .get(url.as_str())
-                .config()
-                .timeout_global(Some(left))
-                .build()
-                .call()
-                .map_err(map_ureq_error)?;
-
-            let status = response.status();
-            if is_redirect(status.as_u16()) {
+            let response = self.fetch(&url, left, range)?;
+            if is_redirect(response.status().as_u16()) {
                 if let Some(location) = response.headers().get(ureq::http::header::LOCATION) {
                     if redirects >= MAX_REDIRECTS {
-                        return Err(Error::Policy(
-                            "ctx.http.get: redirect limit exceeded (max 3 hops)".into(),
-                        ));
+                        return Err(redirect_error(format!(
+                            "{call}: redirect limit exceeded (max 3 hops)"
+                        )));
                     }
                     let location = location.to_str().map_err(|_| {
-                        Error::Policy(
-                            "ctx.http.get: redirect Location is not a valid string".into(),
-                        )
+                        redirect_error(format!("{call}: redirect Location is not a valid string"))
                     })?;
                     let next = url.join(location).map_err(|error| {
-                        Error::Policy(format!("ctx.http.get: invalid redirect Location: {error}"))
+                        redirect_error(format!("{call}: invalid redirect Location: {error}"))
                     })?;
-                    self.validate(&next)?;
+                    self.validate(&next, redirect_error)?;
                     url = next;
                     redirects += 1;
                     continue;
                 }
             }
-
-            let headers = response
-                .headers()
-                .iter()
-                .filter_map(|(name, value)| {
-                    value
-                        .to_str()
-                        .ok()
-                        .map(|value| (name.as_str().to_ascii_lowercase(), value.to_string()))
-                })
-                .collect();
-            let body = response
-                .into_body()
-                .into_with_config()
-                .limit(MAX_RESPONSE_BYTES)
-                .read_to_vec()
-                .map_err(map_ureq_error)?;
-            return Ok(Response {
-                status: status.as_u16(),
-                headers,
-                body,
-            });
+            return Ok(response);
         }
+    }
+
+    /// Send one GET, optionally carrying the client's `Range` header.
+    /// Redirects stay disabled at the client; callers re-validate every hop.
+    fn fetch(
+        &self,
+        url: &Url,
+        timeout: Duration,
+        range: Option<&str>,
+    ) -> Result<ureq::http::Response<ureq::Body>, Error> {
+        let mut request = agent()
+            .get(url.as_str())
+            .config()
+            .timeout_global(Some(timeout))
+            .build();
+        if let Some(range) = range {
+            request = request.header("Range", range);
+        }
+        request.call().map_err(map_ureq_error)
     }
 
     /// Parse and fail-closed validate the bridge payload.
@@ -195,13 +327,86 @@ impl UpstreamAccess {
         })
     }
 
+    /// Parse and fail-closed validate the `ctx.http.pipe` payload. The JS
+    /// prelude already checks shapes; this is the independent host-side guard.
+    fn parse_pipe_call(&self, call: &Json) -> Result<PipeCall, Error> {
+        let Some(object) = call.as_object() else {
+            return Err(Error::Policy(
+                "ctx.http.pipe: call payload must be an object".into(),
+            ));
+        };
+        for key in object.keys() {
+            if !matches!(key.as_str(), "url" | "status" | "headers") {
+                return Err(Error::Policy(format!(
+                    "ctx.http.pipe: unknown opts key {key:?}"
+                )));
+            }
+        }
+        let Some(url) = object.get("url").and_then(Json::as_str) else {
+            return Err(Error::Policy("ctx.http.pipe: url must be a string".into()));
+        };
+        let status = match object.get("status") {
+            None | Some(Json::Null) => None,
+            Some(value) => {
+                let status = value
+                    .as_u64()
+                    .and_then(|value| u16::try_from(value).ok())
+                    .filter(|status| (100..=599).contains(status))
+                    .ok_or_else(|| {
+                        Error::Policy(
+                            "ctx.http.pipe: status must be an integer in [100, 599]".into(),
+                        )
+                    })?;
+                Some(status)
+            }
+        };
+        let headers = match object.get("headers") {
+            None | Some(Json::Null) => Vec::new(),
+            Some(Json::Array(rows)) => {
+                let mut headers = Vec::with_capacity(rows.len());
+                for row in rows {
+                    let pair = row
+                        .as_array()
+                        .filter(|pair| pair.len() == 2)
+                        .ok_or_else(|| {
+                            Error::Policy(
+                                "ctx.http.pipe: headers must be [name, value] pairs".into(),
+                            )
+                        })?;
+                    let (Some(name), Some(value)) = (
+                        pair.first().and_then(Json::as_str),
+                        pair.get(1).and_then(Json::as_str),
+                    ) else {
+                        return Err(Error::Policy(
+                            "ctx.http.pipe: headers must be [name, value] pairs".into(),
+                        ));
+                    };
+                    headers.push((name.to_string(), value.to_string()));
+                }
+                headers
+            }
+            Some(_) => {
+                return Err(Error::Policy(
+                    "ctx.http.pipe: headers must be [name, value] pairs".into(),
+                ));
+            }
+        };
+        Ok(PipeCall {
+            url: url.to_string(),
+            status,
+            headers,
+        })
+    }
+
     /// Protocol + host allowlist validation. Port is deliberately not matched.
-    fn validate(&self, url: &Url) -> Result<(), Error> {
+    /// `invalid_url` classifies a scheme rejection for the calling API; an
+    /// allowlist rejection is always a policy error, never an invalid URL.
+    fn validate(&self, url: &Url, invalid_url: fn(String) -> Error) -> Result<(), Error> {
         match url.scheme() {
             "http" | "https" => {}
             other => {
-                return Err(Error::Policy(format!(
-                    "ctx.http.get: protocol {other:?} is not allowed (use http or https)"
+                return Err(invalid_url(format!(
+                    "upstream protocol {other:?} is not allowed (use http or https)"
                 )));
             }
         }
@@ -219,7 +424,7 @@ impl UpstreamAccess {
             return Ok(());
         }
         Err(Error::Policy(format!(
-            "ctx.http.get: host {host:?} is not in upstream.allow_hosts"
+            "upstream host {host:?} is not in upstream.allow_hosts"
         )))
     }
 }
@@ -230,13 +435,48 @@ struct GetCall {
     timeout: Option<Duration>,
 }
 
+/// Parsed `ctx.http.pipe` payload: the client status and headers are fixed
+/// before the upstream body is handed to the HTTP layer.
+struct PipeCall {
+    url: String,
+    status: Option<u16>,
+    headers: Vec<(String, String)>,
+}
+
 /// Time left for the script itself to catch and map a transport error.
 fn reply_margin(remaining: Duration) -> Duration {
     std::cmp::min(remaining / 10, Duration::from_millis(100))
 }
 
 fn timeout_error() -> Error {
-    Error::Transport("ctx.http.get: upstream timeout".into())
+    Error::Transport("ctx.http: upstream timeout".into())
+}
+
+/// Move upstream bytes into the response channel until the body ends, fails,
+/// or the client drops the response. `blocking_send` provides backpressure, so
+/// a slow client cannot make the host buffer a whole file. The sender is taken
+/// by value because the reader owns it for the lifetime of the spawned task.
+#[allow(clippy::needless_pass_by_value)]
+fn pump_body(
+    mut reader: impl Read,
+    sender: tokio::sync::mpsc::Sender<Result<Vec<u8>, std::io::Error>>,
+) {
+    let mut buffer = vec![0_u8; PIPE_CHUNK_BYTES];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => {
+                if sender.blocking_send(Ok(buffer[..read].to_vec())).is_err() {
+                    break;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => {
+                let _ = sender.blocking_send(Err(error));
+                break;
+            }
+        }
+    }
 }
 
 fn is_redirect(status: u16) -> bool {
@@ -277,20 +517,14 @@ fn agent() -> ureq::Agent {
 /// 4xx/5xx are data (ADR 0005); everything else is a transport failure.
 fn map_ureq_error(error: ureq::Error) -> Error {
     match error {
-        ureq::Error::BadUri(message) => {
-            Error::Policy(format!("ctx.http.get: invalid URL: {message}"))
-        }
-        ureq::Error::Http(error) => {
-            Error::Policy(format!("ctx.http.get: invalid request: {error}"))
-        }
+        ureq::Error::BadUri(message) => Error::Policy(format!("ctx.http: invalid URL: {message}")),
+        ureq::Error::Http(error) => Error::Policy(format!("ctx.http: invalid request: {error}")),
         ureq::Error::Timeout(_) => timeout_error(),
-        ureq::Error::HostNotFound => {
-            Error::Transport("ctx.http.get: upstream host not found".into())
-        }
+        ureq::Error::HostNotFound => Error::Transport("ctx.http: upstream host not found".into()),
         ureq::Error::BodyExceedsLimit(limit) => Error::Policy(format!(
             "ctx.http.get: upstream response body exceeds the {limit}-byte limit"
         )),
-        other => Error::Transport(format!("ctx.http.get: {other}")),
+        other => Error::Transport(format!("ctx.http: {other}")),
     }
 }
 

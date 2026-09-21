@@ -106,25 +106,17 @@ impl RequestSnapshot {
 }
 
 /// Body of a script-produced response.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum ResponseBody {
     Text(String),
     Bytes(Vec<u8>),
+    /// Streamed by `ctx.http.pipe`: frames move from the upstream connection
+    /// to the client without entering the JavaScript heap.
+    Stream(upstream::BodyStream),
 }
 
-impl ResponseBody {
-    /// Serialize the body for the HTTP layer.
-    #[must_use]
-    pub fn into_bytes(self) -> Vec<u8> {
-        match self {
-            Self::Text(text) => text.into_bytes(),
-            Self::Bytes(bytes) => bytes,
-        }
-    }
-}
-
-/// Response produced by `ctx.respond`.
-#[derive(Debug, Clone)]
+/// Response produced by `ctx.respond` or `ctx.http.pipe`.
+#[derive(Debug)]
 pub struct ScriptResponse {
     pub status: u16,
     pub headers: Vec<(String, String)>,
@@ -207,7 +199,7 @@ impl Outcome {
 // The prelude is the only writer of `__sd`; `ctx` is a frozen view over it.
 const PRELUDE: &str = r#"
 var __sd = { response: null, logs: [] };
-var ctx = (function (__sd_http_get, __sd_upstream_marker) {
+var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_upstream_marker) {
   "use strict";
   var state = __sd;
   function format(value) {
@@ -221,27 +213,27 @@ var ctx = (function (__sd_http_get, __sd_upstream_marker) {
     for (var i = 0; i < args.length; i++) { parts.push(format(args[i])); }
     state.logs.push({ level: level, message: parts.join(" ") });
   }
-  function checkStatus(status) {
+  function checkStatus(status, label) {
     if (typeof status !== "number" || !Number.isInteger(status) || status < 100 || status > 599) {
-      throw new TypeError("ctx.respond: status must be an integer in [100, 599]");
+      throw new TypeError(label + ": status must be an integer in [100, 599]");
     }
     return status;
   }
-  function checkHeaders(headers) {
+  function checkHeaders(headers, label) {
     var out = [];
     if (headers === undefined || headers === null) { return out; }
     if (Array.isArray(headers)) {
       for (var i = 0; i < headers.length; i++) {
         var row = headers[i];
         if (!Array.isArray(row) || row.length !== 2) {
-          throw new TypeError("ctx.respond: headers[" + i + "] must be a [name, value] pair");
+          throw new TypeError(label + ": headers[" + i + "] must be a [name, value] pair");
         }
         out.push([String(row[0]), String(row[1])]);
       }
       return out;
     }
     if (typeof headers !== "object") {
-      throw new TypeError("ctx.respond: headers must be an object or [name, value] pairs");
+      throw new TypeError(label + ": headers must be an object or [name, value] pairs");
     }
     var names = Object.keys(headers);
     for (var j = 0; j < names.length; j++) {
@@ -312,44 +304,33 @@ var ctx = (function (__sd_http_get, __sd_upstream_marker) {
     }
     return out;
   }
-  function httpGet(url, opts) {
-    if (typeof url !== "string") {
-      throw new TypeError("ctx.http.get: url must be a string");
+  function checkPlainOpts(opts, label, allowedKeys) {
+    if (opts === undefined) { return {}; }
+    if (opts === null || typeof opts !== "object" || Array.isArray(opts)) {
+      throw new TypeError(label + ": opts must be an object");
     }
-    var timeout = null;
-    if (opts !== undefined) {
-      if (opts === null || typeof opts !== "object" || Array.isArray(opts)) {
-        throw new TypeError("ctx.http.get: opts must be an object");
-      }
-      var proto = Object.getPrototypeOf(opts);
-      if (proto !== Object.prototype && proto !== null) {
-        throw new TypeError("ctx.http.get: opts must be a plain object");
-      }
-      var symbols = Object.getOwnPropertySymbols(opts);
-      if (symbols.length > 0) {
-        throw new TypeError("ctx.http.get: unknown opts key " + String(symbols[0]));
-      }
-      var keys = Object.getOwnPropertyNames(opts);
-      for (var i = 0; i < keys.length; i++) {
-        if (keys[i] !== "timeout_ms") {
-          throw new TypeError("ctx.http.get: unknown opts key " + JSON.stringify(keys[i]));
-        }
-      }
-      if (Object.prototype.hasOwnProperty.call(opts, "timeout_ms")) {
-        var value = opts.timeout_ms;
-        if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
-          throw new TypeError("ctx.http.get: opts.timeout_ms must be a positive integer");
-        }
-        timeout = value;
+    var proto = Object.getPrototypeOf(opts);
+    if (proto !== Object.prototype && proto !== null) {
+      throw new TypeError(label + ": opts must be a plain object");
+    }
+    var symbols = Object.getOwnPropertySymbols(opts);
+    if (symbols.length > 0) {
+      throw new TypeError(label + ": unknown opts key " + String(symbols[0]));
+    }
+    var keys = Object.getOwnPropertyNames(opts);
+    for (var i = 0; i < keys.length; i++) {
+      if (allowedKeys.indexOf(keys[i]) === -1) {
+        throw new TypeError(label + ": unknown opts key " + JSON.stringify(keys[i]));
       }
     }
-    var payload = { url: url };
-    if (timeout !== null) { payload.timeout_ms = timeout; }
+    return opts;
+  }
+  function callBridge(bridge, payload, label) {
     var raw;
     try {
-      raw = __sd_http_get(JSON.stringify(payload));
+      raw = bridge(JSON.stringify(payload));
     } catch (bridgeError) {
-      throw makeError("ctx.http.get: host bridge failed", "script_error");
+      throw makeError(label + ": host bridge failed", "script_error");
     }
     var result = JSON.parse(raw);
     if (!result.ok) {
@@ -358,6 +339,24 @@ var ctx = (function (__sd_http_get, __sd_upstream_marker) {
       }
       throw makeError(result.message, result.code);
     }
+    return result;
+  }
+  function httpGet(url, opts) {
+    if (typeof url !== "string") {
+      throw new TypeError("ctx.http.get: url must be a string");
+    }
+    var checked = checkPlainOpts(opts, "ctx.http.get", ["timeout_ms"]);
+    var timeout = null;
+    if (Object.prototype.hasOwnProperty.call(checked, "timeout_ms")) {
+      var value = checked.timeout_ms;
+      if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+        throw new TypeError("ctx.http.get: opts.timeout_ms must be a positive integer");
+      }
+      timeout = value;
+    }
+    var payload = { url: url };
+    if (timeout !== null) { payload.timeout_ms = timeout; }
+    var result = callBridge(__sd_http_get, payload, "ctx.http.get");
     var upstream = result.response;
     return Object.freeze({
       status: upstream.status,
@@ -366,11 +365,41 @@ var ctx = (function (__sd_http_get, __sd_upstream_marker) {
       bytes: function () { return decodeBase64(upstream.body_base64); }
     });
   }
+  function checkPipeOpts(opts) {
+    var out = { status: null, headers: [] };
+    var checked = checkPlainOpts(opts, "ctx.http.pipe", ["status", "headers"]);
+    if (Object.prototype.hasOwnProperty.call(checked, "status")) {
+      out.status = checkStatus(checked.status, "ctx.http.pipe");
+    }
+    if (Object.prototype.hasOwnProperty.call(checked, "headers")) {
+      out.headers = checkHeaders(checked.headers, "ctx.http.pipe");
+    }
+    return out;
+  }
+  function httpPipe(url, opts) {
+    if (state.response !== null) {
+      record("warn", ["ctx.http.pipe ignored: a response was already produced"]);
+      return false;
+    }
+    if (typeof url !== "string") {
+      throw new TypeError("ctx.http.pipe: url must be a string");
+    }
+    var checked = checkPipeOpts(opts);
+    var payload = { url: url, headers: checked.headers };
+    if (checked.status !== null) { payload.status = checked.status; }
+    var result = callBridge(__sd_http_pipe, payload, "ctx.http.pipe");
+    state.response = {
+      stream: true,
+      status: result.status,
+      headers: result.headers
+    };
+    return true;
+  }
   return Object.freeze({
     apiVersion: "__SD_API_VERSION__",
     request: freezeShallow(__SD_REQUEST__),
     env: Object.freeze(__SD_ENV__),
-    http: Object.freeze({ get: httpGet }),
+    http: Object.freeze({ get: httpGet, pipe: httpPipe }),
     log: Object.freeze({
       info: function () { record("info", arguments); },
       warn: function () { record("warn", arguments); },
@@ -382,15 +411,16 @@ var ctx = (function (__sd_http_get, __sd_upstream_marker) {
         return false;
       }
       state.response = {
-        status: checkStatus(status),
-        headers: checkHeaders(headers),
+        status: checkStatus(status, "ctx.respond"),
+        headers: checkHeaders(headers, "ctx.respond"),
         body: checkBody(body)
       };
       return true;
     }
   });
-})(__sd_http_get, __SD_UPSTREAM_MARKER__);
+})(__sd_http_get, __sd_http_pipe, __SD_UPSTREAM_MARKER__);
 delete globalThis.__sd_http_get;
+delete globalThis.__sd_http_pipe;
 "#;
 
 /// Read the recorded response and log lines back out of the realm.
@@ -405,8 +435,46 @@ fn js_literal(value: &Json) -> String {
 }
 
 thread_local! {
-    /// Per-request bridge used by the `__sd_http_get` native callback.
+    /// Per-request bridge used by the `__sd_http_get` and `__sd_http_pipe`
+    /// native callbacks.
     static HTTP_HOST: RefCell<Option<upstream::UpstreamAccess>> = const { RefCell::new(None) };
+
+    /// Per-request piped body captured by `__sd_http_pipe` and claimed by
+    /// `parse_host_record` once the script finishes.
+    static PIPE_STREAM: RefCell<Option<upstream::BodyStream>> = const { RefCell::new(None) };
+}
+
+/// Decode one host-bridge argument, run it against the request-scoped host,
+/// and encode the JSON result for the script. Both native callbacks share this
+/// wrapper so the fail-closed argument and error shapes cannot drift.
+fn host_bridge(
+    name: &str,
+    args: &[JsValue],
+    call: impl FnOnce(&upstream::UpstreamAccess, &Json) -> Json,
+) -> boa_engine::JsResult<JsValue> {
+    let Some(raw) = args.first().and_then(JsValue::as_string) else {
+        return Err(JsNativeError::typ()
+            .with_message(format!("{name}: expected a JSON string"))
+            .into());
+    };
+    let payload: Json = serde_json::from_str(&raw.to_std_string_escaped()).map_err(|error| {
+        JsNativeError::typ().with_message(format!("{name}: invalid payload: {error}"))
+    })?;
+    let result = HTTP_HOST.with(|cell| {
+        let borrowed = cell.borrow();
+        let Some(host) = borrowed.as_ref() else {
+            return json!({
+                "ok": false,
+                "code": "script_error",
+                "message": format!("{name} called outside a script request")
+            });
+        };
+        call(host, &payload)
+    });
+    let rendered = serde_json::to_string(&result).map_err(|error| {
+        JsNativeError::error().with_message(format!("{name}: cannot encode result: {error}"))
+    })?;
+    Ok(JsValue::from(JsString::from(rendered)))
 }
 
 /// Native bridge behind `ctx.http.get`; all policy checks live in `upstream`.
@@ -415,36 +483,45 @@ fn sd_http_get(
     args: &[JsValue],
     _context: &mut Context,
 ) -> boa_engine::JsResult<JsValue> {
-    let Some(raw) = args.first().and_then(JsValue::as_string) else {
-        return Err(JsNativeError::typ()
-            .with_message("__sd_http_get: expected a JSON string")
-            .into());
-    };
-    let call: Json = serde_json::from_str(&raw.to_std_string_escaped()).map_err(|error| {
-        JsNativeError::typ().with_message(format!("__sd_http_get: invalid payload: {error}"))
-    })?;
-    let result = HTTP_HOST.with(|cell| {
-        let borrowed = cell.borrow();
-        let Some(host) = borrowed.as_ref() else {
-            return json!({
-                "ok": false,
-                "code": "script_error",
-                "message": "ctx.http.get called outside a script request"
+    host_bridge("__sd_http_get", args, |host, call| match host.get(call) {
+        Ok(response) => json!({ "ok": true, "response": upstream::response_json(response) }),
+        Err(error) => json!({
+            "ok": false,
+            "code": error.code(),
+            "message": error.message()
+        }),
+    })
+}
+
+/// Native bridge behind `ctx.http.pipe`; all policy checks live in `upstream`.
+/// The streamed body stays in this thread-local until the script ends, so the
+/// JavaScript side only ever records the client status and headers.
+fn sd_http_pipe(
+    _this: &JsValue,
+    args: &[JsValue],
+    _context: &mut Context,
+) -> boa_engine::JsResult<JsValue> {
+    host_bridge("__sd_http_pipe", args, |host, call| match host.pipe(call) {
+        Ok(response) => {
+            PIPE_STREAM.with(|cell| {
+                *cell.borrow_mut() = Some(response.body);
             });
-        };
-        match host.get(&call) {
-            Ok(response) => json!({ "ok": true, "response": upstream::response_json(response) }),
-            Err(error) => json!({
-                "ok": false,
-                "code": error.code(),
-                "message": error.message()
-            }),
+            json!({
+                "ok": true,
+                "status": response.status,
+                "headers": response
+                    .headers
+                    .iter()
+                    .map(|(name, value)| json!([name, value]))
+                    .collect::<Vec<_>>(),
+            })
         }
-    });
-    let rendered = serde_json::to_string(&result).map_err(|error| {
-        JsNativeError::error().with_message(format!("__sd_http_get: cannot encode result: {error}"))
-    })?;
-    Ok(JsValue::from(JsString::from(rendered)))
+        Err(error) => json!({
+            "ok": false,
+            "code": error.code(),
+            "message": error.message()
+        }),
+    })
 }
 
 /// Process environment snapshot exposed as `ctx.env`.
@@ -479,12 +556,21 @@ fn evaluate(
     upstream: &UpstreamConfig,
     script_deadline: Instant,
 ) -> Outcome {
+    let client_range = request
+        .headers
+        .iter()
+        .find(|(name, _)| name == "range")
+        .map(|(_, value)| value.clone());
     HTTP_HOST.with(|cell| {
         *cell.borrow_mut() = Some(upstream::UpstreamAccess::new(
             upstream.allow_hosts.clone(),
             Duration::from_millis(upstream.timeout_ms),
             script_deadline,
+            client_range,
         ));
+    });
+    PIPE_STREAM.with(|cell| {
+        *cell.borrow_mut() = None;
     });
     let upstream_marker = upstream_marker();
     let prelude = PRELUDE
@@ -508,6 +594,13 @@ fn evaluate(
                 NativeFunction::from_fn_ptr(sd_http_get),
             )
             .map_err(|error| (false, error.to_string()))?;
+        context
+            .register_global_builtin_callable(
+                js_string!("__sd_http_pipe"),
+                1,
+                NativeFunction::from_fn_ptr(sd_http_pipe),
+            )
+            .map_err(|error| (false, error.to_string()))?;
         let evaluated = (|| -> Result<String, JsError> {
             context.eval(Source::from_bytes(&prelude))?;
             context.eval(Source::from_bytes(source))?;
@@ -527,6 +620,7 @@ fn evaluate(
             }
         }
     }));
+    let stream = PIPE_STREAM.with(|cell| cell.borrow_mut().take());
     HTTP_HOST.with(|cell| {
         cell.borrow_mut().take();
     });
@@ -534,7 +628,7 @@ fn evaluate(
         Err(_) => Outcome::failed(Error::Failed("script panicked in the engine".into())),
         Ok(Err((true, message))) => Outcome::failed(Error::UpstreamUnreachable(message)),
         Ok(Err((false, message))) => Outcome::failed(Error::Failed(message)),
-        Ok(Ok(dump)) => parse_host_record(&dump),
+        Ok(Ok(dump)) => parse_host_record(&dump, stream),
     }
 }
 
@@ -568,8 +662,10 @@ fn is_upstream_unreachable(error: &JsError, marker: &str, context: &mut Context)
         .unwrap_or(false)
 }
 
-/// Turn the extracted JSON record into an `Outcome`.
-fn parse_host_record(raw: &str) -> Outcome {
+/// Turn the extracted JSON record into an `Outcome`. A piped response carries
+/// only its status and headers through the realm; the body stream is handed
+/// back separately by the host bridge.
+fn parse_host_record(raw: &str, stream: Option<upstream::BodyStream>) -> Outcome {
     let host: Json = match serde_json::from_str(raw) {
         Ok(value) => value,
         Err(error) => {
@@ -622,16 +718,29 @@ fn parse_host_record(raw: &str) -> Outcome {
                 })
                 .collect()
         });
-    let body = match response.get("body") {
-        Some(Json::String(text)) => ResponseBody::Text(text.clone()),
-        Some(Json::Array(bytes)) => ResponseBody::Bytes(
-            bytes
-                .iter()
-                .filter_map(Json::as_u64)
-                .filter_map(|value| u8::try_from(value).ok())
-                .collect(),
-        ),
-        _ => ResponseBody::Text(String::new()),
+    let body = if response.get("stream").and_then(Json::as_bool) == Some(true) {
+        let Some(stream) = stream else {
+            return Outcome {
+                response: None,
+                logs,
+                error: Some(Error::Failed(
+                    "ctx.http.pipe: streamed response was not recorded".into(),
+                )),
+            };
+        };
+        ResponseBody::Stream(stream)
+    } else {
+        match response.get("body") {
+            Some(Json::String(text)) => ResponseBody::Text(text.clone()),
+            Some(Json::Array(bytes)) => ResponseBody::Bytes(
+                bytes
+                    .iter()
+                    .filter_map(Json::as_u64)
+                    .filter_map(|value| u8::try_from(value).ok())
+                    .collect(),
+            ),
+            _ => ResponseBody::Text(String::new()),
+        }
     };
     Outcome {
         response: Some(ScriptResponse {
