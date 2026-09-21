@@ -14,7 +14,7 @@
 
 ## 项目快照
 
-Stunt Double 是 Rust 实现的 Mock Server，面向对接真实外部依赖的集成联调。T1 落地 `serve`/`validate` 子命令、TOML 配置加载、路由匹配与结构化日志；T2 起命中路由会在内置 Boa 运行时执行 JavaScript，宿主注入的 `ctx`（`apiVersion`/`request`/`respond`/`log`/`env`）产生响应，脚本异常映射为 500 `script_error` 或 `script_no_response`；T4 增加 allowlist 约束的 `ctx.http.get`，上游 4xx/5xx 视为数据，未捕获的传输层失败映射为 502 `upstream_unreachable`；T5 提供 `demo/` 演示夹具，经 `ctx.http.get` 读取上游元数据并返回 CSV 清单；文件与二进制响应待后续切片完善。
+Stunt Double 是 Rust 实现的 Mock Server，面向对接真实外部依赖的集成联调。T1 落地 `serve`/`validate` 子命令、TOML 配置加载、路由匹配与结构化日志；T2 起命中路由会在内置 Boa 运行时执行 JavaScript，宿主注入的 `ctx`（`apiVersion`/`request`/`respond`/`log`/`env`）产生响应，脚本异常映射为 500 `script_error` 或 `script_no_response`；T4 增加 allowlist 约束的 `ctx.http.get`，上游 4xx/5xx 视为数据，未捕获的传输层失败映射为 502 `upstream_unreachable`；T5/T6 提供 `demo/` 演示夹具：清单路由经 `ctx.http.get` 生成 CSV，下载路由经 `ctx.http.pipe` 把上游 2xx 响应体流式转发给客户端（转发 Range、保留 206/`Content-Range`），并区分 `upstream_url_invalid` / `upstream_redirect_error` / `upstream_http_error` 等可捕获错误（见 ADR 0005 T6 修订）；静态文件读取、文件流与上传待后续切片完善。
 仓库采用 bin+lib 结构：src/lib.rs 暴露公共模块（config/matcher/script/server）；upstream 为内部模块，src/main.rs 作为 CLI entry point。详见 [docs/solutions/ci/doctest-lib-target-required.md](docs/solutions/ci/doctest-lib-target-required.md)）。
 - 核心能力：外部数据源、脚本变换、文件与二进制响应、内置 JS/Python、零外部运行时依赖。
 - 所有接口只有一条执行模型：`match → source → transform → response`。
