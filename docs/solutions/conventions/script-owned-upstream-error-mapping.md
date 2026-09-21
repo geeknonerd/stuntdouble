@@ -15,63 +15,63 @@ related_components: [script, upstream, demo]
 tags: [error-mapping, upstream, script, demo-fixture, fail-closed, manifest, download, pipe, streaming, range, end-to-end-tests]
 ---
 
-# Route scripts own upstream error mapping but must not absorb policy rejections
+# 路由脚本负责上游错误映射，但不得吸收策略拒绝
 
-## Context
+## 背景
 
-T4 fixed the engine boundary of `ctx.http.get`: a final non-redirect HTTP response, including 4xx/5xx, is data, while DNS, connection, TLS, and timeout failures throw a catchable error whose `error.code` is `upstream_unreachable` (`docs/contracts/ctx-api.md`, `src/upstream.rs`). Redirects are followed manually for at most three hops, with protocol and host re-validation on every hop (`UpstreamAccess::send_following_redirects` in `src/upstream.rs`). ADR 0005 states the split: a response means the semantics belong to the upstream, no response means they belong to the mock, and the business call belongs to the script; its T6 amendment records where `ctx.http.pipe` must deviate, because a streamed body never reaches the script (`plans/adr/0005-upstream-failure-semantics.md`).
+T4 确定了 `ctx.http.get` 的引擎边界：最终的非重定向 HTTP 响应（包括 4xx/5xx）是数据，而 DNS、连接、TLS 与超时失败抛出可捕获错误，其 `error.code` 为 `upstream_unreachable`（`docs/contracts/ctx-api.md`、`src/upstream.rs`）。重定向由宿主手动跟随，最多三跳，每跳都重新校验协议与 host（`src/upstream.rs` 中的 `UpstreamAccess::send_following_redirects`）。ADR 0005 说明了划分：有响应意味着语义属于上游，无响应意味着属于 mock，业务调用属于脚本；它的 T6 修订记录了 `ctx.http.pipe` 必须偏离的位置，因为流式 body 从不抵达脚本（`plans/adr/0005-upstream-failure-semantics.md`）。
 
-That engine boundary is not the client-visible error table. A prior-session probe (session history, 2026-09-20 T4) shows three questions were deliberately left open: which class a manifest JSON parse failure or a missing `data` array gets, how an allowlist/URL policy rejection should surface, and how a shipped demo fixture should be exercised in tests. T5 (issue #8) answered them inside the fixture and is merged; T6 (issue #9) added the streaming download route, which is under review in PR #19 as of this writing. Both ship from `demo/` on the feature branch.
+这条引擎边界不等于客户端可见的错误表。此前会话的一次探查（会话历史，2026-09-20 T4）显示有三个问题被有意留待决定：manifest JSON 解析失败或缺少 `data` 数组属于哪一类、allowlist／URL 策略拒绝应以什么形式暴露、以及随仓库发布的 demo fixture 应如何在测试中驱动。T5（issue #8）在 fixture 内回答了它们并已合并；T6（issue #9）增加了流式下载路由，写作时仍在 PR #19 评审中。两者都在特性分支上从 `demo/` 发布。
 
-`demo/stuntdouble.toml` declares `GET /demo/documents/manifest/:group` and `GET /demo/documents/download/:document_id` with `allow_hosts = ["metadata.example.com", "files.example.com"]`. The configuration contract requires `files.root` to be an existing directory (`docs/contracts/config.md`, `src/config.rs`), which is why the fixture carries `demo/files/.gitkeep`.
+`demo/stuntdouble.toml` 声明了 `GET /demo/documents/manifest/:group` 与 `GET /demo/documents/download/:document_id`，`allow_hosts = ["metadata.example.com", "files.example.com"]`。配置契约要求 `files.root` 是已存在的目录（`docs/contracts/config.md`、`src/config.rs`），这就是 fixture 携带 `demo/files/.gitkeep` 的原因。
 
-Both scripts read `ctx.env.METADATA_API_URL` (defaulting to `https://metadata.example.com/demo/documents`). The manifest script answers the fixed header `文件编码,文件标题,系统代码` with rows in `code,title,system_code` order, quotes any field containing a comma, double quote, CR, or LF, doubles internal quotes, and always ends with one newline; an empty `data` array answers the header row only (`demo/scripts/manifest.js`).
+两个脚本都读取 `ctx.env.METADATA_API_URL`（默认 `https://metadata.example.com/demo/documents`）。manifest 脚本答固定表头 `文件编码,文件标题,系统代码`，行数据按 `code,title,system_code` 顺序；任何包含逗号、双引号、CR 或 LF 的字段都会加引号、内部双引号翻倍，且始终以一个换行结尾；`data` 为空数组时只答表头行（`demo/scripts/manifest.js`）。
 
-## Guidance
+## 指导
 
-### 1. Classify by source before choosing the client-visible answer
+### 1. 先按来源分类，再决定客户端可见的回答
 
-`ctx.http.get` keeps the ADR 0005 split: a final HTTP response, including 4xx/5xx, is data; DNS, connection, TLS, and timeout failures are catchable transport errors; an allowlist rejection stays a policy error.
+`ctx.http.get` 保持 ADR 0005 的划分：最终 HTTP 响应（包括 4xx/5xx）是数据；DNS、连接、TLS 与超时失败是可捕获的传输错误；allowlist 拒绝保持策略错误。
 
-`ctx.http.pipe` cannot hand a body to the script, so it needs its own classification. The host raises these catchable `error.code` values, and the route script maps the ones it owns:
+`ctx.http.pipe` 无法把 body 交给脚本，因此需要自己的分类。宿主抛出以下可捕获的 `error.code`，路由脚本映射它负责的那些：
 
-| Host outcome | `error.code` | Notes |
+| 宿主结果 | `error.code` | 说明 |
 | --- | --- | --- |
-| Final non-2xx answer to `ctx.http.pipe` | `upstream_http_error` | A streamed body cannot be inspected, so the script owns the client code (ADR 0005 T6 amendment) |
-| URL that does not parse, or a scheme other than http/https | `upstream_url_invalid` | Bad upstream metadata, not a transport failure |
-| Redirect chain the host cannot follow (over 3 hops or an unusable `Location`) | `upstream_redirect_error` | Separate from an allowlist rejection |
-| DNS, connection, TLS, or timeout failure | `upstream_unreachable` | Also the uncaught fallback for `ctx.http.get` |
-| URL or host rejected by policy, such as an allowlist miss | `script_error` | Configuration fault; never dressed up as a gateway failure |
+| `ctx.http.pipe` 收到最终非 2xx 响应 | `upstream_http_error` | 流式 body 无法检查，因此客户端错误码由脚本掌握（ADR 0005 T6 修订） |
+| URL 无法解析，或 scheme 不是 http/https | `upstream_url_invalid` | 上游元数据有误，而非传输失败 |
+| 宿主无法跟随的重定向链（超过 3 跳或 `Location` 不可用） | `upstream_redirect_error` | 与 allowlist 拒绝区分开 |
+| DNS、连接、TLS 或超时失败 | `upstream_unreachable` | 也是 `ctx.http.get` 未捕获时的兜底 |
+| URL 或 host 被策略拒绝，例如 allowlist 未命中 | `script_error` | 配置故障，绝不伪装成网关失败 |
 
-### 2. The route script defines the route's error table
+### 2. 路由脚本定义该路由的错误表
 
-Mapping adopted by the document manifest demo:
+文档清单 demo 采用的映射：
 
-| Upstream outcome | Script action | Client-visible result |
+| 上游结果 | 脚本动作 | 客户端可见结果 |
 | --- | --- | --- |
-| Status outside 200–299 | `metadataBadGateway(...)` | 502 `{"error":"metadata_bad_gateway"}` |
-| `JSON.parse` fails | `metadataBadGateway(...)` | 502 `{"error":"metadata_bad_gateway"}` |
-| Top-level `data` missing or not an array | `metadataBadGateway(...)` | 502 `{"error":"metadata_bad_gateway"}` |
+| 状态不在 200–299 | `metadataBadGateway(...)` | 502 `{"error":"metadata_bad_gateway"}` |
+| `JSON.parse` 失败 | `metadataBadGateway(...)` | 502 `{"error":"metadata_bad_gateway"}` |
+| 顶层 `data` 缺失或不是数组 | `metadataBadGateway(...)` | 502 `{"error":"metadata_bad_gateway"}` |
 | `error.code === "upstream_unreachable"` | `metadataBadGateway(...)` | 502 `{"error":"metadata_bad_gateway"}` |
-| Any other policy or configuration error | re-`throw` | 500 `script_error` when uncaught |
+| 其他任何策略或配置错误 | 重新 `throw` | 未捕获时为 500 `script_error` |
 
-The first four rows are explicit script decisions (`demo/scripts/manifest.js`). The error body is fixed JSON and the diagnostic reason goes to the server log only — never an upstream body or a stack (`demo/scripts/manifest.js`, `plans/adr/0005-upstream-failure-semantics.md`). The fallback classification lives in `src/script.rs`: an uncaught transport failure is 502 `upstream_unreachable`, a script exception is 500 `script_error`.
+前四行是脚本的显式决策（`demo/scripts/manifest.js`）。错误 body 是固定 JSON，诊断原因只进服务端日志——绝不含上游 body 或堆栈（`demo/scripts/manifest.js`、`plans/adr/0005-upstream-failure-semantics.md`）。兜底分类在 `src/script.rs`：未捕获的传输失败是 502 `upstream_unreachable`，脚本异常是 500 `script_error`。
 
-Mapping adopted by the document download demo (T6, `demo/scripts/download.js`):
+文档下载 demo 采用的映射（T6，`demo/scripts/download.js`）：
 
-| Host outcome | Script action | Client-visible result |
+| 宿主结果 | 脚本动作 | 客户端可见结果 |
 | --- | --- | --- |
-| Metadata outcome (unchanged from the manifest table) | `metadataBadGateway(...)` | 502 `{"error":"metadata_bad_gateway"}` |
-| `document_id` not found | `sendJson(404, ...)` | 404 `{"error":"document_not_found"}` |
+| 元数据结果（与 manifest 表一致） | `metadataBadGateway(...)` | 502 `{"error":"metadata_bad_gateway"}` |
+| 找不到 `document_id` | `sendJson(404, ...)` | 404 `{"error":"document_not_found"}` |
 | `error.code === "upstream_url_invalid"` | `sendJson(502, "pdf_url_invalid")` | 502 `{"error":"pdf_url_invalid"}` |
 | `upstream_unreachable` / `upstream_http_error` / `upstream_redirect_error` | `sendJson(502, "pdf_bad_gateway")` | 502 `{"error":"pdf_bad_gateway"}` |
-| Any other policy or configuration error | re-`throw` | 500 `script_error` when uncaught |
+| 其他任何策略或配置错误 | 重新 `throw` | 未捕获时为 500 `script_error` |
 
-`metadata_bad_gateway` is this demo's business decision, not a mandate for every route. The invariant is: the script decides the business code, and a policy rejection is never dressed up as an upstream outage.
+`metadata_bad_gateway` 是这个 demo 的业务决策，不是对所有路由的强制要求。不变量是：业务错误码由脚本决定，策略拒绝绝不被伪装成上游故障。
 
-### 3. Catch the codes the route owns; rethrow policy rejections
+### 3. 只捕获该路由负责的错误码，重新抛出策略拒绝
 
-For `ctx.http.get`, that means transport failures only:
+对 `ctx.http.get`，即只捕获传输失败：
 
 ```js
 try {
@@ -87,7 +87,7 @@ try {
 }
 ```
 
-For `ctx.http.pipe`, that means the gateway classes plus the invalid-URL class, while a policy rejection still falls through:
+对 `ctx.http.pipe`，即网关类错误加非法 URL 类，策略拒绝仍然穿透：
 
 ```js
 try {
@@ -108,42 +108,42 @@ try {
 }
 ```
 
-Both patterns ship with the fixture (`demo/scripts/manifest.js`, `demo/scripts/download.js`). An unconditional `ctx.respond(502, ...)` in the catch block turns a host missing from `allow_hosts`, or a wrong scheme, into "the upstream is down" and contradicts the fail-closed boundary in ADR 0005.
+两种写法都随 fixture 一起发布（`demo/scripts/manifest.js`、`demo/scripts/download.js`）。在 catch 块里无条件 `ctx.respond(502, ...)` 会把「host 不在 `allow_hosts`」或 scheme 写错变成「上游挂了」，违背 ADR 0005 的 fail-closed 边界。
 
-### 4. The success path is part of the same contract
+### 4. 成功路径属于同一份契约
 
-Error branches must not change the success shape: the manifest answers `Content-Type: text/plain; charset=utf-8`, and both a populated and an empty `data` array end with exactly one `\n`; the download answers `Content-Type: application/pdf` plus a `Content-Disposition` filename and streams the upstream bytes unchanged. Error responses answer `application/json; charset=utf-8` with a stable `error` code (`demo/scripts/manifest.js`, `demo/scripts/download.js`).
+错误分支不得改变成功路径的形状：manifest 答 `Content-Type: text/plain; charset=utf-8`，无论 `data` 有数据还是空数组都以恰好一个 `\n` 结尾；下载答 `Content-Type: application/pdf` 加 `Content-Disposition` 文件名，并原样流式转发上游字节。错误响应答 `application/json; charset=utf-8`，带稳定的 `error` 码（`demo/scripts/manifest.js`、`demo/scripts/download.js`）。
 
-### 5. Test a shipped fixture through the external boundary
+### 5. 通过外部边界测试随仓库发布的 fixture
 
-The repository has exactly one end-to-end seam: the built binary plus real HTTP (`tests/cli.rs`). The demo fixture approach:
+仓库只有一条端到端接缝：构建出的二进制 + 真实 HTTP（`tests/cli.rs`）。demo fixture 的做法：
 
-- Copy the shipped fixture, then rewrite only two markers — `port = 3000` and `allow_hosts = ["metadata.example.com", "files.example.com"]` — asserting each marker first, so a fixture edit fails loudly instead of silently testing something else (`demo_fixture` in `tests/cli.rs`).
-- Point `METADATA_API_URL` at a stdlib TCP fake upstream and assert external behavior only: status, content type, exact body bytes, error JSON.
-- The fake upstream consumes one canned response per accepted connection (`Upstream` in `tests/cli.rs`), so an N-request test needs N responses — the download scenario needs one metadata answer plus one answer per PDF request, and the metadata-failure test supplies 404 then 503.
-- Establish a positive control before a negative assertion about a recorded request: the test first proves the captured head contains `host:`, then asserts that no client `x-request-id` leaked (`demo_download_route_does_not_forward_client_request_id`).
-- Range coverage asserts both sides of the pipe: the recorded upstream request carries `range:`, and the client response answers 206 with the upstream `Content-Range` (`demo_download_route_forwards_range_and_preserves_content_range`).
-- For `ctx.http.pipe` error codes, let the script catch and answer the code itself, then assert the stable class (`ctx_http_pipe_redirect_limit_is_catchable`, `ctx_http_pipe_url_rejection_is_catchable`).
+- 复制随仓库发布的 fixture，然后只改写两个标记——`port = 3000` 与 `allow_hosts = ["metadata.example.com", "files.example.com"]`——并先断言标记存在，这样 fixture 一改动就会大声失败，而不是悄悄测了别的东西（`tests/cli.rs` 中的 `demo_fixture`）。
+- 把 `METADATA_API_URL` 指向标准库 TCP fake upstream，只断言外部行为：状态、content type、精确 body 字节、错误 JSON。
+- fake upstream 每个被接受的连接消费一条预设响应（`tests/cli.rs` 中的 `Upstream`），因此 N 个请求的测试需要 N 条响应——下载场景需要一条元数据响应，外加每个 PDF 请求一条；元数据失败测试先给 404 再给 503。
+- 在针对被记录请求做否定断言之前，先建立正向对照：测试先证明捕获到的请求头包含 `host:`，再断言没有客户端 `x-request-id` 泄漏（`demo_download_route_does_not_forward_client_request_id`）。
+- Range 覆盖同时断言 pipe 两端：被记录的上游请求带 `range:`，客户端响应答 206 且带上游 `Content-Range`（`demo_download_route_forwards_range_and_preserves_content_range`）。
+- 对 `ctx.http.pipe` 的错误码，让脚本自己捕获并回答该码，然后断言稳定的类别（`ctx_http_pipe_redirect_limit_is_catchable`、`ctx_http_pipe_url_rejection_is_catchable`）。
 
-## Why This Matters
+## 为什么重要
 
-1. It keeps the ADR 0005 boundary honest. "Has a response / has no response" is the engine's split; the business error table belongs to the script, and a catch-all erases that second layer. The T6 amendment records the one deviation: `ctx.http.pipe` raises `upstream_http_error` for a final non-2xx answer, because a streamed body cannot be data the script can inspect.
-2. It separates dependency failure from operator misconfiguration. An allowlist rejection means configuration must change, not that the upstream is down; reporting it as 502 sends alerts, retries, and on-call judgement the wrong way and hides a fail-closed control. A malformed `pdf_url` is upstream data instead: the route owns it and answers `pdf_url_invalid`.
-3. It gives callers a stable, assertable surface: `metadata_bad_gateway`, `pdf_url_invalid`, `pdf_bad_gateway`, and `script_error` are public categories. The engine's own error bodies carry only `request_id` and `error` (`src/server.rs`), and ADR 0005 requires stacks, upstream bodies, and internal addresses never to reach the client — a script that echoes what it fetched is what would break that guarantee (`plans/adr/0005-upstream-failure-semantics.md`, `docs/contracts/ctx-api.md`).
-4. It keeps tests from giving false confidence: marker asserts pin the configuration under test, the positive control makes the negative header check meaningful, and one response per connection keeps N-request scenarios on the real network path.
+1. 它让 ADR 0005 的边界保持诚实。「有响应／无响应」是引擎的划分；业务错误表属于脚本，一个 catch-all 会把第二层抹掉。T6 修订记录了一处偏差：`ctx.http.pipe` 对最终非 2xx 响应抛 `upstream_http_error`，因为流式 body 无法成为脚本可检查的数据。
+2. 它把依赖故障与运维误配置分开。allowlist 拒绝意味着配置需要改，而不是上游挂了；把它报成 502 会把告警、重试与 on-call 判断引向错误方向，并掩盖一个 fail-closed 控制。畸形的 `pdf_url` 则属于上游数据：路由负责它，回答 `pdf_url_invalid`。
+3. 它给调用方稳定的、可断言的表面：`metadata_bad_gateway`、`pdf_url_invalid`、`pdf_bad_gateway` 与 `script_error` 是公开类别。引擎自己的错误 body 只带 `request_id` 与 `error`（`src/server.rs`），且 ADR 0005 要求堆栈、上游 body 与内部地址绝不抵达客户端——脚本若回显它取到的内容，正是会破坏该保证的做法（`plans/adr/0005-upstream-failure-semantics.md`、`docs/contracts/ctx-api.md`）。
+4. 它让测试不给出虚假信心：标记断言钉住被测配置，正向对照让否定 header 检查有意义，每个连接一条响应让 N 请求场景始终走在真实网络路径上。
 
-## When to Apply
+## 何时适用
 
-- Any route script that calls `ctx.http.get` and turns upstream outcomes into its own client-visible errors.
-- Any route script that pipes bytes through `ctx.http.pipe` and must separate `upstream_url_invalid`, `upstream_redirect_error`, `upstream_http_error`, and `upstream_unreachable` from an allowlist `script_error`.
-- Any route that defines stable internal error codes and must separate an upstream outage, bad upstream data, and this service's own configuration or script errors.
-- Updating an error table, README, contract prose, or runbook: a sentence saying "metadata failures answer 502" must also name the allowlist rejection and the invalid-URL class, or link to where they are stated.
-- Adding end-to-end coverage for a shipped config and script fixture, especially when copying configuration, faking an upstream, or asserting on request headers.
-- When pass-through of upstream status codes is intended: make that an explicit business choice, and never let it hide a policy error.
+- 任何调用 `ctx.http.get` 并把上游结果转成自己的客户端可见错误的路由脚本。
+- 任何通过 `ctx.http.pipe` 传输字节、且必须把 `upstream_url_invalid`、`upstream_redirect_error`、`upstream_http_error`、`upstream_unreachable` 与 allowlist `script_error` 区分开的路由脚本。
+- 任何定义稳定内部错误码、且必须区分上游故障、上游数据错误与本服务自身配置／脚本错误的路由。
+- 更新错误表、README、契约描述或 runbook 时：一句「元数据失败答 502」也必须点名 allowlist 拒绝与非法 URL 类，或链接到它们的说明位置。
+- 为随仓库发布的配置与脚本 fixture 增加端到端覆盖时，尤其是复制配置、伪造上游或对请求 header 做断言的时候。
+- 有意透传上游状态码时：把那当作显式的业务选择，绝不让它掩盖策略错误。
 
-## Examples
+## 示例
 
-### Anti-pattern: catch-all turns a configuration error into 502
+### 反模式：catch-all 把配置错误变成 502
 
 ```js
 try {
@@ -154,9 +154,9 @@ try {
 }
 ```
 
-With a host missing from `allow_hosts`, or `METADATA_API_URL` on the wrong scheme, this still answers "upstream gateway failure". The caller sees a retryable external dependency problem while the operator never sees the configuration fault that must be fixed.
+当 host 不在 `allow_hosts`，或 `METADATA_API_URL` 的 scheme 写错时，这段代码仍然回答「上游网关故障」。调用方看到的是可重试的外部依赖问题，而运维永远看不到那个必须修复的配置故障。
 
-### Working pattern and its test
+### 正确写法及其测试
 
 ```js
 try {
@@ -183,11 +183,11 @@ assert!(head.contains("host:"), "recorded head: {head}");
 assert!(!head.contains("x-request-id"), "client header leaked upstream");
 ```
 
-Two manifest requests need two canned responses, and `host:` is the positive control that makes the later negative assertion about `x-request-id` meaningful (`demo_manifest_route_maps_metadata_non_2xx_to_502`, `demo_manifest_route_does_not_forward_client_request_id`).
+两次 manifest 请求需要两条预设响应，而 `host:` 是正向对照，让随后针对 `x-request-id` 的否定断言有意义（`demo_manifest_route_maps_metadata_non_2xx_to_502`、`demo_manifest_route_does_not_forward_client_request_id`）。
 
-## Related
+## 相关
 
-- [ADR 0005 — upstream failure semantics](../../../plans/adr/0005-upstream-failure-semantics.md)
-- [`ctx` API contract](../../contracts/ctx-api.md)
-- [Demo fixture README](../../../demo/README.md)
-- [T6 issue #9](https://github.com/geeknonerd/stuntdouble/issues/9), [T5 issue #8](https://github.com/geeknonerd/stuntdouble/issues/8), and [T4 issue #7](https://github.com/geeknonerd/stuntdouble/issues/7)
+- [ADR 0005 —— 上游失败语义](../../../plans/adr/0005-upstream-failure-semantics.md)
+- [`ctx` API 契约](../../contracts/ctx-api.md)
+- [演示夹具 README](../../../demo/README.md)
+- [T6 issue #9](https://github.com/geeknonerd/stuntdouble/issues/9)、[T5 issue #8](https://github.com/geeknonerd/stuntdouble/issues/8)、[T4 issue #7](https://github.com/geeknonerd/stuntdouble/issues/7)
