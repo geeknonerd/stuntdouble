@@ -21,7 +21,7 @@ The design goal is a single binary that behaves like the real dependency closely
 
 ## Status
 
-**Script execution and upstream HTTP (T4) implemented.** `stuntdouble serve` and `stuntdouble validate` run from a TOML configuration, match routes by method and path (`:param` capture), and execute each matched route's JavaScript in the embedded Boa runtime with a host-injected `ctx` (`apiVersion`, `request`, `http.get`, `respond`, `log`, `env`). `ctx.http.get` reaches only hosts listed in `[upstream] allow_hosts`, treats upstream 4xx/5xx responses as data, and maps uncaught transport failures to 502 `upstream_unreachable`. Unmatched routes answer 404 `not_found`; scripts that throw or time out answer 500 `script_error`, and scripts that never call `ctx.respond` answer 500 `script_no_response` — always with a `request_id`. File and binary responses are the next slices.
+**Script execution and upstream HTTP (T4) implemented.** `stuntdouble serve` and `stuntdouble validate` run from a TOML configuration, match routes by method and path (`:param` capture), and execute each matched route's JavaScript in the embedded Boa runtime with a host-injected `ctx` (`apiVersion`, `request`, `http.get`, `respond`, `log`, `env`). `ctx.http.get` reaches only hosts listed in `[upstream] allow_hosts`, treats upstream 4xx/5xx responses as data, and maps uncaught transport failures to 502 `upstream_unreachable`. Unmatched routes answer 404 `not_found`; scripts that throw or time out answer 500 `script_error`, and scripts that never call `ctx.respond` answer 500 `script_no_response` — always with a `request_id`. The document manifest scenario from `plans/demo-document-catalog.md` runs from the in-repo fixture in [`demo/`](demo/README.md), which answers the CSV manifest from upstream metadata through `ctx.http.get`. File and binary responses are the next slices.
 
 The execution model and security boundaries were fixed before implementation details. See [plans/adr/](plans/adr/) and [docs/solutions/](docs/solutions/).
 
@@ -60,6 +60,7 @@ For detailed workflows and contracts, see [docs/README.md](docs/README.md).
 
 - [Product definition](plans/product-definition.md) — v1 scope, host API, non-goals.
 - [Demo scenario](plans/demo-document-catalog.md) — CSV manifest and PDF download contract.
+- [Demo fixture](demo/README.md) — runnable configuration, script, and error mapping for the CSV manifest.
 - [Architecture decisions](plans/adr/) — ADR 0001–0012.
 - [Development and release workflow](docs/development.md) — branch, commit, CI, versioning, and release rules.
 - [Governance](GOVERNANCE.md) — maintainer model and response expectations.

@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Fifth implementation slice (T5): the repository ships the runnable demo fixture from
+  `plans/demo-document-catalog.md` §3.1 (`demo/stuntdouble.toml` plus `demo/scripts/manifest.js`).
+  `GET /demo/documents/manifest/:group` reads upstream metadata through `ctx.http.get` and answers
+  `text/plain; charset=utf-8` CSV with the fixed `文件编码,文件标题,系统代码` header, quoting any field
+  that contains a comma, a double quote, CR, or LF; an empty `data` array answers the header row plus
+  one trailing newline. Metadata responses that are non-2xx, unreadable as JSON, or missing the `data`
+  array, plus metadata transport failures, answer 502 `metadata_bad_gateway`; allowlist and URL policy
+  failures stay 500 `script_error`, per ADR 0005. End-to-end tests drive the built binary against the
+  in-repo fixture with a stdlib fake upstream.
 - Fourth implementation slice (T4): `ctx.http.get` performs allowlisted upstream HTTP GETs from route scripts. `[upstream] allow_hosts`/`timeout_ms` and per-call `opts.timeout_ms` bound access; redirects are followed manually for at most 3 hops with protocol and host re-validation on every hop. Upstream 4xx/5xx responses are data, transport failures are catchable script exceptions, and uncaught transport failures map to 502 `upstream_unreachable` with a `request_id`.
 - `ctx.http.get` now caps upstream bodies at 8 MiB and carries them as base64, decoding into a `Uint8Array` only when `bytes()` is called; larger bodies will use `ctx.http.pipe` (T6). Upstream requests are direct and ignore environment proxy variables. The `apiVersion` 1 type definition source was added at `types/ctx-api-v1.d.ts`; T8 (#11) publishes it with release artifacts.
 - New dependencies: `ureq` 3.4 (MIT OR Apache-2.0) with rustls and the platform certificate verifier for HTTPS, `rustls` 0.23 with the ring provider, `base64` 0.23 (MIT OR Apache-2.0) for the bounded binary bridge, and `url` 2 (MIT OR Apache-2.0) for URL parsing and redirect resolution; the standard library has no HTTP, TLS, or base64 codec. TLS uses the host trust store instead of a bundled root data set.
