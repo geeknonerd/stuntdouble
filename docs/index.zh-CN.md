@@ -4,7 +4,7 @@ title: Stunt Double
 
 # Stunt Double
 
-[English](./index.md) | **中文**
+[English](./index.md) \| **中文**
 
 > 本页是英文版 [index.md](./index.md) 的译本；如有出入，以英文版为准。
 

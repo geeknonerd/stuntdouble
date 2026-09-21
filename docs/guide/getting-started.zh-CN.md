@@ -1,6 +1,6 @@
 # 快速开始
 
-[English](./getting-started.md) | **中文**
+[English](./getting-started.md) \| **中文**
 
 > 本页是英文版 [getting-started.md](./getting-started.md) 的译本；如有出入，以英文版为准。
 

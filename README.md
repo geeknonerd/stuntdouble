@@ -1,6 +1,6 @@
 # Stunt Double
 
-**English** | [中文](README.zh-CN.md)
+**English** \| [中文](README.zh-CN.md)
 
 > **A test double that plays the whole show.**
 
