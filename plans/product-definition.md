@@ -1,7 +1,7 @@
 # Mock Server 产品功能定义
 
-- 状态：`功能已收敛`（配置文件主格式已确认，公开契约草案已建立）
-- 更新：2026-09-19
+- 状态：`功能已收敛`（配置文件主格式已确认，公开契约已在 T8 冻结）
+- 更新：2026-09-22
 - 关联：[Mock 服务选型调研](../research/mock-server-landscape.md)、[示例文档清单与二进制下载场景](demo-document-catalog.md)、[配置契约](../docs/contracts/config.md)、[ctx API 契约](../docs/contracts/ctx-api.md)、[CLI 契约](../docs/contracts/cli.md)
 
 ## 1. 产品命题与定位

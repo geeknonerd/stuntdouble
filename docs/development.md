@@ -60,7 +60,7 @@ docs: describe the release process
 5. 合并 release PR；该合并即授权发布。
 6. `release-plz` 创建 tag，并可选发布到 crates.io。
 7. `cargo-dist` 从 tag 构建发布产物。
-8. 发布 GitHub Release、容器镜像、校验和、attestation、SBOM 与 `ctx` API `.d.ts` 类型定义。
+8. 发布 GitHub Release、容器镜像、校验和、attestation、SBOM 与 `ctx` API `.d.ts` 类型定义，并验证 `.d.ts` 已作为 release asset 附带。
 9. 在仓库内公告发布。
 
 发布失败不得复用或覆盖已有 tag；修复问题后发布新的 patch 或预发布版本。只有 crates.io 发布损坏时才用 `cargo yank`，绝不删除已发布的版本。

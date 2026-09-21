@@ -139,9 +139,11 @@ enum Handled {
     Responded(ScriptResponse),
 }
 
-/// Bind address from configuration. Only numeric IP accepted in T1.
+/// Bind address from configuration. The loader validates the IP literal, and
+/// this second parse keeps the library entry point safe when `Config` is built
+/// directly.
 pub fn bind_address(config: &Config) -> io::Result<SocketAddr> {
-    let ip: std::net::IpAddr = config.server.bind.parse().map_err(|_| {
+    let ip = crate::config::parse_bind(&config.server.bind).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
@@ -268,30 +270,36 @@ fn map_handled(handled: Handled, request_id: &str, verbose: bool) -> Mapped {
                 body: MappedBody::Ready(Body::from(body)),
             }
         }
-        Handled::Failed(error) => {
-            let class = error.class();
-            let client_detail = if verbose { Some(error.detail()) } else { None };
-            let body = error_body(request_id, class, client_detail);
-            Mapped {
-                status: error.status(),
-                error_class: class,
-                headers: HeaderMap::new(),
-                body_bytes: u64::try_from(body.len()).ok(),
-                body: MappedBody::Ready(Body::from(body)),
-            }
-        }
-        Handled::Responded(response) => Mapped {
-            status: StatusCode::from_u16(response.status)
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            error_class: "",
-            headers: response_headers(&response.headers),
-            body_bytes: script_body_size(&response),
-            body: match response.body {
-                ResponseBody::Text(text) => MappedBody::Ready(Body::from(text.into_bytes())),
-                ResponseBody::Bytes(bytes) => MappedBody::Ready(Body::from(bytes)),
-                ResponseBody::Stream(pipe) => MappedBody::Stream(pipe),
+        Handled::Failed(error) => failed_mapped(&error, request_id, verbose),
+        Handled::Responded(response) => match response_headers(&response.headers) {
+            Ok(headers) => Mapped {
+                status: StatusCode::from_u16(response.status)
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                error_class: "",
+                headers,
+                body_bytes: script_body_size(&response),
+                body: match response.body {
+                    ResponseBody::Text(text) => MappedBody::Ready(Body::from(text.into_bytes())),
+                    ResponseBody::Bytes(bytes) => MappedBody::Ready(Body::from(bytes)),
+                    ResponseBody::Stream(pipe) => MappedBody::Stream(pipe),
+                },
             },
+            Err(message) => failed_mapped(&script::Error::Failed(message), request_id, verbose),
         },
+    }
+}
+
+/// Map a script failure onto its client-visible status, body, and log class.
+fn failed_mapped(error: &script::Error, request_id: &str, verbose: bool) -> Mapped {
+    let class = error.class();
+    let client_detail = if verbose { Some(error.detail()) } else { None };
+    let body = error_body(request_id, class, client_detail);
+    Mapped {
+        status: error.status(),
+        error_class: class,
+        headers: HeaderMap::new(),
+        body_bytes: u64::try_from(body.len()).ok(),
+        body: MappedBody::Ready(Body::from(body)),
     }
 }
 
@@ -409,19 +417,15 @@ fn error_body(request_id: &str, class: &str, detail: Option<&str>) -> Vec<u8> {
     serde_json::to_vec(&body).unwrap_or_default()
 }
 
-/// Convert script-provided header pairs; malformed entries are dropped.
-fn response_headers(pairs: &[(String, String)]) -> HeaderMap {
+/// Convert script-provided header pairs. The script boundary has already
+/// validated the same grammar; this second check keeps internal state changes
+/// from bypassing the fail-closed contract.
+fn response_headers(pairs: &[(String, String)]) -> Result<HeaderMap, String> {
     let mut headers = HeaderMap::new();
-    for (name, value) in pairs {
-        let (Ok(name), Ok(value)) = (
-            HeaderName::from_bytes(name.as_bytes()),
-            HeaderValue::from_str(value),
-        ) else {
-            continue;
-        };
+    for (name, value) in script::validated_header_pairs(pairs)? {
         headers.append(name, value);
     }
-    headers
+    Ok(headers)
 }
 
 fn log(payload: &serde_json::Value) {

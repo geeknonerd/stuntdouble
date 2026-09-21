@@ -1,5 +1,6 @@
 // Configuration contract: docs/contracts/config.md
 use std::fmt;
+use std::net::{AddrParseError, IpAddr};
 use std::path::{Path, PathBuf};
 
 const HTTP_METHODS: [&str; 7] = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"];
@@ -146,8 +147,8 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
         &mut v,
     );
 
-    let config_version =
-        req_string(root_table, "config_version", "config_version", &mut v).unwrap_or_default();
+    let config_version = req_string(root_table, "config_version", "config_version", &mut v);
+    validate_config_version(config_version.as_deref(), &mut v);
 
     let server = match root_table.get("server") {
         None => {
@@ -160,7 +161,7 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
         Some(toml::Value::Table(t)) => {
             reject_unknown(t, &["bind", "port"], "server", &mut v);
             ServerConfig {
-                bind: opt_string(t, "bind", "server.bind", &mut v).unwrap_or_else(default_bind),
+                bind: opt_bind(t, "server.bind", &mut v).unwrap_or_else(default_bind),
                 port: opt_port(t, "server.port", &mut v).unwrap_or_else(default_port),
             }
         }
@@ -204,24 +205,14 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
 
     let routes = parse_routes(root_table, path, &mut v);
 
+    let root_dir = existing_dir(root_dir, &mut v);
     if !v.is_empty() {
         return Err(schema_error(path, v));
     }
-
     let root_dir = root_dir.expect("files.root presence is enforced by violations");
-    if !root_dir.is_dir() {
-        return Err(schema_error(
-            path,
-            vec![Violation {
-                field: "files.root".into(),
-                expected: "existing directory".into(),
-                actual: root_dir.display().to_string(),
-            }],
-        ));
-    }
 
     Ok(Config {
-        config_version,
+        config_version: config_version.expect("config_version presence is enforced by violations"),
         server,
         files: FilesConfig { root: root_dir },
         sandbox,
@@ -234,6 +225,31 @@ fn schema_error(path: &Path, violations: Vec<Violation>) -> ConfigError {
     ConfigError::Schema {
         path: path.to_path_buf(),
         violations,
+    }
+}
+
+/// `files.root` must already exist; the loader never creates it.
+fn existing_dir(root: Option<PathBuf>, out: &mut Vec<Violation>) -> Option<PathBuf> {
+    let root = root?;
+    if root.is_dir() {
+        return Some(root);
+    }
+    out.push(Violation {
+        field: "files.root".into(),
+        expected: "existing directory".into(),
+        actual: root.display().to_string(),
+    });
+    None
+}
+
+/// The v1 slice defines exactly one configuration family.
+fn validate_config_version(value: Option<&str>, out: &mut Vec<Violation>) {
+    if let Some(value) = value.filter(|value| *value != "1") {
+        out.push(Violation {
+            field: "config_version".into(),
+            expected: "\"1\"".into(),
+            actual: format!("string {value:?}"),
+        });
     }
 }
 
@@ -342,6 +358,13 @@ fn parse_routes(root: &Table, config_path: &Path, v: &mut Vec<Violation>) -> Vec
         v.push(bad("routes", "array of route tables", value));
         return Vec::new();
     };
+    if items.is_empty() {
+        v.push(Violation {
+            field: "routes".into(),
+            expected: "at least one route table".into(),
+            actual: "array of 0".into(),
+        });
+    }
 
     let base = config_path.parent().unwrap_or(Path::new("."));
     let mut routes = Vec::new();
@@ -454,6 +477,41 @@ fn req_string(table: &Table, key: &str, field: &str, out: &mut Vec<Violation>) -
         return None;
     }
     opt_string(table, key, field, out)
+}
+
+/// Shared parser for the `server.bind` IP-literal rule.
+pub(crate) fn parse_bind(value: &str) -> Result<IpAddr, AddrParseError> {
+    value.parse()
+}
+
+/// IP literal for `server.bind`; the CLI does not resolve hostnames in this slice.
+fn opt_bind(table: &Table, field: &str, out: &mut Vec<Violation>) -> Option<String> {
+    match table.get("bind") {
+        None => None,
+        Some(toml::Value::String(value)) if !value.is_empty() => {
+            if parse_bind(value).is_err() {
+                out.push(Violation {
+                    field: field.into(),
+                    expected: "IP address literal".into(),
+                    actual: format!("string {value:?}"),
+                });
+                return None;
+            }
+            Some(value.clone())
+        }
+        Some(toml::Value::String(value)) => {
+            out.push(Violation {
+                field: field.into(),
+                expected: "non-empty string".into(),
+                actual: value.clone(),
+            });
+            None
+        }
+        Some(other) => {
+            out.push(bad(field, "IP address literal", other));
+            None
+        }
+    }
 }
 
 /// Optional string: an absent key stays quiet and yields the caller default.

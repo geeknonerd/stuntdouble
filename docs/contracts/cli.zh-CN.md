@@ -4,9 +4,9 @@
 
 > 本页是英文版 [cli.md](./cli.md) 的译本；如有出入，以英文版为准。
 
-- **状态**：v0.x 切片 T7 稳定
-- **适用**：v0.1.0-alpha.1 及以后、同一配置族内
-- **稳定性**：1.0 之前允许带弃用窗口的破坏性变更
+- **状态**：v1 切片（T1–T8）已冻结
+- **适用**：v0.1.0-alpha.1 及以后、同一 CLI 家族内的 `stuntdouble` 二进制
+- **稳定性**：1.0 之前的破坏性变更需带弃用窗口
 
 ## 命令
 
@@ -20,24 +20,33 @@
 用法：
 
 ```bash
-stuntdouble serve --config <path> [--verbose]
+stuntdouble serve [--config <path>] [--verbose]
 ```
 
 启动 mock server 并绑定到配置的地址。命中的 Route 在内置 Boa 运行时中执行其 JavaScript，宿主注入 `ctx`，包含 allowlist 约束的 `ctx.http.get` 调用与流式 `ctx.http.pipe` 调用；未命中的 Route 返回 404 `not_found`。脚本失败返回 500 `script_error` 或 `script_no_response`；未捕获的上游传输层失败返回 502 `upstream_unreachable`。
 
-`--verbose` 会为引擎生成的 500/502 JSON 错误 body 附加 `detail` 字段。它的值是稳定的失败类别，例如 `script execution failed`、`script exceeded the configured timeout`、`upstream transport failure: timeout`、`upstream transport failure: dns` 或 `upstream transport failure: transport`；绝不包含堆栈、脚本消息、上游 body、hostname、IP 地址或 URL。不开启该 flag 时，错误 body 只含 `error` 与 `request_id`。该 flag 只用于本地诊断，不要在共享环境开启。
+`--verbose` 会为引擎生成的 500/502 JSON 错误 body 附加 `detail` 字段。它的值是稳定的失败类别，例如 `script execution failed`、`script exceeded the configured timeout`、`upstream transport failure: timeout`、`upstream transport failure: dns` 或 `upstream transport failure: transport`；绝不包含堆栈、脚本消息、上游 body、hostname、IP 地址或 URL。不开启该 flag 时，错误 body 只含 `error` 与 `request_id`。该 flag 只用于本地诊断，不要在共享环境开启。404 `not_found` 响应永远不带 `detail`。
 
-默认配置路径是 `stuntdouble.toml`。配置必须包含 `[[routes]]`；每条 Route 指定 method、path、脚本位置与可选 name。
+默认配置路径是 `stuntdouble.toml`。配置必须包含非空 `routes` 数组；每条 Route 指定 method、path、脚本位置与可选 name。完整 schema 规则见[配置契约](config.zh-CN.md)。
 
-#### 退出码
+#### serve 退出码
 
-- `0`：成功启动（服务运行直到收到关闭信号）
-- `2`：配置错误（TOML 非法或 schema 违规）——消息打印到 stderr
-- `3`：内部／服务启动失败
+| 码 | 含义 |
+| ---: | --- |
+| `0` | server 正常返回；`validate`、`--help` 与 `--version` 也以 `0` 表示成功 |
+| `1` | 运行期／服务错误，包括 socket bind 或 listen 失败 |
+| `2` | 配置错误（TOML 非法、schema 违规、未知 `config_version` 或非 IP 的 `server.bind`）或 CLI 用法错误（未知 flag、缺少子命令）——消息打印到 stderr |
+| `3` | 构造异步运行时的内部错误 |
+
+#### 关闭信号
+
+v1 切片没有安装 graceful-shutdown 信号处理器。SIGINT 或 SIGTERM 会按信号终止进程，shell 通常报告 130 或 143，而不是 `0`。`0` 只保留给 server 正常返回。graceful shutdown 由 [#33](https://github.com/geeknonerd/stuntdouble/issues/33) 跟踪。
 
 #### 绑定语义
 
-`server.bind` 字段必须是 IP 字面量（`127.0.0.1` 等）。hostname 由操作系统解析，本切片不直接支持。省略 `server.port` 时默认 3000。
+`server` 表是必填项。`bind` 字段可选，默认 `127.0.0.1`；`port` 可选，默认 `3000`。
+
+`server.bind` 必须是 IP 地址字面量（`127.0.0.1`、`::1` 等）。hostname 在配置校验期以退出码 `2` 被拒绝；本切片 CLI 不解析 hostname。
 
 #### 请求日志
 
@@ -45,7 +54,7 @@ stuntdouble serve --config <path> [--verbose]
 
 - `upstream_calls` 是脚本发起调用的有序列表。每项记录 `api`（`http.get` 或 `http.pipe`）、`host`、`path`、`status`、`response_bytes`、`duration_ms`、`redirects`，失败时还记录稳定的 `error`/`kind`。query string 不写入日志。`http.pipe` 的记录在 body 流结束时定稿。
 - 宿主不会自动记录请求体或响应体，只记录大小与白名单 header：请求 header 为 `accept`、`content-type`、`content-length`、`range`、`user-agent`；响应 header 为 `content-type`、`content-length`、`content-range`。Authorization、Cookie 及其他 header 永不写日志。`script_logs[].message` 由脚本产生且不做脱敏：`ctx.log.*` 中不得包含 body、Token、Cookie 或其他机密。
-- 缓冲响应在写出前落日志。流式响应（`ctx.http.pipe`）在 body 结束或客户端断开后落一条完成日志：`response_body_bytes` 统计转发进响应 body 的字节数；`error` 可能是 `upstream_stream_error`（2xx 状态已经发出后上游读取失败，客户端状态不变）或 `client_disconnected`。该行的 `elapsed_ms` 覆盖整个流。
+- 缓冲 Response 在写出前落日志。流式 Response（`ctx.http.pipe`）在 body 结束或客户端断开后落一条完成日志：`response_body_bytes` 统计转发进 Response body 的字节数；`error` 可能是 `upstream_stream_error`（2xx 状态已经发出后上游读取失败，客户端状态不变）或 `client_disconnected`。该行的 `elapsed_ms` 覆盖整个流。
 - 脚本到达截止时间时仍在途的 `http.get` 调用，其 `status`、`response_bytes` 与 `duration_ms` 保持 `null`；截止前完成的调用保留已记录的值。
 - 这些日志是运维诊断面，可能包含 allowlist 中的上游 host 与 path；发布到 issue、pull request 或其他公开产物前必须脱敏。
 - `client_request_id` 记录客户端传入的 `X-Request-ID`；它既不会被采用为 `request_id`，也不会转发给上游调用。
@@ -55,19 +64,21 @@ stuntdouble serve --config <path> [--verbose]
 用法：
 
 ```bash
-stuntdouble validate --config <path>
+stuntdouble validate [--config <path>]
 ```
 
-加载配置文件、校验必填字段与类型，把诊断细节打印到 stderr，把 "OK" 打印到 stdout。始终在打开 socket 之前退出。配置非法时，命令会打印违规项，包含点号字段名、期望形状与实际值。
+加载配置文件，校验必填字段、类型、默认值与[配置契约](config.zh-CN.md)中的文件系统检查。它始终在打开 socket 之前退出，也从不读取 Route 脚本。
 
-配置失败时退出码为 `2`，否则为 `0`。
+成功时，命令向 stdout 打印 `<path>: valid configuration`，并向 stderr 打印一行简短摘要（`config_version`、server 地址、`files.root` 与 Route 数量）。失败时，它向 stderr 打印文件路径与全部违规项，包含点号字段名、期望形状与实际值。
+
+配置非法、无法读取或 CLI 参数非法时退出码为 `2`，否则为 `0`。
 
 ## 全局 flag
 
 `-c, --config` 是全局 flag，适用于所有命令：
 
-- `stuntdouble --config x serve` —— 等价于 `stuntdouble serve --config x`
-- `stuntdouble --config x validate` —— 等价于 `stuntdouble validate --config x`
+- `stuntdouble --config x serve` 等价于 `stuntdouble serve --config x`
+- `stuntdouble --config x validate` 等价于 `stuntdouble validate --config x`
 
 | Flag | 用途 | 状态 |
 | --- | --- | --- |
@@ -77,13 +88,13 @@ stuntdouble validate --config <path>
 
 ## 退出码
 
-除 `serve` 运行期退出外，所有命令都使用这些退出码。
+所有命令都使用这些退出码：
 
 | 码 | 含义 |
 | ---: | --- |
-| `0` | 成功 |
-| `1` | 运行时错误（仅 `serve` 运行期间报告） |
-| `2` | 配置错误 |
+| `0` | 成功；`serve` 只在正常返回时使用，不由信号终止路径产生 |
+| `1` | 运行期／服务错误（由 `serve` 报告） |
+| `2` | 配置错误或 CLI 用法错误 |
 | `3` | 内部错误 |
 
 ## 弃用
