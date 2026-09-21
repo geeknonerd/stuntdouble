@@ -1,6 +1,7 @@
 ---
 title: "Route scripts own upstream error mapping but must not absorb policy rejections"
 date: 2026-09-21
+last_updated: 2026-09-21
 category: conventions
 module: upstream HTTP error mapping
 problem_type: convention
@@ -21,7 +22,7 @@ tags: [error-mapping, upstream, script, demo-fixture, fail-closed, manifest, dow
 
 T4 确定了 `ctx.http.get` 的引擎边界：最终的非重定向 HTTP 响应（包括 4xx/5xx）是数据，而 DNS、连接、TLS 与超时失败抛出可捕获错误，其 `error.code` 为 `upstream_unreachable`（`docs/contracts/ctx-api.md`、`src/upstream.rs`）。重定向由宿主手动跟随，最多三跳，每跳都重新校验协议与 host（`src/upstream.rs` 中的 `UpstreamAccess::send_following_redirects`）。ADR 0005 说明了划分：有响应意味着语义属于上游，无响应意味着属于 mock，业务调用属于脚本；它的 T6 修订记录了 `ctx.http.pipe` 必须偏离的位置，因为流式 body 从不抵达脚本（`plans/adr/0005-upstream-failure-semantics.md`）。
 
-这条引擎边界不等于客户端可见的错误表。此前会话的一次探查（会话历史，2026-09-20 T4）显示有三个问题被有意留待决定：manifest JSON 解析失败或缺少 `data` 数组属于哪一类、allowlist／URL 策略拒绝应以什么形式暴露、以及随仓库发布的 demo fixture 应如何在测试中驱动。T5（issue #8）在 fixture 内回答了它们并已合并；T6（issue #9）增加了流式下载路由，写作时仍在 PR #19 评审中。两者都在特性分支上从 `demo/` 发布。
+这条引擎边界不等于客户端可见的错误表。此前会话的一次探查（会话历史，2026-09-20 T4）显示有三个问题被有意留待决定：manifest JSON 解析失败或缺少 `data` 数组属于哪一类、allowlist／URL 策略拒绝应以什么形式暴露、以及随仓库发布的 demo fixture 应如何在测试中驱动。T5（issue #8）在 fixture 内回答了它们并已合并；T6（issue #9，PR #19）增加了流式下载路由，并已合并到 main。两者都随仓库从 `demo/` 发布。
 
 `demo/stuntdouble.toml` 声明了 `GET /demo/documents/manifest/:group` 与 `GET /demo/documents/download/:document_id`，`allow_hosts = ["metadata.example.com", "files.example.com"]`。配置契约要求 `files.root` 是已存在的目录（`docs/contracts/config.md`、`src/config.rs`），这就是 fixture 携带 `demo/files/.gitkeep` 的原因。
 
@@ -42,6 +43,8 @@ T4 确定了 `ctx.http.get` 的引擎边界：最终的非重定向 HTTP 响应�
 | 宿主无法跟随的重定向链（超过 3 跳或 `Location` 不可用） | `upstream_redirect_error` | 与 allowlist 拒绝区分开 |
 | DNS、连接、TLS 或超时失败 | `upstream_unreachable` | 也是 `ctx.http.get` 未捕获时的兜底 |
 | URL 或 host 被策略拒绝，例如 allowlist 未命中 | `script_error` | 配置故障，绝不伪装成网关失败 |
+
+这张表只覆盖响应头之前的失败。响应头一旦发出，body 已经开始流向客户端，宿主不再抛可捕获错误：上游中途读失败在请求完成日志中记为 `upstream_stream_error`，客户端先断开记为 `client_disconnected`；脚本无法捕获它们，也无法改写已经发出的状态（ADR 0005 T7 修订、`docs/contracts/cli.md`）。因此路由脚本的错误表只需覆盖表内的可捕获类别，流结束后的分类属于运维日志面。
 
 ### 2. 路由脚本定义该路由的错误表
 
@@ -127,15 +130,15 @@ try {
 
 ## 为什么重要
 
-1. 它让 ADR 0005 的边界保持诚实。「有响应／无响应」是引擎的划分；业务错误表属于脚本，一个 catch-all 会把第二层抹掉。T6 修订记录了一处偏差：`ctx.http.pipe` 对最终非 2xx 响应抛 `upstream_http_error`，因为流式 body 无法成为脚本可检查的数据。
+1. 它让 ADR 0005 的边界保持诚实。「有响应／无响应」是引擎的划分；业务错误表属于脚本，一个 catch-all 会把第二层抹掉。T6 修订记录了一处偏差：`ctx.http.pipe` 对最终非 2xx 响应抛 `upstream_http_error`，因为流式 body 无法成为脚本可检查的数据；T7 修订补上了响应头之后的分界——流中途失败只进完成日志（`upstream_stream_error` / `client_disconnected`），不再假装脚本还能改写客户端结果。
 2. 它把依赖故障与运维误配置分开。allowlist 拒绝意味着配置需要改，而不是上游挂了；把它报成 502 会把告警、重试与 on-call 判断引向错误方向，并掩盖一个 fail-closed 控制。畸形的 `pdf_url` 则属于上游数据：路由负责它，回答 `pdf_url_invalid`。
-3. 它给调用方稳定的、可断言的表面：`metadata_bad_gateway`、`pdf_url_invalid`、`pdf_bad_gateway` 与 `script_error` 是公开类别。引擎自己的错误 body 只带 `request_id` 与 `error`（`src/server.rs`），且 ADR 0005 要求堆栈、上游 body 与内部地址绝不抵达客户端——脚本若回显它取到的内容，正是会破坏该保证的做法（`plans/adr/0005-upstream-failure-semantics.md`、`docs/contracts/ctx-api.md`）。
+3. 它给调用方稳定的、可断言的表面：`metadata_bad_gateway`、`pdf_url_invalid`、`pdf_bad_gateway` 与 `script_error` 是公开类别。引擎自己的错误 body 带 `request_id` 与 `error`；`--verbose` 时 500/502 还会带稳定的 `detail` 类别（`docs/contracts/cli.md`），且 ADR 0005 要求堆栈、上游 body 与内部地址绝不抵达客户端——脚本若回显它取到的内容，正是会破坏该保证的做法（`plans/adr/0005-upstream-failure-semantics.md`、`docs/contracts/ctx-api.md`）。
 4. 它让测试不给出虚假信心：标记断言钉住被测配置，正向对照让否定 header 检查有意义，每个连接一条响应让 N 请求场景始终走在真实网络路径上。
 
 ## 何时适用
 
 - 任何调用 `ctx.http.get` 并把上游结果转成自己的客户端可见错误的路由脚本。
-- 任何通过 `ctx.http.pipe` 传输字节、且必须把 `upstream_url_invalid`、`upstream_redirect_error`、`upstream_http_error`、`upstream_unreachable` 与 allowlist `script_error` 区分开的路由脚本。
+- 任何通过 `ctx.http.pipe` 传输字节、且必须把 `upstream_url_invalid`、`upstream_redirect_error`、`upstream_http_error`、`upstream_unreachable` 与 allowlist `script_error` 区分开的路由脚本；同时知道响应头发出后的 `upstream_stream_error` / `client_disconnected` 只进完成日志，脚本无法捕获。
 - 任何定义稳定内部错误码、且必须区分上游故障、上游数据错误与本服务自身配置／脚本错误的路由。
 - 更新错误表、README、契约描述或 runbook 时：一句「元数据失败答 502」也必须点名 allowlist 拒绝与非法 URL 类，或链接到它们的说明位置。
 - 为随仓库发布的配置与脚本 fixture 增加端到端覆盖时，尤其是复制配置、伪造上游或对请求 header 做断言的时候。
@@ -190,4 +193,4 @@ assert!(!head.contains("x-request-id"), "client header leaked upstream");
 - [ADR 0005 —— 上游失败语义](../../../plans/adr/0005-upstream-failure-semantics.md)
 - [`ctx` API 契约](../../contracts/ctx-api.md)
 - [演示夹具 README](../../../demo/README.md)
-- [T6 issue #9](https://github.com/geeknonerd/stuntdouble/issues/9)、[T5 issue #8](https://github.com/geeknonerd/stuntdouble/issues/8)、[T4 issue #7](https://github.com/geeknonerd/stuntdouble/issues/7)
+- [T7 issue #10](https://github.com/geeknonerd/stuntdouble/issues/10)、[T6 issue #9](https://github.com/geeknonerd/stuntdouble/issues/9)、[T5 issue #8](https://github.com/geeknonerd/stuntdouble/issues/8)、[T4 issue #7](https://github.com/geeknonerd/stuntdouble/issues/7)
