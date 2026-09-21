@@ -89,7 +89,7 @@ if (upstream.status >= 400) {
 | 502 `upstream_unreachable` | 未捕获的传输层失败（DNS、连接、TLS 或超时） |
 | 带点号路径的校验错误 | 配置违反契约；消息会给出字段名与期望形状 |
 
-`sandbox.script_timeout_ms` 限制脚本运行时长，默认 10000 ms。
+`sandbox.script_timeout_ms` 限制脚本运行时长，默认 10000 ms。脚本还受循环次数兜底与递归/VM 栈上限约束，引擎 panic 返回 500 `script_error`。Boa 0.22 不暴露堆指标或 interrupt 钩子，进程内没有堆上限——威胁模型见 [SECURITY.md](../../SECURITY.md)，取舍见 [ADR 0003](../../plans/adr/0003-script-first-multi-runtime.md) 的 T3 修订。
 
 诊断这些失败时，可以给 `serve` 加上 `--verbose`：
 
