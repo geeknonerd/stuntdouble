@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Sandbox hardening slice (T3): one script run now has an explicit resource envelope — the
+  configured `sandbox.script_timeout_ms` deadline, a loop-iteration backstop, and pinned Boa
+  recursion/VM-stack limits — and an engine panic is contained by the host guard and mapped to
+  500 `script_error` instead of unwinding into the server task. Regression tests cover the
+  deadline actually firing, runaway recursion in one route leaving other routes healthy, and the
+  absence of raw `fetch`/`fs`/`process`/`require` and host bridge globals from the script realm.
+  Boa 0.22 exposes no heap metric or interrupt hook, so ADR 0003 and the `ctx-api` contract's
+  security boundary record that the documented ~64MB heap cap cannot be enforced in-process; the
+  remaining bounds and the subprocess upgrade path are documented there.
 - Seventh implementation slice (T7): every request now writes one structured log line with the
   matched route, script duration, ordered upstream call chain (`api`, `host`, `path`, `status`,
   `response_bytes`, `duration_ms`, `redirects`, `error`/`kind`), request/response body sizes, and

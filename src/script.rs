@@ -27,11 +27,19 @@ use crate::upstream;
 /// Value of `ctx.apiVersion`; see docs/contracts/ctx-api.md.
 pub const API_VERSION: &str = "1";
 
-// tradeoff: Boa 0.22 exposes no interrupt hook, so a runaway script cannot be
-// stopped at the wall-clock deadline; the client is answered at the deadline
-// and the orphaned worker thread is bounded by this iteration backstop.
-// Upgrade path: use the engine's interrupter once the pinned release has one.
+// One script run gets a fixed resource envelope. Boa 0.22 exposes no interrupt
+// hook and no heap metric or limit (see the T3 amendment in
+// plans/adr/0003-script-first-multi-runtime.md), so the enforceable bounds are
+// the wall-clock deadline that answers the client, the loop-iteration backstop
+// that eventually stops the orphaned worker, and the VM recursion/stack limits
+// that keep runaway recursion from exhausting the host stack.
+// tradeoff: a worker abandoned at the deadline keeps running until the
+// iteration backstop trips; a true heap cap needs a future Boa observation
+// point or process isolation. Upgrade path: use the engine's interrupter and
+// heap metrics once the pinned release exposes them.
 const LOOP_ITERATION_LIMIT: u64 = 100_000_000;
+const RECURSION_LIMIT: usize = 512;
+const VM_STACK_SIZE_LIMIT: usize = 10_240;
 
 /// Failure payload shared by the host bridge and its panic-catching wrapper:
 /// an optional transport kind plus the operator-facing message.
@@ -569,6 +577,13 @@ fn parse_query(raw: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// Contain an engine panic: it becomes a script failure instead of unwinding
+/// into the server task. A named function so the guard itself is testable.
+fn guard_engine<T>(run: impl FnOnce() -> T) -> Result<T, Error> {
+    catch_unwind(AssertUnwindSafe(run))
+        .map_err(|_| Error::Failed("script panicked in the engine".into()))
+}
+
 /// Evaluate one request's script and read back its recorded state.
 fn evaluate(
     source: &str,
@@ -604,11 +619,12 @@ fn evaluate(
             &js_literal(&Json::String(upstream_marker.clone())),
         );
     let mut context = Context::default();
-    context
-        .runtime_limits_mut()
-        .set_loop_iteration_limit(LOOP_ITERATION_LIMIT);
+    let limits = context.runtime_limits_mut();
+    limits.set_loop_iteration_limit(LOOP_ITERATION_LIMIT);
+    limits.set_recursion_limit(RECURSION_LIMIT);
+    limits.set_stack_size_limit(VM_STACK_SIZE_LIMIT);
     // A Rust-side panic in the engine must not take the request thread down.
-    let staged = catch_unwind(AssertUnwindSafe(|| -> Result<String, BridgeError> {
+    let staged = guard_engine(|| -> Result<String, BridgeError> {
         context
             .register_global_builtin_callable(
                 js_string!("__sd_http_get"),
@@ -640,13 +656,13 @@ fn evaluate(
                 Err((kind, message))
             }
         }
-    }));
+    });
     let stream = PIPE_STREAM.with(|cell| cell.borrow_mut().take());
     HTTP_HOST.with(|cell| {
         cell.borrow_mut().take();
     });
     match staged {
-        Err(_) => Outcome::failed(Error::Failed("script panicked in the engine".into())),
+        Err(error) => Outcome::failed(error),
         Ok(Err((Some(kind), message))) => {
             Outcome::failed(Error::UpstreamUnreachable { message, kind })
         }
@@ -828,6 +844,23 @@ pub async fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn engine_panic_is_isolated_from_the_caller() {
+        // No script can deterministically panic Boa 0.22 through the public
+        // API, so containment is locked at the guard itself; the black-box
+        // suite covers engine errors and cross-route stability.
+        let outcome = guard_engine(|| -> Result<(), ()> { panic!("engine bug") });
+        let Err(error) = outcome else {
+            panic!("panic escaped the guard");
+        };
+        let Error::Failed(message) = &error else {
+            panic!("unexpected guard error: {error:?}");
+        };
+        assert_eq!(message, "script panicked in the engine");
+        assert_eq!(error.class(), "script_error");
+        assert_eq!(error.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
 
     #[test]
     fn parse_query_decodes_keys_and_values() {

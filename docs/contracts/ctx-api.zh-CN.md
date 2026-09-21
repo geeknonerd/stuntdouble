@@ -63,12 +63,13 @@
 
 脚本拿不到裸 `fetch`、`fs`、`os`、`subprocess` 或 `socket`。所有外部能力都来自宿主函数，并受以下约束：
 
-- 脚本超时
-- 内存上限
+- 脚本应答时限（`sandbox.script_timeout_ms`），到点向客户端返回 500 `script_error`
 - 网络 allowlist
 - 静态文件根限制
 - 上传大小上限
 - 堆栈绝不返回给客户端
+
+Boa 0.22 不暴露堆指标、堆上限或 interrupt 钩子，因此没有堆上限被执行；被超时放弃的脚本只能由宿主的循环次数兜底终止。该取舍、其余资源边界与子进程隔离升级路径记录在 [ADR 0003](../../plans/adr/0003-script-first-multi-runtime.md) 的 T3 修订中。
 
 ## 类型定义
 
