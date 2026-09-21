@@ -1,45 +1,45 @@
-# ADR 0009: Open-core and funding model
+# 开源核心与资金来源
 
-- Status: Accepted
-- Date: 2026-09-19
-- Related: [ADR 0006](0006-product-positioning.md), [ADR 0008](0008-dual-mit-apache-license.md), [open-source baseline](../../research/open-source-repo-baseline.md)
+- 状态：`已接受`
+- 日期：2026-09-19
+- 关联：[ADR 0006](0006-product-positioning.md)、[ADR 0008](0008-dual-mit-apache-license.md)、[开源仓库基线](../../research/open-source-repo-baseline.md)
 
-## Context
+## 背景
 
-Stunt Double needs a sustainable funding path, but the core product is a local/CI developer tool. The project should not depend on donations alone, and it should not cripple the open-source core to force payment.
+Stunt Double 需要可持续的资金路径，但核心产品是本地/CI 开发工具。项目不应只依赖捐赠，也不应为了收费而阉割开源核心。
 
-Comparable projects show several viable paths:
+同类项目给出几条可行路径：
 
-- WireMock Cloud and Mockoon Cloud sell hosted collaboration, deployment, and team workflows around an open-source engine.
-- Stoplight sells a broader API design platform around Prism.
-- Many Rust and CLI projects rely on sponsorship, support contracts, or corporate backing rather than paid feature gates.
+- WireMock Cloud 与 Mockoon Cloud 围绕开源引擎售卖托管协作、部署与团队工作流。
+- Stoplight 围绕 Prism 售卖更广的 API 设计平台。
+- 许多 Rust 与 CLI 项目依靠赞助、支持合同或公司支持，而不是付费功能闸门。
 
-## Decision
+## 决策
 
-Use an **open-core** model with these revenue paths, in priority order:
+采用**开源核心（open-core）**模式，收入路径按优先级排列：
 
-1. **Support and SLA.** Paid support, prioritised fixes, upgrade assistance, and security review for teams running Stunt Double in CI or internal platforms.
-2. **Hosted team service.** A paid control plane for shared route configuration, environment management, history, and team collaboration. The local binary remains fully usable without it.
-3. **Enterprise governance.** SSO, audit logs, policy enforcement, central configuration, and compliance reporting for larger organisations.
-4. **Training and integration services.** Workshops, migration from json-server middleware or WireMock, and custom upstream adapters.
-5. **Sponsorship and donations.** Optional and supplemental. A "buy me a coffee" link may be added later, but it is not the primary plan.
+1. **支持与 SLA**：为在 CI 或内部平台运行 Stunt Double 的团队提供付费支持、优先修复、升级协助与安全评审。
+2. **托管团队服务**：共享路由配置、环境管理、历史记录与团队协作的付费控制面。没有它时本地二进制仍完全可用。
+3. **企业治理**：面向较大组织的 SSO、审计日志、策略执行、集中配置与合规报告。
+4. **培训与集成服务**：工作坊、从 json-server 中间件或 WireMock 迁移、定制上游适配器。
+5. **赞助与捐赠**：可选且仅作补充。以后可以加「buy me a coffee」链接，但它不是主要计划。
 
-## Constraints
+## 约束
 
-- The open-source core must remain useful without a paid account.
-- Security fixes and sandbox boundaries must never be held back for a paid tier.
-- Paid features must sit above the single execution model, not fork it.
-- No contributor license agreement (CLA) by default. Use DCO sign-off. Revisit only if the project needs to relicense later.
-- Do not publish a funding link until there is a real account, a clear use of funds, and a maintainer who can handle payouts and tax obligations.
+- 开源核心在没有付费账号时仍必须可用。
+- 安全修复与沙箱边界绝不留给付费层。
+- 付费功能必须建立在单一执行模型之上，不得分叉它。
+- 默认不引入贡献者许可协议（CLA），使用 DCO 签名。只有项目以后需要重新许可时才重新考虑。
+- 在有真实账号、明确资金用途、以及能处理付款与税务的维护者之前，不发布赞助链接。
 
-## Signals that would change this decision
+## 会改变该决策的信号
 
-- A large company offers sustained engineering sponsorship without feature restrictions.
-- Hosted operations turn out to be the only viable business, making a stronger network or license boundary necessary.
-- The project fails to gain adoption and support demand never appears; in that case keep the core free and treat the project as a portfolio or community effort.
+- 有公司提供长期工程赞助且不附加功能限制。
+- 托管运营成为唯一可行生意，从而需要更强的网络或许可证边界。
+- 项目没有获得采用、支持需求始终不出现；此时保持核心免费，把项目当作作品集或社区项目。
 
-## Consequences
+## 后果
 
-- Commercial work must stay separated from the core repository and its release process.
-- The project needs a public roadmap that distinguishes open-source core work from commercial work.
-- Donations can cover infrastructure and small maintenance costs but should not be presented as a business model.
+- 商业工作必须与核心仓库及其发布流程分开。
+- 项目需要一份公开路线图，区分开源核心工作与商业工作。
+- 捐赠可以覆盖基础设施与小额维护成本，但不应被当作商业模式。

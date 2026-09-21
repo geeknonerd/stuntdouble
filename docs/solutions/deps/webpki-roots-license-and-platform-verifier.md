@@ -14,50 +14,34 @@ severity: medium
 tags: [tls, cargo-deny, licenses, ureq, rustls]
 ---
 
-# Bundled webpki roots fall outside the MIT/Apache license allowlist
+# 打包的 webpki 根证书不在 MIT/Apache 许可白名单内
 
-## Problem
+## 问题
 
-`ctx.http.get` needs HTTPS support, and the first `ureq` configuration used its
-default `rustls` feature. That feature pulls `webpki-roots` 1.0.9, whose data is
-licensed under CDLA-Permissive-2.0. The repository's dependency policy allows
-MIT OR Apache-2.0, so `cargo deny check licenses` rejected the crate even though
-the Rust code itself is permissively licensed.
+`ctx.http.get` 需要 HTTPS 支持，最初配置的 `ureq` 使用了默认的 `rustls` feature。该 feature 会引入 `webpki-roots` 1.0.9，其数据以 CDLA-Permissive-2.0 许可。仓库的依赖政策只允许 MIT OR Apache-2.0，因此即使 Rust 代码本身是宽松许可，`cargo deny check licenses` 仍然拒绝该 crate。
 
-## What Didn't Work
+## 试过但无效的做法
 
-- **Adding CDLA-Permissive-2.0 to the allowlist**: `AGENTS.md` requires new
-  dependencies to be MIT OR Apache-2.0; broadening the allowlist for a bundled
-  data dependency would silently weaken that rule.
-- **Keeping `ureq`'s default `rustls` feature**: the rest of the TLS stack is
-  fine, but the bundled root store stays in the dependency graph.
+- **把 CDLA-Permissive-2.0 加进白名单**：`AGENTS.md` 要求新增依赖必须是 MIT OR Apache-2.0，为一份打包数据放宽白名单等于悄悄削弱这条规则。
+- **保留 `ureq` 默认的 `rustls` feature**：TLS 栈其余部分没问题，但打包的根证书库始终留在依赖图里。
 
-## Solution
+## 解决方案
 
-Use `ureq` with `rustls-no-provider` plus `rustls-platform-verifier`, and supply
-the ring crypto provider explicitly:
+改用 `ureq` 的 `rustls-no-provider` 加 `rustls-platform-verifier`，并显式提供 ring crypto provider：
 
 - `ureq = { default-features = false, features = ["rustls-no-provider", "platform-verifier"] }`
 - `rustls = { default-features = false, features = ["ring"] }`
-- The agent's `TlsConfig` sets `RootCerts::PlatformVerifier` and the ring provider.
+- agent 的 `TlsConfig` 设为 `RootCerts::PlatformVerifier` 与 ring provider。
 
-TLS trust now comes from the host store, so enterprise trust roots installed in
-the OS also work. `rustls-platform-verifier` still mentions
-`webpki-root-certs` for wasm/android targets; `deny.toml` therefore scopes
-`cargo-deny` to the shipped platforms (Linux x86_64, macOS arm64, Windows
-x86_64) via `[graph] targets`, and `docs/development.md` documents that scope.
+TLS 信任改为来自宿主证书库，因此操作系统里安装的企业根证书同样可用。`rustls-platform-verifier` 仍会为 wasm/android target 提到 `webpki-root-certs`，所以 `deny.toml` 通过 `[graph] targets` 把 `cargo-deny` 限定在发布平台（Linux x86_64、macOS arm64、Windows x86_64），`docs/development.md` 记录了该范围。
 
-## Verification
+## 验证
 
-- `cargo deny check` passes for licenses, sources, bans, and advisories.
-- `cargo audit` reports no advisories for the locked graph.
-- `ctx.http.get` end-to-end tests cover 2xx, 4xx/5xx, redirects, timeouts, and
-  transport failures.
+- `cargo deny check` 在 licenses、sources、bans、advisories 上全部通过。
+- `cargo audit` 对锁定依赖图没有报告任何公告。
+- `ctx.http.get` 的端到端测试覆盖 2xx、4xx/5xx、重定向、超时与传输层失败。
 
-## Tradeoffs
+## 取舍
 
-- TLS certificate trust is delegated to the operating system instead of a
-  bundled Mozilla root set. This is the desired behavior for a local mock
-  server and makes enterprise MITM roots usable.
-- Dependency checks cover the platforms the project actually ships;
-  target-specific dependencies of unsupported platforms are not part of the gate.
+- TLS 证书信任交给操作系统，而不是打包 Mozilla 根证书集。对本地 mock server 来说这正是期望行为，也让企业 MITM 根证书可用。
+- 依赖检查覆盖项目实际发布的平台；不受支持平台的平台专属依赖不在门禁范围内。

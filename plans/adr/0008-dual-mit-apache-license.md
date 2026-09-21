@@ -1,44 +1,44 @@
-# ADR 0008: Dual-license the core under MIT OR Apache-2.0
+# 核心采用 MIT OR Apache-2.0 双许可证
 
-- Status: Accepted
-- Date: 2026-09-19
-- Related: [ADR 0006](0006-product-positioning.md), [ADR 0007](0007-naming-and-brand.md), [open-source baseline](../../research/open-source-repo-baseline.md)
+- 状态：`已接受`
+- 日期：2026-09-19
+- 关联：[ADR 0006](0006-product-positioning.md)、[ADR 0007](0007-naming-and-brand.md)、[开源仓库基线](../../research/open-source-repo-baseline.md)
 
-## Context
+## 背景
 
-Stunt Double is a developer tool intended for local and CI use. It must be easy for companies and individual developers to adopt, embed, and redistribute. The project may later offer commercial services, but the core should not be held back by a restrictive license.
+Stunt Double 是面向本地与 CI 的开发工具，必须让公司和个人开发者都容易采用、嵌入与再分发。项目以后可能提供商业服务，但核心不应被限制性许可证拖住。
 
-The main candidates were:
+主要候选：
 
 - MIT
 - Apache-2.0
-- Dual MIT OR Apache-2.0
+- MIT OR Apache-2.0 双许可
 - AGPL-3.0
 
-## Decision
+## 决策
 
-License the Stunt Double core under **MIT OR Apache-2.0**, at the user's option.
+Stunt Double 核心采用 **MIT OR Apache-2.0** 双许可，由使用者任选其一。
 
-The repository carries both license texts as `LICENSE-MIT` and `LICENSE-APACHE`. Contributions are accepted under the same dual license unless explicitly stated otherwise.
+仓库以 `LICENSE-MIT` 与 `LICENSE-APACHE` 分别承载两份许可证文本。贡献默认按同一双许可接受，除非明确声明其他条款。
 
-## Why
+## 决策依据
 
-- **Rust ecosystem norm.** Rust itself, clap, bat, Biome, and many crates use Apache-2.0 or MIT OR Apache-2.0. Rust users already understand the combination.
-- **Commercial adoption.** MIT and Apache-2.0 are permissive and allow internal enterprise use, redistribution, and commercial products without legal review friction.
-- **Patent protection.** Apache-2.0 includes an explicit patent grant, which matters for infrastructure software.
-- **Compatibility.** MIT is GPL-compatible. Apache-2.0 is compatible with many corporate policies and includes a clear contribution model.
-- **No lock-in.** The project can still monetize support, hosting, and enterprise features without restricting the core.
+- **Rust 生态惯例**：Rust 本身、clap、bat、Biome 以及大量 crate 采用 Apache-2.0 或 MIT OR Apache-2.0，Rust 使用者熟悉这一组合。
+- **商业采用**：MIT 与 Apache-2.0 都是宽松许可证，允许企业内部使用、再分发与商业产品，不带来法务审查摩擦。
+- **专利保护**：Apache-2.0 含显式专利授权，对基础设施软件很重要。
+- **兼容性**：MIT 与 GPL 兼容；Apache-2.0 兼容许多企业政策，并带有清晰的贡献模型。
+- **不锁定**：项目仍可通过支持、托管与企业功能变现，而无需限制核心。
 
-## Rejected alternatives
+## 替代方案
 
-- **MIT only.** Simpler, but gives up Apache-2.0's explicit patent grant and corporate-friendly language.
-- **Apache-2.0 only.** Also strong, but the dual license gives users the shortest possible permissive option and matches Rust convention more closely.
-- **AGPL-3.0.** Strong protection against SaaS free-riding, but creates adoption friction for the local/CI developer workflow and does not match the current product strategy. Revisit only if a future hosted product needs a different boundary.
-- **Source-available or Business Source License.** Rejected. It would block open-source adoption and community contribution for a tool that benefits from being available in CI and containers.
+- **仅 MIT**：更简单，但放弃 Apache-2.0 的显式专利授权与对企业友好的表述。
+- **仅 Apache-2.0**：同样有力，但双许可给使用者留出最短的宽松路径，也更贴近 Rust 惯例。
+- **AGPL-3.0**：对 SaaS 搭便车有强约束，但给本地/CI 开发流程带来采用摩擦，也不符合当前产品策略。只有未来托管产品需要不同边界时才重新考虑。
+- **source-available 或 Business Source License**：拒绝。对一个受益于进入 CI 与容器生态的工具来说，这会阻断开源采用与社区贡献。
 
-## Consequences
+## 后果
 
-- The core can be packaged by downstream distributions and used in commercial environments.
-- The project cannot unilaterally relicense existing contributions without contributor agreement.
-- Commercial value must come from services and adjacent products, not from restricting the core.
-- New dependencies must be compatible with MIT OR Apache-2.0 distribution.
+- 核心可以被下游发行版打包，也可用于商业环境。
+- 在没有贡献者协议的情况下，项目不能单方面对已有贡献重新许可。
+- 商业价值必须来自服务与周边产品，而不是限制核心。
+- 新依赖必须与 MIT OR Apache-2.0 分发兼容。

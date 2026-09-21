@@ -1,38 +1,38 @@
-# ADR 0010: Trunk-based development and release flow
+# 主干开发与发布流程
 
-- Status: Accepted
-- Date: 2026-09-19
-- Related: [ADR 0008](0008-dual-mit-apache-license.md), [development guide](../../docs/development.md)
+- 状态：`已接受`
+- 日期：2026-09-19
+- 关联：[ADR 0008](0008-dual-mit-apache-license.md)、[开发指南](../../docs/development.md)
 
-## Context
+## 背景
 
-The repository needs a predictable workflow before implementation starts. The current repository has one `main` branch, no tags, no releases, and no branch protection. Releases will need to be automated and reproducible across three platforms.
+仓库在实现开始前需要可预测的工作流。当前仓库只有一个 `main` 分支，没有 tag、没有 release，也没有分支保护。发布需要在三个平台上自动化且可复现。
 
-The candidates were trunk-based development, GitHub Flow with merge commits, and GitFlow.
+候选方案是主干开发、带 merge commit 的 GitHub Flow，以及 GitFlow。
 
-## Decision
+## 决策
 
-Use trunk-based development with squash-only merges.
+采用主干开发 + 仅允许 squash merge。
 
-- `main` is always releasable.
-- All work goes through short-lived branches and pull requests.
-- Squash merge is the only merge method; branches are deleted after merge.
-- `main` is protected against direct pushes, force pushes, and deletion.
-- CI is the hard gate. While there is one maintainer, the required approval count is zero; it becomes one when a second maintainer joins.
-- Releases are tagged from `main`. A `develop` branch is not used.
-- After 1.0, older lines use `release/x.y` branches created from tags.
-- Release PRs come from `release-plz`; merging the release PR authorises the tag and publication.
-- A failed release never reuses or overwrites a tag. It ships a new patch or pre-release.
+- `main` 始终可发布。
+- 所有工作走短生命周期分支与 pull request。
+- 只允许 squash merge；合并后删除分支。
+- `main` 受保护，禁止直接 push、force push 与删除。
+- CI 是硬门槛。只有一位维护者时所需批准数为 0；第二位维护者加入后变为 1。
+- 发布从 `main` 打 tag，不使用 `develop` 分支。
+- 1.0 之后，旧版本线使用从 tag 创建的 `release/x.y` 分支。
+- release PR 由 `release-plz` 生成；合并 release PR 即授权打 tag 与发布。
+- 发布失败绝不复用或覆盖 tag，而是发布新的 patch 或预发布版本。
 
-## Rejected alternatives
+## 替代方案
 
-- **GitHub Flow with merge commits.** Simpler, but noisy history and weaker CHANGELOG automation.
-- **GitFlow.** Suitable for parallel maintained versions, too heavy for the current project.
-- **No defined workflow.** Incompatible with automated releases and branch protection.
+- **带 merge commit 的 GitHub Flow**：更简单，但历史噪声大，CHANGELOG 自动化更弱。
+- **GitFlow**：适合并行维护多个版本，对当前项目过重。
+- **不定义工作流**：与自动发布和分支保护不兼容。
 
-## Consequences
+## 后果
 
-- Pull request titles must follow Conventional Commits because the squash commit inherits them.
-- DCO sign-off is mandatory.
-- Branch protection and required status checks become part of the release contract.
-- Release automation must run from tags, never from `main` directly.
+- pull request 标题必须遵循 Conventional Commits，因为 squash commit 会继承它。
+- DCO 签名是强制的。
+- 分支保护与必需状态检查成为发布契约的一部分。
+- 发布自动化必须从 tag 运行，绝不直接从 `main` 运行。

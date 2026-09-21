@@ -1,22 +1,22 @@
-# Domain Docs
+# 领域文档
 
-How the engineering skills should consume this repo's domain documentation when exploring the codebase.
+工程技能在探索代码库时应如何消费本仓库的领域文档。
 
-## Before exploring, read these
+## 探索之前先读这些
 
-- **`CONTEXT.md`** at the repo root — the project glossary.
-- **`plans/adr/`** — read ADRs that touch the area you're about to work in. This repo keeps ADRs there instead of `docs/adr/`.
-- **`plans/product-definition.md`** — v1 scope, host API contract, and the do-not-build list.
-- **`plans/demo-document-catalog.md`** — the public demo scenario for CSV manifest generation and binary download; the runnable Stunt Double fixture for it lives in `demo/`.
-- **`docs/contracts/`** — configuration, `ctx` API, and CLI contracts.
-- **`types/ctx-api-v1.d.ts`** — source type definitions for the implemented `ctx` apiVersion 1 subset.
-- **`docs/development.md`** — Git workflow, CI, versioning, and release rules.
+- 仓库根目录的 **`CONTEXT.md`** —— 项目词汇表。
+- **`plans/adr/`** —— 读与你要改动区域相关的 ADR。本仓库把 ADR 放在这里，而不是 `docs/adr/`。
+- **`plans/product-definition.md`** —— v1 范围、宿主 API 契约与不做清单。
+- **`plans/demo-document-catalog.md`** —— 生成 CSV 清单与二进制下载的公开演示场景；对应的可运行夹具在 `demo/`。
+- **`docs/contracts/`** —— 配置、`ctx` API 与 CLI 契约。
+- **`types/ctx-api-v1.d.ts`** —— 已实现的 `ctx` apiVersion 1 子集的源码类型定义。
+- **`docs/development.md`** —— Git 工作流、CI、版本号与发布规则。
 
-If a file doesn't exist, **proceed silently**. Don't flag its absence. `CONTEXT.md` is updated when a domain term is resolved.
+文件不存在就**静默跳过**，不要指出缺失。领域术语收敛后更新 `CONTEXT.md`。
 
-## Layout
+## 布局
 
-This repo is **single-context**:
+本仓库是**单上下文**：
 
 ```text
 /
@@ -27,11 +27,11 @@ This repo is **single-context**:
 ├── GOVERNANCE.md
 ├── SECURITY.md
 ├── CHANGELOG.md
-├── CONTEXT.md          ← project glossary
-├── demo/               ← runnable fixture for the document manifest demo scenario
-├── types/              ← apiVersion 1 `ctx` type definitions
-├── src/                ← config, matcher, script, server, upstream (internal) modules
-├── tests/              ← end-to-end checks through the built binary
+├── CONTEXT.md          ← 项目词汇表
+├── demo/               ← 文档清单演示场景的可运行夹具
+├── types/              ← apiVersion 1 的 `ctx` 类型定义
+├── src/                ← config、matcher、script、server、upstream（内部）模块
+├── tests/              ← 通过构建出的二进制做端到端检查
 ├── docs/
 │   ├── README.md
 │   ├── index.md
@@ -50,14 +50,14 @@ This repo is **single-context**:
     └── README.md
 ```
 
-## Use the glossary's vocabulary
+## 使用词汇表的词汇
 
-When your output names a domain concept (in an issue title, a refactor proposal, a hypothesis, a test name), use the term as defined in `CONTEXT.md`. Don't drift to synonyms the glossary explicitly avoids.
+当输出要命名领域概念（issue 标题、重构提案、假设、测试名）时，使用 `CONTEXT.md` 中的定义，不要漂移到词汇表明确列在 `_Avoid_` 下的同义词。
 
-If the concept you need isn't in the glossary yet, that's a signal — either you're inventing language the project doesn't use (reconsider) or there's a real gap (note it for `/domain-modeling`).
+如果你需要的概念还不在词汇表里，这是一个信号：要么你在发明项目并不使用的语言（重新考虑），要么确实存在缺口（记下来交给 `/domain-modeling`）。
 
-## Flag ADR conflicts
+## 标记 ADR 冲突
 
-If your output contradicts an existing ADR, surface it explicitly rather than silently overriding:
+如果输出与现有 ADR 矛盾，明确指出来，而不是静默覆盖：
 
-> _Contradicts ADR-0007 (project naming) — but worth reopening because…_
+> _与 ADR-0007（项目命名）矛盾 —— 但值得重新讨论，因为……_
