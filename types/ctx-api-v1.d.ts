@@ -55,6 +55,8 @@ interface SdHttp {
    * Content-Range header. Returns true when it produced the Response, or
    * false when an earlier Response already won. A final non-2xx upstream
    * answer throws a catchable error with code "upstream_http_error".
+   * Malformed header names or values throw `script_error` before the upstream
+   * call starts.
    */
   pipe(url: string, opts?: SdHttpPipeOptions): boolean;
 }
@@ -66,6 +68,11 @@ interface SdRespondHeaders {
 }
 
 type SdHeaderPairs = ReadonlyArray<readonly [string, string]>;
+
+/**
+ * Header object or [name, value] pairs. The host validates names and values;
+ * malformed pairs throw a catchable `script_error`.
+ */
 type SdHeaders = SdRespondHeaders | SdHeaderPairs;
 
 interface SdLog {
@@ -96,6 +103,8 @@ interface SdContext {
   /**
    * Produces the client Response. The first call wins and returns true;
    * later calls are ignored and return false. Bytes must be integers in [0, 255].
+   * Malformed header names or values throw a catchable `script_error` and do
+   * not record a Response.
    */
   respond(
     status: number,
