@@ -1,10 +1,11 @@
-# Demo fixture for the manifest scenario in plans/demo-document-catalog.md §3.1.
+# Demo fixture for the document scenarios in plans/demo-document-catalog.md §3.
 #
 #   METADATA_API_URL=https://metadata.example.com/demo/documents \
 #     stuntdouble serve --config demo/stuntdouble.toml
 #
-# METADATA_API_URL is optional: the script falls back to the same public demo
-# URL. Only hosts listed in [upstream] allow_hosts can be reached.
+# METADATA_API_URL is optional: the scripts fall back to the same public demo
+# URL. Only hosts listed in [upstream] allow_hosts can be reached: the metadata
+# API plus the demo PDF host used by the catalog fixture.
 config_version = "1"
 
 [server]
@@ -15,10 +16,16 @@ port = 3000
 root = "./files"
 
 [upstream]
-allow_hosts = ["metadata.example.com"]
+allow_hosts = ["metadata.example.com", "files.example.com"]
 
 [[routes]]
 name = "document-manifest"
 method = "GET"
 path = "/demo/documents/manifest/:group"
 script = "scripts/manifest.js"
+
+[[routes]]
+name = "document-download"
+method = "GET"
+path = "/demo/documents/download/:document_id"
+script = "scripts/download.js"

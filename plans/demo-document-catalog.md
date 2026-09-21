@@ -8,7 +8,7 @@
 
 实现基于 `json-server@0.17.4`，通过 CLI 的 `--middlewares` 参数加载自定义 Express middleware。Mock 服务对外提供两个固定路径，同时保留 json-server 的默认资源能力。
 
-Stunt Double 复现 §3.1 清单接口的夹具位于 [demo/](../demo/README.md)；本文其余部分仍是 json-server 参考实现的记录。
+Stunt Double 复现 §3.1 清单与 §3.2 下载接口的夹具位于 [demo/](../demo/README.md)；本文其余部分仍是 json-server 参考实现的记录。
 
 ## 2. 需求概述
 

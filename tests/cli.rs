@@ -210,11 +210,18 @@ struct Upstream {
 
 impl Upstream {
     fn start(responses: Vec<UpstreamResponse>) -> Self {
+        Self::start_with(|_| responses)
+    }
+
+    /// Variant for tests whose canned payloads must point back at the fake
+    /// upstream: the responses are built once the bound port is known.
+    fn start_with(build: impl FnOnce(u16) -> Vec<UpstreamResponse>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind upstream");
         listener
             .set_nonblocking(true)
             .expect("nonblocking upstream");
         let port = listener.local_addr().expect("upstream addr").port();
+        let responses = build(port);
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -240,9 +247,13 @@ impl Upstream {
                         }
                         let reason = match response.status {
                             200 => "OK",
+                            201 => "Created",
+                            206 => "Partial Content",
+                            207 => "Multi-Status",
                             302 => "Found",
                             404 => "Not Found",
                             500 => "Internal Server Error",
+                            503 => "Service Unavailable",
                             _ => "Status",
                         };
                         let mut raw = format!(
@@ -1179,6 +1190,320 @@ fn validate_rejects_invalid_allow_hosts() {
     );
 }
 
+// `ctx.http.pipe` contract: the upstream body streams to the client around
+// the script heap, the script owns status and headers, and policy rejections
+// never masquerade as upstream failures.
+
+#[test]
+fn ctx_http_pipe_streams_upstream_bytes_with_status_and_headers() {
+    let upstream = Upstream::start(vec![UpstreamResponse::new(200, b"%PDF-streamed")]);
+    let script = r#"
+var produced = ctx.http.pipe(ctx.env.UPSTREAM_URL, {
+  status: 201,
+  headers: { "Content-Type": "application/pdf", "X-Piped": "yes" }
+});
+if (!produced) { ctx.respond(500, {}, "pipe did not produce a response"); }
+"#;
+    let url = upstream.url("/file.pdf");
+    let (response, _) = with_server_full(
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+        &[("UPSTREAM_URL", url.as_str())],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 201, "body: {}", response.body);
+    assert_eq!(response.header("content-type"), Some("application/pdf"));
+    assert_eq!(response.header("x-piped"), Some("yes"));
+    assert_eq!(response.body, "%PDF-streamed");
+    assert_eq!(
+        response.header("content-length"),
+        Some("13"),
+        "upstream length must travel with the stream"
+    );
+    assert_eq!(upstream.requests().len(), 1);
+}
+
+#[test]
+fn ctx_http_pipe_rejects_invalid_opts_as_script_error() {
+    let scripts = [
+        r#"ctx.http.pipe(ctx.env.UPSTREAM_URL, { retries: 1 }); ctx.respond(200, {}, "no");"#,
+        r#"ctx.http.pipe(ctx.env.UPSTREAM_URL, { status: 0 }); ctx.respond(200, {}, "no");"#,
+        r#"ctx.http.pipe(ctx.env.UPSTREAM_URL, { status: 600 }); ctx.respond(200, {}, "no");"#,
+        r#"ctx.http.pipe(ctx.env.UPSTREAM_URL, { status: "200" }); ctx.respond(200, {}, "no");"#,
+        r#"ctx.http.pipe(ctx.env.UPSTREAM_URL, []); ctx.respond(200, {}, "no");"#,
+        r#"ctx.http.pipe(ctx.env.UPSTREAM_URL, null); ctx.respond(200, {}, "no");"#,
+        r#"var opts = Object.create({ status: 200 }); ctx.http.pipe(ctx.env.UPSTREAM_URL, opts); ctx.respond(200, {}, "no");"#,
+        r#"var opts = {}; opts[Symbol("extra")] = 1; ctx.http.pipe(ctx.env.UPSTREAM_URL, opts); ctx.respond(200, {}, "no");"#,
+    ];
+    for script in scripts {
+        let upstream = Upstream::start(vec![UpstreamResponse::new(200, b"%PDF")]);
+        let url = upstream.url("/file.pdf");
+        let (response, _) = with_server_full(
+            &with_upstream(good_config(), &["127.0.0.1"]),
+            script,
+            &[("UPSTREAM_URL", url.as_str())],
+            |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+        );
+        assert_eq!(
+            response.status, 500,
+            "script: {script} body: {}",
+            response.body
+        );
+        assert_eq!(
+            error_class(&response.body).as_deref(),
+            Some("script_error"),
+            "script: {script} body: {}",
+            response.body
+        );
+        assert!(
+            upstream.requests().is_empty(),
+            "invalid opts reached the upstream: {script}"
+        );
+    }
+}
+
+#[test]
+fn ctx_http_pipe_uncaught_non_2xx_is_a_script_error() {
+    let upstream = Upstream::start(vec![UpstreamResponse::new(404, b"missing")]);
+    let script = r#"ctx.http.pipe(ctx.env.UPSTREAM_URL); ctx.respond(200, {}, "no");"#;
+    let url = upstream.url("/file.pdf");
+    let (response, _) = with_server_full(
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+        &[("UPSTREAM_URL", url.as_str())],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 500, "body: {}", response.body);
+    assert_eq!(error_class(&response.body).as_deref(), Some("script_error"));
+}
+
+#[test]
+fn ctx_http_pipe_http_error_is_catchable() {
+    let upstream = Upstream::start(vec![UpstreamResponse::new(500, b"boom")]);
+    let script = r#"
+try {
+  ctx.http.pipe(ctx.env.UPSTREAM_URL);
+  ctx.respond(500, {}, "expected an upstream status error");
+} catch (error) {
+  ctx.respond(200, {}, error.code);
+}
+"#;
+    let url = upstream.url("/file.pdf");
+    let (response, _) = with_server_full(
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+        &[("UPSTREAM_URL", url.as_str())],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(response.body, "upstream_http_error");
+}
+
+#[test]
+fn ctx_http_pipe_transport_failure_is_catchable() {
+    let port = closed_port();
+    let url = format!("http://127.0.0.1:{port}/file.pdf");
+    let script = r#"
+try {
+  ctx.http.pipe(ctx.env.UPSTREAM_URL);
+  ctx.respond(500, {}, "expected a transport failure");
+} catch (error) {
+  ctx.respond(200, {}, error.code);
+}
+"#;
+    let (response, _) = with_server_full(
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+        &[("UPSTREAM_URL", url.as_str())],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(response.body, "upstream_unreachable");
+}
+
+#[test]
+fn ctx_http_pipe_is_ignored_after_a_response_was_produced() {
+    let upstream = Upstream::start(vec![UpstreamResponse::new(200, b"%PDF")]);
+    let script = r#"
+ctx.respond(201, { "X-First": "yes" }, "first");
+var produced = ctx.http.pipe(ctx.env.UPSTREAM_URL);
+ctx.respond(500, {}, produced ? "pipe won" : "still first");
+"#;
+    let url = upstream.url("/file.pdf");
+    let (response, stderr) = with_server_full(
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+        &[("UPSTREAM_URL", url.as_str())],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 201, "body: {}", response.body);
+    assert_eq!(response.body, "first");
+    assert_eq!(response.header("x-first"), Some("yes"));
+    assert!(stderr.contains("already produced"), "stderr: {stderr}");
+    assert!(
+        upstream.requests().is_empty(),
+        "an ignored pipe must not reach the upstream"
+    );
+}
+
+#[test]
+fn ctx_http_pipe_response_wins_over_a_later_respond() {
+    let upstream = Upstream::start(vec![UpstreamResponse::new(200, b"%PDF-wins")]);
+    let script = r#"
+ctx.http.pipe(ctx.env.UPSTREAM_URL);
+ctx.respond(500, {}, "second");
+"#;
+    let url = upstream.url("/file.pdf");
+    let (response, stderr) = with_server_full(
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+        &[("UPSTREAM_URL", url.as_str())],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(response.body, "%PDF-wins");
+    assert!(stderr.contains("already produced"), "stderr: {stderr}");
+}
+
+#[test]
+fn ctx_http_pipe_follows_allowlisted_redirects() {
+    let upstream = Upstream::start_with(|port| {
+        vec![
+            UpstreamResponse::new(302, b"")
+                .header("Location", &format!("http://127.0.0.1:{port}/final.pdf")),
+            UpstreamResponse::new(200, b"%PDF-redirected"),
+        ]
+    });
+    let script = r"ctx.http.pipe(ctx.env.UPSTREAM_URL);";
+    let url = upstream.url("/file.pdf");
+    let (response, _) = with_server_full(
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+        &[("UPSTREAM_URL", url.as_str())],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(response.body, "%PDF-redirected");
+    let requests = upstream.requests();
+    assert_eq!(requests.len(), 2, "upstream calls: {requests:?}");
+    assert!(
+        requests[1]
+            .to_ascii_lowercase()
+            .starts_with("get /final.pdf "),
+        "unexpected upstream request: {}",
+        requests[1]
+    );
+}
+
+#[test]
+fn ctx_http_pipe_rejects_redirect_to_non_allowlisted_host() {
+    let upstream = Upstream::start(vec![UpstreamResponse::new(302, b"")
+        .header("Location", "http://not-allowed.example.com/final.pdf")]);
+    let script = r#"ctx.http.pipe(ctx.env.UPSTREAM_URL); ctx.respond(200, {}, "no");"#;
+    let url = upstream.url("/file.pdf");
+    let (response, _) = with_server_full(
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+        &[("UPSTREAM_URL", url.as_str())],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 500, "body: {}", response.body);
+    assert_eq!(error_class(&response.body).as_deref(), Some("script_error"));
+    assert_eq!(upstream.requests().len(), 1);
+}
+
+#[test]
+fn ctx_http_pipe_requires_allowlisted_host() {
+    let script =
+        r#"ctx.http.pipe("http://not-allowed.example.com/file.pdf"); ctx.respond(200, {}, "no");"#;
+    assert_script_error(good_config(), script);
+}
+
+#[test]
+fn ctx_http_pipe_defaults_to_the_upstream_2xx_status() {
+    let upstream = Upstream::start(vec![UpstreamResponse::new(207, b"%PDF-multi")]);
+    let script = r"ctx.http.pipe(ctx.env.UPSTREAM_URL);";
+    let url = upstream.url("/file.pdf");
+    let (response, _) = with_server_full(
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+        &[("UPSTREAM_URL", url.as_str())],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 207, "body: {}", response.body);
+    assert_eq!(response.body, "%PDF-multi");
+}
+
+#[test]
+fn ctx_http_pipe_url_rejection_is_catchable() {
+    let script = r#"
+try {
+  ctx.http.pipe("http://files.example.com:bad/file.pdf");
+  ctx.respond(500, {}, "expected an invalid-URL error");
+} catch (error) {
+  ctx.respond(200, {}, error.code + ":" + error.message);
+}
+"#;
+    let (response, _) = with_server_full(
+        &with_upstream(good_config(), &["files.example.com"]),
+        script,
+        &[],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert!(
+        response.body.starts_with("upstream_url_invalid:"),
+        "body: {}",
+        response.body
+    );
+}
+
+#[test]
+fn ctx_http_pipe_redirect_limit_is_catchable() {
+    let upstream = Upstream::start_with(|port| {
+        (0..4_u8)
+            .map(|hop| {
+                UpstreamResponse::new(302, b"")
+                    .header("Location", &format!("http://127.0.0.1:{port}/hop{hop}"))
+            })
+            .collect()
+    });
+    let script = r#"
+try {
+  ctx.http.pipe(ctx.env.UPSTREAM_URL);
+  ctx.respond(500, {}, "expected a redirect error");
+} catch (error) {
+  ctx.respond(200, {}, error.code);
+}
+"#;
+    let url = upstream.url("/file.pdf");
+    let (response, _) = with_server_full(
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+        &[("UPSTREAM_URL", url.as_str())],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(response.body, "upstream_redirect_error");
+    assert_eq!(upstream.requests().len(), 4);
+}
+
+#[test]
+fn ctx_http_pipe_streams_bodies_larger_than_the_get_cap() {
+    let large = vec![b'a'; 8 * 1024 * 1024 + 1];
+    let upstream = Upstream::start(vec![UpstreamResponse::new(200, &large)]);
+    let script = r"ctx.http.pipe(ctx.env.UPSTREAM_URL);";
+    let url = upstream.url("/large.pdf");
+    let (response, _) = with_server_full(
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+        &[("UPSTREAM_URL", url.as_str())],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 200, "body: {}", response.body.len());
+    assert_eq!(response.body.len(), large.len());
+}
+
 // Demo fixture: the in-repo configuration plus script from
 // plans/demo-document-catalog.md §3.1 must produce the catalog contract
 // through the built binary and a stdlib fake upstream.
@@ -1193,23 +1518,25 @@ fn demo_fixture(dir: &Path, port: u16) -> PathBuf {
     let config =
         std::fs::read_to_string(source.join("stuntdouble.toml")).expect("read demo config");
     let port_marker = "port = 3000";
-    let hosts_marker = "allow_hosts = [\"metadata.example.com\"]";
+    let hosts_marker = "allow_hosts = [\"metadata.example.com\", \"files.example.com\"]";
     assert!(config.contains(port_marker), "demo config moved: {config}");
     assert!(config.contains(hosts_marker), "demo config moved: {config}");
     let config = config
         .replacen(port_marker, &format!("port = {port}"), 1)
         .replacen(
             hosts_marker,
-            "allow_hosts = [\"metadata.example.com\", \"127.0.0.1\"]",
+            "allow_hosts = [\"metadata.example.com\", \"files.example.com\", \"127.0.0.1\"]",
             1,
         );
     std::fs::create_dir_all(dir.join("files")).expect("files dir");
     std::fs::create_dir_all(dir.join("scripts")).expect("scripts dir");
-    std::fs::copy(
-        source.join("scripts/manifest.js"),
-        dir.join("scripts/manifest.js"),
-    )
-    .expect("copy demo script");
+    for script in ["manifest.js", "download.js"] {
+        std::fs::copy(
+            source.join("scripts").join(script),
+            dir.join("scripts").join(script),
+        )
+        .expect("copy demo script");
+    }
     let path = dir.join("stuntdouble.toml");
     std::fs::write(&path, config).expect("write demo config");
     path
@@ -1237,6 +1564,25 @@ fn manifest_response(upstream: &Upstream, headers: &[(&str, &str)]) -> Response 
     response
 }
 
+fn demo_download_request(port: u16, document_id: &str, headers: &[(&str, &str)]) -> Response {
+    request(
+        port,
+        "GET",
+        &format!("/demo/documents/download/{document_id}"),
+        headers,
+    )
+}
+
+/// Run one download request against a served demo fixture whose
+/// `METADATA_API_URL` points at `upstream`.
+fn download_response(upstream: &Upstream, document_id: &str, headers: &[(&str, &str)]) -> Response {
+    let url = upstream.url("/demo/documents");
+    let (response, _) = with_demo(&[("METADATA_API_URL", url.as_str())], |port| {
+        demo_download_request(port, document_id, headers)
+    });
+    response
+}
+
 fn assert_metadata_bad_gateway(response: &Response) {
     assert_eq!(response.status, 502, "body: {}", response.body);
     assert_eq!(
@@ -1252,6 +1598,238 @@ fn repository_demo_configuration_validates() {
     let config = format!("{DEMO_DIR}/stuntdouble.toml");
     let (code, _, stderr) = run(&["validate", "--config", &config]);
     assert_eq!(code, 0, "stderr: {stderr}");
+}
+
+/// Metadata payload for the demo fixture; `pdf_url` is embedded verbatim.
+fn demo_metadata(pdf_url: &str) -> String {
+    format!(
+        r#"{{"data":[{{"code":"DOC-0001","title":"示例设备 A 安装手册","system_code":"SYS-A","pdf_url":"{pdf_url}"}}]}}"#
+    )
+}
+
+#[test]
+fn demo_download_route_streams_the_pdf() {
+    const PDF: &[u8] = b"%PDF-1.4\n% demo fixture\n%%EOF\n";
+    let upstream = Upstream::start_with(|port| {
+        let metadata = format!(
+            r#"{{"data":[{{"code":"DOC-0001","title":"示例设备 A 安装手册","system_code":"SYS-A","pdf_url":"http://127.0.0.1:{port}/demo/documents/DOC-0001.pdf"}}]}}"#
+        );
+        vec![
+            UpstreamResponse::new(200, metadata.as_bytes()),
+            UpstreamResponse::new(200, PDF),
+        ]
+    });
+    let response = download_response(&upstream, "DOC-0001", &[]);
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(response.header("content-type"), Some("application/pdf"));
+    assert_eq!(
+        response.header("content-disposition"),
+        Some("attachment;filename=\"DOC-0001.pdf\"")
+    );
+    assert_eq!(response.body.as_bytes(), PDF);
+    let requests = upstream.requests();
+    assert_eq!(requests.len(), 2, "upstream calls: {requests:?}");
+    let head = requests[1].to_ascii_lowercase();
+    assert!(
+        head.starts_with("get /demo/documents/doc-0001.pdf "),
+        "unexpected upstream request: {}",
+        requests[1]
+    );
+}
+
+#[test]
+fn demo_download_route_answers_404_for_unknown_document() {
+    let upstream = Upstream::start(vec![UpstreamResponse::new(
+        200,
+        demo_metadata("http://files.example.com/demo/documents/DOC-0001.pdf").as_bytes(),
+    )]);
+    let response = download_response(&upstream, "DOC-9999", &[]);
+    assert_eq!(response.status, 404, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("document_not_found")
+    );
+    assert_eq!(
+        upstream.requests().len(),
+        1,
+        "a missing document must not fetch any PDF"
+    );
+}
+
+#[test]
+fn demo_download_route_rejects_an_invalid_pdf_url() {
+    for bad_url in [
+        "ftp://files.example.com/DOC-0001.pdf",
+        "not-a-url",
+        "files.example.com/DOC-0001.pdf",
+        "http://files.example.com:bad/DOC-0001.pdf",
+        "http://[::1",
+        "",
+    ] {
+        let upstream = Upstream::start(vec![UpstreamResponse::new(
+            200,
+            demo_metadata(bad_url).as_bytes(),
+        )]);
+        let response = download_response(&upstream, "DOC-0001", &[]);
+        assert_eq!(
+            response.status, 502,
+            "url {bad_url:?} body: {}",
+            response.body
+        );
+        assert_eq!(
+            error_class(&response.body).as_deref(),
+            Some("pdf_url_invalid"),
+            "url {bad_url:?} body: {}",
+            response.body
+        );
+        assert_eq!(
+            upstream.requests().len(),
+            1,
+            "url {bad_url:?} must not fetch any PDF"
+        );
+    }
+}
+
+#[test]
+fn demo_download_route_maps_pdf_non_2xx_to_502() {
+    let upstream = Upstream::start_with(|port| {
+        let url = format!("http://127.0.0.1:{port}/demo/documents/DOC-0001.pdf");
+        vec![
+            UpstreamResponse::new(200, demo_metadata(&url).as_bytes()),
+            UpstreamResponse::new(503, b"unavailable"),
+        ]
+    });
+    let response = download_response(&upstream, "DOC-0001", &[]);
+    assert_eq!(response.status, 502, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("pdf_bad_gateway")
+    );
+}
+
+#[test]
+fn demo_download_route_maps_unreachable_pdf_to_502() {
+    let dead = closed_port();
+    let upstream = Upstream::start(vec![UpstreamResponse::new(
+        200,
+        demo_metadata(&format!("http://127.0.0.1:{dead}/DOC-0001.pdf")).as_bytes(),
+    )]);
+    let response = download_response(&upstream, "DOC-0001", &[]);
+    assert_eq!(response.status, 502, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("pdf_bad_gateway")
+    );
+}
+
+#[test]
+fn demo_download_route_maps_metadata_failure_to_502() {
+    let upstream = Upstream::start(vec![UpstreamResponse::new(404, b"missing")]);
+    assert_metadata_bad_gateway(&download_response(&upstream, "DOC-0001", &[]));
+}
+
+#[test]
+fn demo_download_route_forwards_range_and_preserves_content_range() {
+    const PDF: &[u8] = b"%PDF-1.4\n% demo fixture\n%%EOF\n";
+    let upstream = Upstream::start_with(|port| {
+        let url = format!("http://127.0.0.1:{port}/demo/documents/DOC-0001.pdf");
+        vec![
+            UpstreamResponse::new(200, demo_metadata(&url).as_bytes()),
+            UpstreamResponse::new(206, &PDF[..4])
+                .header("Content-Range", &format!("bytes 0-3/{}", PDF.len())),
+        ]
+    });
+    let response = download_response(&upstream, "DOC-0001", &[("Range", "bytes=0-3")]);
+    assert_eq!(response.status, 206, "body: {}", response.body);
+    assert_eq!(response.body.as_bytes(), &PDF[..4]);
+    assert_eq!(
+        response.header("content-range"),
+        Some(format!("bytes 0-3/{}", PDF.len()).as_str())
+    );
+    let requests = upstream.requests();
+    assert_eq!(requests.len(), 2, "upstream calls: {requests:?}");
+    let head = requests[1].to_ascii_lowercase();
+    assert!(
+        head.contains("range: bytes=0-3"),
+        "Range header not forwarded: {}",
+        requests[1]
+    );
+}
+
+#[test]
+fn demo_download_route_keeps_policy_rejections_as_script_errors() {
+    let upstream = Upstream::start(vec![UpstreamResponse::new(
+        200,
+        demo_metadata("http://not-allowed.example.com/DOC-0001.pdf").as_bytes(),
+    )]);
+    let response = download_response(&upstream, "DOC-0001", &[]);
+    assert_eq!(response.status, 500, "body: {}", response.body);
+    assert_eq!(error_class(&response.body).as_deref(), Some("script_error"));
+}
+
+#[test]
+fn demo_download_route_maps_unfollowable_redirects_to_502() {
+    let upstream = Upstream::start_with(|port| {
+        let url = format!("http://127.0.0.1:{port}/demo/documents/DOC-0001.pdf");
+        let mut responses = vec![UpstreamResponse::new(200, demo_metadata(&url).as_bytes())];
+        for hop in 0..4_u8 {
+            responses.push(
+                UpstreamResponse::new(302, b"")
+                    .header("Location", &format!("http://127.0.0.1:{port}/hop{hop}")),
+            );
+        }
+        responses
+    });
+    let response = download_response(&upstream, "DOC-0001", &[]);
+    assert_eq!(response.status, 502, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("pdf_bad_gateway")
+    );
+    assert_eq!(upstream.requests().len(), 5);
+}
+
+#[test]
+fn demo_download_route_maps_a_redirect_without_location_to_502() {
+    let upstream = Upstream::start_with(|port| {
+        let url = format!("http://127.0.0.1:{port}/demo/documents/DOC-0001.pdf");
+        vec![
+            UpstreamResponse::new(200, demo_metadata(&url).as_bytes()),
+            UpstreamResponse::new(302, b""),
+        ]
+    });
+    let response = download_response(&upstream, "DOC-0001", &[]);
+    assert_eq!(response.status, 502, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("pdf_bad_gateway")
+    );
+}
+
+#[test]
+fn demo_download_route_does_not_forward_client_request_id() {
+    let upstream = Upstream::start_with(|port| {
+        let url = format!("http://127.0.0.1:{port}/demo/documents/DOC-0001.pdf");
+        vec![
+            UpstreamResponse::new(200, demo_metadata(&url).as_bytes()),
+            UpstreamResponse::new(200, b"%PDF-1.4\n%%EOF\n"),
+        ]
+    });
+    let response = download_response(&upstream, "DOC-0001", &[("X-Request-ID", "key")]);
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert!(response.header("x-request-id").is_some());
+    let requests = upstream.requests();
+    assert_eq!(requests.len(), 2, "upstream calls: {requests:?}");
+    for head in &requests {
+        let lower = head.to_ascii_lowercase();
+        // Positive control: the capture holds a real request head, so the
+        // negative assertion below cannot pass on an empty recording.
+        assert!(lower.contains("host:"), "recorded head: {head}");
+        assert!(
+            !lower.contains("x-request-id"),
+            "client header leaked upstream: {head}"
+        );
+    }
 }
 
 #[test]

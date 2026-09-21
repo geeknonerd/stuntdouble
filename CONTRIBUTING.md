@@ -4,7 +4,7 @@ This document describes how to contribute code and changes to the repository. Pl
 
 ## Project status
 
-The first five slices are implemented: `stuntdouble serve` and `stuntdouble validate` run against a TOML configuration, matched routes execute their JavaScript in the embedded Boa runtime with a host-injected `ctx` (including allowlisted `ctx.http.get`), and every response carries a `request_id`. Unmatched routes answer 404 `not_found`; script failures answer 500 `script_error` or `script_no_response`; uncaught upstream transport failures answer 502 `upstream_unreachable`. The document manifest scenario from [plans/demo-document-catalog.md](plans/demo-document-catalog.md) runs from [demo/](demo/). Files and binary responses land in later slices. Product definition, architecture decisions (ADRs), and research notes remain the design source of truth.
+The first six slices are implemented: `stuntdouble serve` and `stuntdouble validate` run against a TOML configuration, matched routes execute their JavaScript in the embedded Boa runtime with a host-injected `ctx` (including allowlisted `ctx.http.get` and streaming `ctx.http.pipe`), and every response carries a `request_id`. Unmatched routes answer 404 `not_found`; script failures answer 500 `script_error` or `script_no_response`; uncaught upstream transport failures answer 502 `upstream_unreachable`. The document manifest and PDF download scenarios from [plans/demo-document-catalog.md](plans/demo-document-catalog.md) run from [demo/](demo/). Local static-file reads, file streaming, and uploads land in later slices. Product definition, architecture decisions (ADRs), and research notes remain the design source of truth.
 
 ## Scope alignment
 

@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Sixth implementation slice (T6): `ctx.http.pipe(url, {status, headers})` streams one allowlisted
+  upstream 2xx body straight to the client without entering the script heap. The client `Range` request
+  header is forwarded, an upstream 206 keeps its `Content-Range` header and status, `status` defaults
+  to the upstream 2xx status; a final non-2xx answer raises `upstream_http_error`, a URL that does not
+  parse or is not http/https raises `upstream_url_invalid`, and an unfollowable redirect chain raises
+  `upstream_redirect_error`, so route scripts keep their own error mapping. The T6 amendment to
+  ADR 0005 records why `ctx.http.pipe` cannot treat a non-2xx answer as data, and why a mid-body
+  upstream failure can only truncate a stream already on the wire. The
+  repository also ships the demo download route `GET /demo/documents/download/:document_id` from
+  `plans/demo-document-catalog.md` §3.2: exact `code` matching, 404 `document_not_found`, 502
+  `pdf_url_invalid`, 502 `pdf_bad_gateway`, and `Content-Type`/`Content-Disposition` headers. End-to-end
+  tests cover the streaming path, Range passthrough, error mapping, and a body larger than the 8 MiB
+  `ctx.http.get` cap.
+- New dependency: `tokio-stream` 0.1 (MIT) adapts the piped body channel into the HTTP response
+  stream; tokio supplies the channel, but neither the standard library nor the existing dependencies
+  provide a `Stream` adapter for it.
 - Fifth implementation slice (T5): the repository ships the runnable demo fixture from
   `plans/demo-document-catalog.md` §3.1 (`demo/stuntdouble.toml` plus `demo/scripts/manifest.js`).
   `GET /demo/documents/manifest/:group` reads upstream metadata through `ctx.http.get` and answers

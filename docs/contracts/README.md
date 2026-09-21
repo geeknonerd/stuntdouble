@@ -4,9 +4,9 @@ Stunt Double exposes three public contracts. They evolve separately and are trac
 
 | Contract | Status | Applies to | Stability |
 | --- | --- | --- | --- |
-| [Configuration](config.md) | stable for v0.x slice T4 | v0.x | Breaking changes allowed before 1.0 with a deprecation window |
-| [`ctx` API](ctx-api.md) | draft (T4 subset implemented) | `apiVersion` 1 | Additive within an `apiVersion`; removals require a new version |
-| [CLI](cli.md) | stable for v0.x slice T4 | v0.x | Breaking changes allowed before 1.0 with a deprecation window |
+| [Configuration](config.md) | stable for v0.x slice T6 | v0.x | Breaking changes allowed before 1.0 with a deprecation window |
+| [`ctx` API](ctx-api.md) | draft (T6 subset implemented) | `apiVersion` 1 | Additive within an `apiVersion`; removals require a new version |
+| [CLI](cli.md) | stable for v0.x slice T6 | v0.x | Breaking changes allowed before 1.0 with a deprecation window |
 
 ## Change process
 

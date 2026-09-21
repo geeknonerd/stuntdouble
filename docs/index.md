@@ -10,7 +10,7 @@ Stunt Double is a Rust-based mock server for integration testing against real ex
 
 ## Status
 
-Slices T1–T5 are implemented. `stuntdouble serve` and `stuntdouble validate` run from a TOML configuration; matched routes execute JavaScript in the embedded Boa runtime with a host-injected `ctx` (`apiVersion`, `request`, `http.get`, `respond`, `log`, `env`); and `ctx.http.get` performs allowlisted upstream HTTP calls. Unmatched routes return 404 `not_found`; script failures return 500 `script_error` or `script_no_response`; uncaught upstream transport failures return 502 `upstream_unreachable`. The document manifest demo scenario runs from the in-repo fixture in `demo/`. File and binary responses are the next slices.
+Slices T1–T6 are implemented. `stuntdouble serve` and `stuntdouble validate` run from a TOML configuration; matched routes execute JavaScript in the embedded Boa runtime with a host-injected `ctx` (`apiVersion`, `request`, `http.get`, `http.pipe`, `respond`, `log`, `env`); `ctx.http.get` performs allowlisted upstream HTTP calls, and `ctx.http.pipe` streams an allowlisted upstream body to the client with Range passthrough. Unmatched routes return 404 `not_found`; script failures return 500 `script_error` or `script_no_response`; uncaught upstream transport failures return 502 `upstream_unreachable`. The document manifest and PDF download demo scenarios run from the in-repo fixture in `demo/`. Local static files, uploads, and file responses are the next slices.
 
 ## Documentation
 

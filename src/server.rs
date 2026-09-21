@@ -3,7 +3,7 @@
 // script_no_response.
 use crate::config::Config;
 use crate::matcher::match_route;
-use crate::script::{self, RequestSnapshot, ScriptResponse};
+use crate::script::{self, RequestSnapshot, ResponseBody, ScriptResponse};
 use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
@@ -18,6 +18,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio_stream::wrappers::ReceiverStream;
 
 pub struct AppState {
     config: Config,
@@ -134,12 +135,12 @@ async fn handle(
             }
         };
 
-    let (status, error_class, response_headers, body_bytes) = match handled {
+    let (status, error_class, response_headers, body) = match handled {
         Handled::NotFound => (
             StatusCode::NOT_FOUND,
             "not_found",
             HeaderMap::new(),
-            error_body(&request_id, "not_found"),
+            Body::from(error_body(&request_id, "not_found")),
         ),
         Handled::Failed(error) => {
             let class = error.class();
@@ -148,14 +149,14 @@ async fn handle(
                 status,
                 class,
                 HeaderMap::new(),
-                error_body(&request_id, class),
+                Body::from(error_body(&request_id, class)),
             )
         }
         Handled::Responded(response) => (
             StatusCode::from_u16(response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
             "",
             response_headers(&response.headers),
-            response.body.into_bytes(),
+            script_body(response.body),
         ),
     };
 
@@ -187,7 +188,17 @@ async fn handle(
     if let Ok(value) = HeaderValue::from_str(&request_id) {
         headers.insert(HeaderName::from_static("x-request-id"), value);
     }
-    (status, headers, Body::from(body_bytes)).into_response()
+    (status, headers, body).into_response()
+}
+
+/// Map a script response body onto the HTTP body. `ctx.http.pipe` keeps
+/// streaming from the upstream connection instead of buffering here.
+fn script_body(body: ResponseBody) -> Body {
+    match body {
+        ResponseBody::Text(text) => Body::from(text.into_bytes()),
+        ResponseBody::Bytes(bytes) => Body::from(bytes),
+        ResponseBody::Stream(stream) => Body::from_stream(ReceiverStream::new(stream)),
+    }
 }
 
 /// JSON error body shared by every non-script response.
