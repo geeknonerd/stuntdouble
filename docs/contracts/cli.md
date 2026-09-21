@@ -1,6 +1,6 @@
 # CLI contract
 
-**English** | [中文](./cli.zh-CN.md)
+**English** \| [中文](./cli.zh-CN.md)
 
 - **Status**: stable for v0.x slice T6
 - **Applies to**: v0.1.0-alpha.1 and later within the same configuration family

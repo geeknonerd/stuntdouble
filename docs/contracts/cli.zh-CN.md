@@ -1,6 +1,6 @@
 # CLI 契约
 
-[English](./cli.md) | **中文**
+[English](./cli.md) \| **中文**
 
 > 本页是英文版 [cli.md](./cli.md) 的译本；如有出入，以英文版为准。
 

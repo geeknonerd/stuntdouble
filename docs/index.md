@@ -4,7 +4,7 @@ title: Stunt Double
 
 # Stunt Double
 
-**English** | [中文](./index.zh-CN.md)
+**English** \| [中文](./index.zh-CN.md)
 
 **A test double that plays the whole show.**
 

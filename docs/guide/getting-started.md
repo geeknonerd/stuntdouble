@@ -1,6 +1,6 @@
 # Getting started
 
-**English** | [中文](./getting-started.zh-CN.md)
+**English** \| [中文](./getting-started.zh-CN.md)
 
 This page walks through the smallest useful Stunt Double setup: install the binary, describe one route, run the server, and check the result. The contract details live in [public contracts](../contracts/); this guide links to them instead of repeating them.
 

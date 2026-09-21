@@ -1,6 +1,6 @@
 # 文档清单与下载演示
 
-[English](./README.md) | **中文**
+[English](./README.md) \| **中文**
 
 > 本页是英文版 [README.md](./README.md) 的译本；如有出入，以英文版为准。
 

@@ -1,6 +1,6 @@
 # 配置契约
 
-[English](./config.md) | **中文**
+[English](./config.md) \| **中文**
 
 > 本页是英文版 [config.md](./config.md) 的译本；如有出入，以英文版为准。
 

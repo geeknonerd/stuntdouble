@@ -1,6 +1,6 @@
 # Public contracts
 
-**English** | [中文](./README.zh-CN.md)
+**English** \| [中文](./README.zh-CN.md)
 
 Stunt Double exposes three public contracts. They evolve separately and are tracked here.
 
