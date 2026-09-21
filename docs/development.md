@@ -1,6 +1,6 @@
 # Development and release workflow
 
-This document is the operational guide for contributors and maintainers. It records the decisions from ADR 0010–0012.
+This document is the operational guide for contributors and maintainers. It records the decisions from ADR 0010–0013.
 
 ## Git workflow
 
@@ -18,7 +18,7 @@ This document is the operational guide for contributors and maintainers. It reco
 Every pull request must:
 
 - use a Conventional Commits title, because the squash commit inherits it
-- pass `fmt`, `clippy`, `test`, `docs`, `deny`, `audit`, `msrv`, `pr-title`, and `dco`
+- pass `fmt`, `clippy`, `test`, `docs`, `docs-links`, `deny`, `audit`, `msrv`, `pr-title`, and `dco`
 - resolve all review conversations
 - stay up to date with `main`
 - include a DCO sign-off on every commit (`git commit -s`)
@@ -57,11 +57,12 @@ Breaking changes use `!` or a `BREAKING CHANGE:` footer.
 1. Merge completed work into `main`.
 2. Let `release-plz` open or update the release PR.
 3. Review the version bump, `CHANGELOG.md`, and release notes.
-4. Merge the release PR. That merge authorises the release.
-5. `release-plz` creates the tag and optionally publishes to crates.io.
-6. `cargo-dist` builds release artifacts from the tag.
-7. GitHub Release, container image, checksums, attestation, SBOM, and the `ctx` API `.d.ts` type definitions are published.
-8. Announce the release in the repository.
+4. Review the Chinese translations of the B-layer documents (README, `docs/index.md`, `docs/guide/`, `docs/contracts/`, `demo/README.md`).
+5. Merge the release PR. That merge authorises the release.
+6. `release-plz` creates the tag and optionally publishes to crates.io.
+7. `cargo-dist` builds release artifacts from the tag.
+8. GitHub Release, container image, checksums, attestation, SBOM, and the `ctx` API `.d.ts` type definitions are published.
+9. Announce the release in the repository.
 
 A failed release does not reuse or overwrite a tag. Fix the problem and publish a new patch or pre-release version. Use `cargo yank` only for a broken crates.io release; never delete a published version.
 
@@ -118,13 +119,37 @@ Non-trivial logic needs one small runnable check. Sandbox, path traversal, and u
 - Dependabot checks Cargo and GitHub Actions weekly.
 - Security fixes are not held back for a paid tier.
 
-## Documentation
+## 文档语言与双语结构
 
-- Root community docs are written in English.
-- Design docs and ADRs may be written in Chinese; English translations are welcome.
-- Public contracts live in `docs/contracts/`.
-- Domain vocabulary lives in `CONTEXT.md`; it contains no implementation details.
-- Hard-to-reverse decisions become ADRs under `plans/adr/`.
+文档语言按读者分三层；完整决策见 [ADR 0013](../plans/adr/0013-documentation-language-and-bilingual-structure.md)。
+
+| 层 | 范围 | 语言 |
+| --- | --- | --- |
+| A | `CONTRIBUTING.md`、`GOVERNANCE.md`、`SECURITY.md`、`CODE_OF_CONDUCT.md`、`CHANGELOG.md`、`.github/` 模板 | 英文单语 |
+| B | `README.md`、`docs/index.md`、`docs/guide/**`、`docs/contracts/**`、`demo/README.md` | 英文权威 + `.zh-CN.md` 译本 |
+| C | `AGENTS.md`、`CONTEXT.md`、`plans/**`、`research/**`、`docs/development.md`、`docs/agents/**`、`docs/solutions/**` | 中文单语 |
+
+**双语规则**
+
+- 英文文件不带语言后缀，中文译本用 `.zh-CN.md` 后缀放在同一目录。
+- 两页都在标题下方放一行语言切换：英文页 `**English** | [中文](./x.zh-CN.md)`，中文页 `[English](./x.md) | **中文**`；中文页另有一行“以英文版为准”的声明。
+- 英文是唯一权威版本。中文译本允许滞后，但不得与英文矛盾。
+- 外部贡献者只提交英文，不因缺少译本被阻塞合并；译本同步由维护者负责。
+- 每次发布前核对 B 层中文译本（见发布流程）；补不上就删除对应中文页，不留过时译本。
+- 出现第三种语言、B 层超过 10 篇、或引入站点生成器时，迁移到 `docs/<lang>/` 目录布局。
+
+**中文写作约定**
+
+- 领域术语使用 [CONTEXT.md](../CONTEXT.md) 的英文规范词，不造中文译名，也不使用 `_Avoid_` 列出的词。
+- 文件名一律英文 kebab-case；标题与正文用中文。
+- 错误码、配置键、CLI 参数、路径与代码保留原文（半角），中文正文使用全角标点。
+- 英文页不混入中文，例外只有语言切换链接与 `(Chinese)` 标注。
+
+**校验**
+
+`docs-links` CI 门槛做两件事：`lychee --offline` 检查全部 Markdown 的本地链接；脚本检查每个 `.zh-CN.md` 都有同名英文文件，且两页都含语言切换链接。外链与译文漂移不做自动检查。
+
+其余约定：公开契约在 `docs/contracts/`；领域词汇在 `CONTEXT.md`，不含实现细节；难以逆转的决策写入 `plans/adr/`。
 
 ## Release automation activation
 

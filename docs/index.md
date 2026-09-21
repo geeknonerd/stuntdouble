@@ -14,14 +14,11 @@ Slices T1–T6 are implemented. `stuntdouble serve` and `stuntdouble validate` r
 
 ## Documentation
 
-- [README](https://github.com/geeknonerd/stuntdouble/blob/main/README.md)
-- [Documentation index](https://github.com/geeknonerd/stuntdouble/tree/main/docs)
-- [Product definition](https://github.com/geeknonerd/stuntdouble/blob/main/plans/product-definition.md)
-- [Demo fixture](https://github.com/geeknonerd/stuntdouble/blob/main/demo/README.md)
-- [Public contracts](https://github.com/geeknonerd/stuntdouble/tree/main/docs/contracts)
-- [ctx API type definitions](https://github.com/geeknonerd/stuntdouble/blob/main/types/ctx-api-v1.d.ts)
-- [Architecture decisions](https://github.com/geeknonerd/stuntdouble/tree/main/plans/adr)
-- [Research notes](https://github.com/geeknonerd/stuntdouble/tree/main/research)
+- [README](https://github.com/geeknonerd/stuntdouble/blob/main/README.md) — project overview and current status.
+- [Public contracts](https://github.com/geeknonerd/stuntdouble/tree/main/docs/contracts) — configuration, `ctx` API, and CLI.
+- [Demo fixture](https://github.com/geeknonerd/stuntdouble/blob/main/demo/README.md) — runnable manifest and PDF download scenario.
+- [`ctx` API type definitions](https://github.com/geeknonerd/stuntdouble/blob/main/types/ctx-api-v1.d.ts) — `apiVersion` 1 source types.
+- [Changelog](https://github.com/geeknonerd/stuntdouble/blob/main/CHANGELOG.md) — release history.
 - [Contributing](https://github.com/geeknonerd/stuntdouble/blob/main/CONTRIBUTING.md)
 - [Security policy](https://github.com/geeknonerd/stuntdouble/blob/main/SECURITY.md)
 

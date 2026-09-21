@@ -16,10 +16,11 @@ Architecture decisions use sequential numbering and kebab-case filenames.
 | [0010](0010-git-and-release-workflow.md) | Trunk-based development and release flow | Accepted |
 | [0011](0011-contract-compatibility.md) | Separate compatibility contracts | Accepted |
 | [0012](0012-release-artifacts-and-supply-chain.md) | Verifiable release artifacts and supply chain | Accepted |
+| [0013](0013-documentation-language-and-bilingual-structure.md) | Documentation language tiers and bilingual structure | Accepted |
 
 ## Adding an ADR
 
-Use the next number and a kebab-case filename, for example `0013-admin-api-authentication.md`. Keep the record focused on one decision and link related issues or ADRs.
+Use the next number and a kebab-case filename, for example `0014-admin-api-authentication.md`. Keep the record focused on one decision and link related issues or ADRs.
 
 ## When to write one
 

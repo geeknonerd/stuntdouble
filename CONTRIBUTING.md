@@ -29,24 +29,24 @@ Before opening an issue, ensure you can describe the question without exposing s
 
 ## Design documents (ADRs)
 
-When a decision is hard to reverse (e.g., runtime choice, security boundaries, failure semantics), record it as an Architecture Decision Record (ADR):
+When a decision is hard to reverse (e.g., runtime choice, security boundaries, failure semantics), it is recorded as an Architecture Decision Record (ADR). ADRs are written in Chinese; propose the decision in an issue or discussion and the maintainer records it.
 
 - Place the file under `plans/adr/` using kebab-case with the pattern `NNNN-slug.md`.
 - Use this template header:
 
 ```md
-- Status: Accepted | Proposed | Deferred | Rejected
-- Date: YYYY-MM-DD
-- Authors: @github_handle(s)
-- Related: links to issues, discussions, other ADRs
+- 状态：已接受 | 提议 | 推迟 | 拒绝
+- 日期：YYYY-MM-DD
+- 作者：@github_handle
+- 关联：issue、讨论、其他 ADR 的链接
 ...
 ```
 
-We maintain 12 ADRs so far. Add additional ones when needed.
+We maintain 13 ADRs so far. Add additional ones when needed.
 
 ## Development workflow
 
-Use trunk-based development with short-lived branches and pull requests. `main` is always releasable. Squash merge is the only merge method; branches are deleted after merge. Every pull request must pass `fmt`, `clippy`, `test`, `docs`, `deny`, `audit`, `msrv`, `pr-title`, and `dco`.
+Use trunk-based development with short-lived branches and pull requests. `main` is always releasable. Squash merge is the only merge method; branches are deleted after merge. Every pull request must pass `fmt`, `clippy`, `test`, `docs`, `docs-links`, `deny`, `audit`, `msrv`, `pr-title`, and `dco`.
 
 See [docs/development.md](docs/development.md) for the full workflow, versioning rules, and release process.
 
@@ -73,7 +73,13 @@ Contributions will be reviewed against these rules before being accepted.
 
 ## Documentation language
 
-Root community documentation (README, LICENSE, CONTRIBUTING, SECURITY, CODE_OF_CONDUCT, issue/PR templates) should be written in English. Design docs (product definitions, ADRs, research) may be in Chinese now; English translations are welcome.
+English is the authoritative language for every document in the repository. Chinese translations live next to the English file with a `.zh-CN.md` suffix, and both pages carry a language switch line under the title.
+
+- **English only:** `CONTRIBUTING.md`, `GOVERNANCE.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `CHANGELOG.md`, the `.github/` templates, and commit and pull request titles.
+- **English plus a Chinese translation:** the README pair, the GitHub Pages landing page, `docs/guide/`, `docs/contracts/`, and `demo/README.md`.
+- **Chinese only:** `AGENTS.md`, `CONTEXT.md`, `plans/`, `research/`, `docs/development.md`, `docs/agents/`, and `docs/solutions/`. Design documents are written in Chinese because the maintainer works in Chinese.
+
+You only need to write the English side. Do not update a `.zh-CN.md` translation as part of an external contribution: the maintainer keeps translations in sync and reviews them before each release. The full rules live in [docs/development.md](docs/development.md); the decision is recorded in [ADR 0013](plans/adr/0013-documentation-language-and-bilingual-structure.md).
 
 ## Security reporting
 

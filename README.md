@@ -1,5 +1,7 @@
 # Stunt Double
 
+**English** | [中文](README.zh-CN.md)
+
 > **A test double that plays the whole show.**
 
 Stunt Double is a Rust-based mock server for integration testing against real external dependencies. It reads upstream APIs, transforms data with built-in JavaScript or Python, returns files and binary responses, and runs with zero host runtime dependencies.
@@ -23,7 +25,7 @@ The design goal is a single binary that behaves like the real dependency closely
 
 **Script execution and upstream HTTP (T6) implemented.** `stuntdouble serve` and `stuntdouble validate` run from a TOML configuration, match routes by method and path (`:param` capture), and execute each matched route's JavaScript in the embedded Boa runtime with a host-injected `ctx` (`apiVersion`, `request`, `http.get`, `http.pipe`, `respond`, `log`, `env`). Both upstream calls reach only hosts listed in `[upstream] allow_hosts`: `ctx.http.get` treats upstream 4xx/5xx responses as data and maps uncaught transport failures to 502 `upstream_unreachable`, while `ctx.http.pipe` streams a 2xx body to the client around the script heap, forwards `Range`, and keeps 206 `Content-Range`. Unmatched routes answer 404 `not_found`; scripts that throw or time out answer 500 `script_error`, and scripts that never call `ctx.respond` answer 500 `script_no_response` — always with a `request_id`. The document manifest and PDF download scenarios from `plans/demo-document-catalog.md` run from the in-repo fixture in [`demo/`](demo/README.md). Local static files, uploads, and file responses are the next slices.
 
-The execution model and security boundaries were fixed before implementation details. See [plans/adr/](plans/adr/) and [docs/solutions/](docs/solutions/).
+The execution model and security boundaries were fixed before implementation details. See [plans/adr/](plans/adr/) and [docs/solutions/](docs/solutions/) (both in Chinese).
 
 ```bash
 cargo install --path .   # or: cargo run -- serve --config stuntdouble.toml
@@ -56,21 +58,21 @@ See [plans/product-definition.md](plans/product-definition.md) for the full scop
 
 ## Documentation
 
-For detailed workflows and contracts, see [docs/README.md](docs/README.md).
-
-- [Product definition](plans/product-definition.md) — v1 scope, host API, non-goals.
-- [Demo scenario](plans/demo-document-catalog.md) — CSV manifest and PDF download contract.
-- [Demo fixture](demo/README.md) — runnable configuration, script, and error mapping for the CSV manifest.
-- [Architecture decisions](plans/adr/) — ADR 0001–0012.
-- [Development and release workflow](docs/development.md) — branch, commit, CI, versioning, and release rules.
-- [Governance](GOVERNANCE.md) — maintainer model and response expectations.
 - [Public contracts](docs/contracts/) — configuration, `ctx` API, and CLI.
-- [Domain glossary](CONTEXT.md) — project vocabulary.
+- [Demo fixture](demo/README.md) — runnable configuration, script, and error mapping for the CSV manifest.
+- [Documentation site](https://geeknonerd.github.io/stuntdouble/) — the same contracts and demo entry points, rendered.
 - [Changelog](CHANGELOG.md) — release history.
-- [Research](research/) — mock server landscape, runtimes, architecture, and open-source baseline.
-- [Chinese README](README.zh-CN.md).
+- [Contributing](CONTRIBUTING.md) · [Governance](GOVERNANCE.md) · [Security](SECURITY.md) · [Code of Conduct](CODE_OF_CONDUCT.md)
 
-Most design documents are currently written in Chinese. English translations are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
+Development documentation is written in Chinese; [ADR 0013](plans/adr/0013-documentation-language-and-bilingual-structure.md) records the language policy.
+
+- [Product definition](plans/product-definition.md) (Chinese) — v1 scope, host API, non-goals.
+- [Demo scenario](plans/demo-document-catalog.md) (Chinese) — CSV manifest and PDF download contract.
+- [Development and release workflow](docs/development.md) (Chinese) — branch, commit, CI, versioning, and release rules.
+- [Architecture decisions](plans/adr/) (Chinese) — ADR 0001–0013.
+- [Domain glossary](CONTEXT.md) (Chinese) — project vocabulary.
+- [Research](research/) (Chinese) — mock server landscape, runtimes, architecture, and open-source baseline.
+- [Repository documentation index](docs/README.md) (Chinese) — entry point for maintainers.
 
 ## Contributing
 
