@@ -4,6 +4,8 @@ title: Stunt Double
 
 # Stunt Double
 
+**English** | [中文](./index.zh-CN.md)
+
 **A test double that plays the whole show.**
 
 Stunt Double is a Rust-based mock server for integration testing against real external dependencies. It reads upstream APIs, transforms data with built-in JavaScript, returns files and binary responses, and runs without host runtime dependencies.
@@ -15,6 +17,7 @@ Slices T1–T6 are implemented. `stuntdouble serve` and `stuntdouble validate` r
 ## Documentation
 
 - [README](https://github.com/geeknonerd/stuntdouble/blob/main/README.md) — project overview and current status.
+- [Getting started](https://github.com/geeknonerd/stuntdouble/blob/main/docs/guide/getting-started.md) — install, first route, and upstream calls.
 - [Public contracts](https://github.com/geeknonerd/stuntdouble/tree/main/docs/contracts) — configuration, `ctx` API, and CLI.
 - [Demo fixture](https://github.com/geeknonerd/stuntdouble/blob/main/demo/README.md) — runnable manifest and PDF download scenario.
 - [`ctx` API type definitions](https://github.com/geeknonerd/stuntdouble/blob/main/types/ctx-api-v1.d.ts) — `apiVersion` 1 source types.
