@@ -41,7 +41,7 @@ Stunt Double 是 Rust 实现的 Mock Server，面向对接真实外部依赖的�
 │   ├── development.md                # 开发与发布流程
 │   ├── contracts/                    # 公开契约（配置、ctx API、CLI）
 │   ├── agents/                       # issue tracker、labels、domain 文档
-│   └── solutions/                    # 已解决问题的学习记录（ce-compound）
+│   └── solutions/                    # 已解决问题的学习记录（ce-compound）；按类别归档，frontmatter 含 module/tags/problem_type，实现或排障前可先检索
 ├── plans/
 │   ├── product-definition.md
 │   ├── demo-document-catalog.md
