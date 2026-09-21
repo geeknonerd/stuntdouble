@@ -87,7 +87,7 @@ if (upstream.status >= 400) {
 | 502 `upstream_unreachable` | an uncaught transport failure (DNS, connection, TLS, or timeout) |
 | validation error with a dotted path | the configuration violates the contract; the message names the field and the expected shape |
 
-`sandbox.script_timeout_ms` bounds script runtime; the default is 10000 ms.
+`sandbox.script_timeout_ms` bounds script runtime; the default is 10000 ms. A script also runs under a loop-iteration backstop and recursion/VM-stack limits, and an engine panic answers 500 `script_error`. Boa 0.22 exposes no heap metric or interrupt hook, so no in-process heap cap is enforced — see [SECURITY.md](../../SECURITY.md) for the threat model and the [ADR 0003](../../plans/adr/0003-script-first-multi-runtime.md) T3 amendment for the tradeoff.
 
 Add `--verbose` to `serve` when diagnosing one of these failures:
 
