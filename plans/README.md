@@ -1,19 +1,19 @@
 # Plans
 
-This directory holds the product definition, the public demo scenario, and architecture decision records.
+本目录存放产品定义、公开演示场景与架构决策记录。
 
-## Contents
+## 内容
 
-- [Product definition](product-definition.md) — v1 scope, host API contract, and non-goals.
-- [Demo document catalog](demo-document-catalog.md) — public demo scenario for CSV manifest generation and PDF download.
-- [Architecture decisions](adr/) — ADR 0001–0013.
+- [产品功能定义](product-definition.md) — v1 范围、宿主 API 契约与不做清单。
+- [示例文档清单](demo-document-catalog.md) — 生成 CSV 清单并下载 PDF 的公开演示场景。
+- [架构决策](adr/) — ADR 0001–0013。
 
-## Decision records
+## 决策记录
 
-Hard-to-reverse decisions are recorded as ADRs. Use the next available number, kebab-case filenames, and the format in [plans/adr/README.md](adr/README.md).
+难以逆转的决策记录为 ADR。使用下一个可用编号、kebab-case 文件名，格式见 [plans/adr/README.md](adr/README.md)。
 
-## Related docs
+## 相关文档
 
-- [Development and release workflow](../docs/development.md)
-- [Public contracts](../docs/contracts/)
-- [Domain glossary](../CONTEXT.md)
+- [开发与发布流程](../docs/development.md)
+- [公开契约](../docs/contracts/)
+- [领域词汇表](../CONTEXT.md)

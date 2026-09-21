@@ -1,33 +1,32 @@
-# Development and release workflow
+# 开发与发布流程
 
-This document is the operational guide for contributors and maintainers. It records the decisions from ADR 0010–0013.
+本文件是贡献者与维护者的操作指南，记录 ADR 0010–0013 的决策。
 
-## Git workflow
+## Git 工作流
 
-- `main` is the only long-lived branch and is always releasable.
-- All changes go through a short-lived branch and a pull request.
-- Branch names use `feat/`, `fix/`, `docs/`, `chore/`, `ci/`, or `release/`.
-- Squash merge is the only allowed merge method.
-- Branches are deleted after merge.
-- Direct pushes, force pushes, and deletion of `main` are blocked.
-- Releases are tagged from `main`; a long-lived `develop` branch is not used.
-- After 1.0, if an older line needs a patch, create `release/x.y` from the relevant tag.
+- `main` 是唯一长期分支，始终可发布。
+- 所有改动走短生命周期分支 + pull request。
+- 分支名前缀：`feat/`、`fix/`、`docs/`、`chore/`、`ci/`、`release/`。
+- 只允许 squash merge，合并后删除分支。
+- 禁止直接 push、force push 与删除 `main`。
+- 发布从 `main` 打 tag；不使用长期 `develop` 分支。
+- 1.0 之后如需维护旧版本线，从对应 tag 创建 `release/x.y` 分支。
 
-## Pull requests
+## Pull request
 
-Every pull request must:
+每个 pull request 必须：
 
-- use a Conventional Commits title, because the squash commit inherits it
-- pass `fmt`, `clippy`, `test`, `docs`, `docs-links`, `deny`, `audit`, `msrv`, `pr-title`, and `dco`
-- resolve all review conversations
-- stay up to date with `main`
-- include a DCO sign-off on every commit (`git commit -s`)
+- 使用 Conventional Commits 标题，因为 squash commit 会继承它
+- 通过 `fmt`、`clippy`、`test`、`docs`、`docs-links`、`deny`、`audit`、`msrv`、`pr-title`、`dco`
+- 解决全部 review 会话
+- 与 `main` 保持同步
+- 每个 commit 带 DCO 签名（`git commit -s`）
 
-While the project has one maintainer, the required approval count is zero. CI is the hard gate. When a second maintainer joins, the approval count becomes one and CODEOWNERS takes over review routing.
+项目只有一位维护者时，所需批准数为 0，CI 是硬门槛。第二位维护者加入后批准数变为 1，由 CODEOWNERS 负责评审路由。
 
-## Commit messages
+## 提交信息
 
-Use Conventional Commits in English:
+使用英文 Conventional Commits：
 
 ```text
 feat(config): add route validation
@@ -35,69 +34,69 @@ fix(sandbox): reject path traversal in ctx.file
 docs: describe the release process
 ```
 
-Allowed types: `feat`, `fix`, `docs`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `security`.
+允许的类型：`feat`、`fix`、`docs`、`refactor`、`perf`、`test`、`build`、`ci`、`chore`、`security`。
 
-Suggested scopes: `config`, `match`, `source`, `transform`, `response`, `sandbox`, `runtime-js`, `runtime-python`, `files`, `obs`, `dist`.
+建议的 scope：`config`、`match`、`source`、`transform`、`response`、`sandbox`、`runtime-js`、`runtime-python`、`files`、`obs`、`dist`。
 
-Breaking changes use `!` or a `BREAKING CHANGE:` footer.
+破坏性变更使用 `!` 或 `BREAKING CHANGE:` footer。
 
-## Versioning
+## 版本号
 
-- Follow Semantic Versioning 2.0.0.
-- Tags use `vMAJOR.MINOR.PATCH`, for example `v0.1.0-alpha.1`.
-- Cargo package versions do not include the `v` prefix.
-- The version source of truth is the workspace `Cargo.toml`.
-- Pre-release order is `alpha` → `beta` → `rc` → stable.
-- `0.x` minor releases may contain breaking changes; `0.x` patch releases must be backward compatible.
-- `1.0.0` requires a stable CLI, configuration format, and `ctx` API version 1.
-- Do not use build metadata in release tags.
+- 遵循 Semantic Versioning 2.0.0。
+- tag 格式为 `vMAJOR.MINOR.PATCH`，例如 `v0.1.0-alpha.1`。
+- Cargo 包版本号不带 `v` 前缀。
+- 版本号的唯一来源是 workspace 的 `Cargo.toml`。
+- 预发布顺序：`alpha` → `beta` → `rc` → stable。
+- `0.x` minor 版本可以包含破坏性变更；`0.x` patch 版本必须向后兼容。
+- `1.0.0` 要求 CLI、配置格式与 `ctx` API version 1 稳定。
+- 不要在发布 tag 中使用 build metadata。
 
-## Release process
+## 发布流程
 
-1. Merge completed work into `main`.
-2. Let `release-plz` open or update the release PR.
-3. Review the version bump, `CHANGELOG.md`, and release notes.
-4. Review the Chinese translations of the B-layer documents (README, `docs/index.md`, `docs/guide/`, `docs/contracts/`, `demo/README.md`).
-5. Merge the release PR. That merge authorises the release.
-6. `release-plz` creates the tag and optionally publishes to crates.io.
-7. `cargo-dist` builds release artifacts from the tag.
-8. GitHub Release, container image, checksums, attestation, SBOM, and the `ctx` API `.d.ts` type definitions are published.
-9. Announce the release in the repository.
+1. 把已完成的改动合并进 `main`。
+2. 让 `release-plz` 打开或更新 release PR。
+3. 核对版本号变更、`CHANGELOG.md` 与 release notes。
+4. 核对 B 层文档的中文译本（README、`docs/index.md`、`docs/guide/`、`docs/contracts/`、`demo/README.md`）。
+5. 合并 release PR；该合并即授权发布。
+6. `release-plz` 创建 tag，并可选发布到 crates.io。
+7. `cargo-dist` 从 tag 构建发布产物。
+8. 发布 GitHub Release、容器镜像、校验和、attestation、SBOM 与 `ctx` API `.d.ts` 类型定义。
+9. 在仓库内公告发布。
 
-A failed release does not reuse or overwrite a tag. Fix the problem and publish a new patch or pre-release version. Use `cargo yank` only for a broken crates.io release; never delete a published version.
+发布失败不得复用或覆盖已有 tag；修复问题后发布新的 patch 或预发布版本。只有 crates.io 发布损坏时才用 `cargo yank`，绝不删除已发布的版本。
 
-The first release may bootstrap the release PR by hand. After that, release PRs come from `release-plz`.
+首个发布可以由人工引导 release PR，之后由 `release-plz` 生成。
 
-## Release artifacts
+## 发布产物
 
-Every release includes:
+每个 release 包含：
 
-- source archives generated by GitHub
-- binaries for Linux x86_64, macOS arm64, and Windows x86_64
+- GitHub 生成的源码归档
+- Linux x86_64、macOS arm64、Windows x86_64 二进制
 - `SHA256SUMS`
 - GitHub artifact attestation
-- SBOM (CycloneDX or SPDX)
-- container image `ghcr.io/geeknonerd/stuntdouble:<tag>` with a published digest
+- SBOM（CycloneDX 或 SPDX）
+- 容器镜像 `ghcr.io/geeknonerd/stuntdouble:<tag>`，并公布 digest
 - GitHub Release notes
-- `ctx` API `.d.ts` type definitions for every supported `apiVersion` (source: `types/ctx-api-v1.d.ts`)
+- 每个受支持 `apiVersion` 的 `ctx` API `.d.ts` 类型定义（源码：`types/ctx-api-v1.d.ts`）
 
-Build artifacts only from tags. Never publish binaries built from `main`.
+只从 tag 构建产物，绝不发布从 `main` 构建的二进制。
 
-Signing starts with GitHub artifact attestation. Add Sigstore/cosign only when offline verification becomes a requirement.
+签名从 GitHub artifact attestation 开始；只有出现离线验证需求时才引入 Sigstore/cosign。
 
-## Rust toolchain and MSRV
+## Rust 工具链与 MSRV
 
-- `rust-toolchain.toml` selects the `stable` channel plus the required components, so local builds and CI always use the latest stable Rust (1.98 at the time of writing). It never pins a fixed older version.
-- `Cargo.toml` declares `rust-version`, the MSRV floor rather than the toolchain used to build. Any stable release at or above that floor is supported.
-- CI runs the main gates on stable across Linux, macOS, and Windows, plus one MSRV job that builds with the exact `rust-version` to catch accidental use of newer language features.
-- The MSRV is the lowest version that satisfies both the dependency tree and the security gates, currently Rust 1.91 (set by Boa 0.22; clap 4.6 and toml 1.x require 1.85).
-- Never lower the MSRV by holding a dependency at a version with an unfixed advisory or by depending on an unmaintained crate. Boa 0.20 / 0.21 still pull in the archived `paste` crate and need a `time` version affected by RUSTSEC-2026-0009, so `cargo deny check advisories` fails for those lines; the advisory-clean Boa line wins even though its MSRV is higher.
-- A dependency upgrade that raises the MSRV must state that cost in the PR and update `Cargo.toml`, this document, and `plans/product-definition.md` together.
-- `unsafe` is denied by default. Any exception needs a comment explaining the invariant.
+- `rust-toolchain.toml` 选择 `stable` channel 与所需组件，因此本地构建与 CI 始终使用最新 stable Rust（写作时为 1.98），不固定到某个较旧的版本。
+- `Cargo.toml` 声明 `rust-version`，它是 MSRV 下限而不是构建所用工具链；任何不低于该下限的 stable 版本都受支持。
+- CI 在 Linux、macOS、Windows 上用 stable 跑主门禁，另有一个 MSRV job 用精确的 `rust-version` 构建，用来捕捉误用新语言特性的情况。
+- MSRV 是同时满足依赖树与安全门禁的最低版本，当前为 Rust 1.91（由 Boa 0.22 决定；clap 4.6 与 toml 1.x 要求 1.85）。
+- 不得为了保留存在未修复公告的依赖、或依赖无人维护的 crate 而调低 MSRV。Boa 0.20 / 0.21 仍会引入已归档的 `paste` crate，并需要受 RUSTSEC-2026-0009 影响的 `time` 版本，因此这两条线的 `cargo deny check advisories` 会失败；即使 MSRV 更高，无公告的 Boa 版本仍然胜出。
+- 提升 MSRV 的依赖升级必须在 PR 中说明代价，并同时更新 `Cargo.toml`、本文件与 `plans/product-definition.md`。
+- 默认拒绝 `unsafe`。任何例外都需要注释说明其不变量。
 
-## Required local checks
+## 本地检查
 
-Before opening a pull request, run:
+提交 pull request 前运行：
 
 ```bash
 cargo fmt --all
@@ -108,16 +107,16 @@ cargo deny check
 cargo audit
 ```
 
-Non-trivial logic needs one small runnable check. Sandbox, path traversal, and upload handling changes need regression tests.
+非平凡逻辑需要一个最小可运行检查。沙箱、路径穿越与上传处理改动必须有回归测试。
 
-## Dependencies
+## 依赖
 
-- Prefer the standard library, then platform features, then existing dependencies.
-- A new dependency needs a reason, maintenance check, and license check.
-- GPL and AGPL dependencies are not allowed.
-- `cargo-deny` checks licenses, sources, duplicate versions, and advisories. Its graph is scoped to the shipped targets (Linux x86_64, macOS arm64, Windows x86_64) via `[graph] targets` in `deny.toml`, so target-specific dependencies of unsupported platforms do not fail the license gate.
-- Dependabot checks Cargo and GitHub Actions weekly.
-- Security fixes are not held back for a paid tier.
+- 优先标准库，其次平台能力，再次已有依赖。
+- 新增依赖需要理由、维护状况检查与许可证检查。
+- 不允许 GPL 与 AGPL 依赖。
+- `cargo-deny` 检查许可证、来源、重复版本与公告。依赖图通过 `deny.toml` 的 `[graph] targets` 限定在发布目标（Linux x86_64、macOS arm64、Windows x86_64），因此不受支持平台的平台专属依赖不会导致许可证门禁失败。
+- Dependabot 每周检查 Cargo 与 GitHub Actions。
+- 安全修复不得保留给付费层。
 
 ## 文档语言与双语结构
 
@@ -143,6 +142,7 @@ Non-trivial logic needs one small runnable check. Sandbox, path traversal, and u
 - 领域术语使用 [CONTEXT.md](../CONTEXT.md) 的英文规范词，不造中文译名，也不使用 `_Avoid_` 列出的词。
 - 文件名一律英文 kebab-case；标题与正文用中文。
 - 错误码、配置键、CLI 参数、路径与代码保留原文（半角），中文正文使用全角标点。
+- `docs/solutions/` 的 frontmatter（title、module、tags 等）是机器可读元数据，保留英文；正文用中文。
 - 英文页不混入中文，例外只有语言切换链接与 `(Chinese)` 标注。
 
 **校验**
@@ -151,19 +151,19 @@ Non-trivial logic needs one small runnable check. Sandbox, path traversal, and u
 
 其余约定：公开契约在 `docs/contracts/`；领域词汇在 `CONTEXT.md`，不含实现细节；难以逆转的决策写入 `plans/adr/`。
 
-## Release automation activation
+## 发布自动化启用
 
-All items below must be added after the first crate lands:
+以下各项必须在首个 crate 落地后补上：
 
-- `release-plz` workflow and `CARGO_REGISTRY_TOKEN`
-- `cargo-dist` configuration and release workflow
-- container build and GHCR publishing
-- CodeQL or other advanced code scanning
+- `release-plz` workflow 与 `CARGO_REGISTRY_TOKEN`
+- `cargo-dist` 配置与 release workflow
+- 容器构建与 GHCR 发布
+- CodeQL 或其他高级代码扫描
 
-Note: MSRV (`rust-version`) is declared in [Cargo.toml](../Cargo.toml) and must stay equal to the highest requirement in the dependency tree; the MSRV CI job builds with exactly that version.
+注意：MSRV（`rust-version`）声明在 [Cargo.toml](../Cargo.toml)，必须等于依赖树中的最高要求；MSRV CI job 用精确的该版本构建。
 
-## Build notes
+## 构建说明
 
-Rust crate uses bin+lib structure: src/lib.rs defines the library; src/main.rs imports from stuntdouble::{config,server}. This setup enables `cargo test --doc` and `cargo doc --no-deps` to find a library target. When adding new crates later, ensure this pattern continues so CI gates remain green.
+Rust crate 采用 bin+lib 结构：`src/lib.rs` 定义 library，`src/main.rs` 从 `stuntdouble::{config,server}` 导入。该结构让 `cargo test --doc` 与 `cargo doc --no-deps` 能找到 library target。后续新增 crate 时保持这一模式，确保 CI 门禁不会因缺少 library target 而失败。
 
-See [solutions/ci/doctest-lib-target-required.md](solutions/ci/doctest-lib-target-required.md) for troubleshooting.
+排障见 [solutions/ci/doctest-lib-target-required.md](solutions/ci/doctest-lib-target-required.md)。
