@@ -6,7 +6,11 @@
 | --- | --- |
 | No releases yet | Not applicable |
 
-Stunt Double has no released versions yet. The project is in early development, with slices T1–T4 implemented on `main`, so there are no supported release lines to patch. Once the first stable release exists, this table lists the supported lines.
+Stunt Double has no released versions yet. The project is in early development, with the first vertical slice (T1–T7) implemented, so there are no supported release lines to patch. Once the first stable release exists, this table lists the supported lines.
+
+## Threat model
+
+Stunt Double runs the route scripts you supply; it is not a sandbox for untrusted code. Scripts are semi-trusted input. The host blocks raw network, file, process, and socket access and enforces a response deadline plus loop-iteration, recursion, and VM-stack limits, but Boa 0.22 exposes no heap metric, heap limit, or interrupt hook, so no in-process heap cap is enforced and a script abandoned at the deadline keeps running until the loop-iteration backstop stops it. Run the server only where the clients and script authors are trusted, and keep the default `127.0.0.1` bind unless another boundary sits in front of it. See the T3 amendment in [ADR 0003](plans/adr/0003-script-first-multi-runtime.md) for the full tradeoff and the process-isolation upgrade path.
 
 ## Reporting a vulnerability
 
