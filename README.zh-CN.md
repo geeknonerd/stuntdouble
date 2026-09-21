@@ -1,5 +1,9 @@
 # Stunt Double
 
+[English](README.md) | **中文**
+
+> 本页是英文版 [README.md](README.md) 的译本；如有出入，以英文版为准。
+
 > **A test double that plays the whole show.**
 
 Stunt Double 是一个用 Rust 实现的 Mock Server，面向需要对接真实外部依赖的集成测试。它会读取上游接口、用内置 JavaScript 或 Python 变换数据、返回文件与二进制响应，并且不依赖宿主机上的 Node.js、Python 或 JVM。

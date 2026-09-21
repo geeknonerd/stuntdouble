@@ -15,7 +15,7 @@ This directory holds the operational, contractual, and agent-facing documentatio
 - [Chinese README](../README.zh-CN.md) — 中文项目说明.
 - [Product definition](../plans/product-definition.md) — v1 scope and non-goals.
 - [Demo fixture](../demo/README.md) — runnable manifest scenario, upstream override, contract, and error mapping.
-- [Architecture decisions](../plans/adr/) — ADR 0001–0012.
+- [Architecture decisions](../plans/adr/) — ADR 0001–0013.
 - [Research](../research/) — mock server landscape, runtime selection, and open-source baseline.
 - [Solutions](solutions/) — learnings and resolved problems via ce-compound.
 - [ctx API type definitions](../types/ctx-api-v1.d.ts) — `apiVersion` 1 source types; T8 publishes them with release artifacts.
@@ -27,8 +27,8 @@ This directory holds the operational, contractual, and agent-facing documentatio
 
 ## Documentation rules
 
-- Root community docs are written in English.
-- Design docs and research notes may be written in Chinese; English translations are welcome.
+Documentation language and bilingual structure are defined in [development.md](development.md) and [ADR 0013](../plans/adr/0013-documentation-language-and-bilingual-structure.md). Other rules:
+
 - Public contract changes update `docs/contracts/` and `CHANGELOG.md`.
 - Domain terminology changes update `CONTEXT.md`.
 - Hard-to-reverse decisions become ADRs under `plans/adr/`.

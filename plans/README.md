@@ -6,7 +6,7 @@ This directory holds the product definition, the public demo scenario, and archi
 
 - [Product definition](product-definition.md) — v1 scope, host API contract, and non-goals.
 - [Demo document catalog](demo-document-catalog.md) — public demo scenario for CSV manifest generation and PDF download.
-- [Architecture decisions](adr/) — ADR 0001–0012.
+- [Architecture decisions](adr/) — ADR 0001–0013.
 
 ## Decision records
 

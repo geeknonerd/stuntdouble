@@ -66,6 +66,39 @@ jobs:
       - if: steps.cargo.outputs.exists == 'true'
         run: cargo test --doc
 
+  docs-links:
+    name: docs-links
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check local Markdown links
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          args: --offline --no-progress --exclude-path target --exclude-path .git './**/*.md'
+          fail: true
+      - name: Check bilingual document pairs
+        shell: bash
+        run: |
+          set -euo pipefail
+          failed=0
+          while IFS= read -r zh; do
+            en="${zh%.zh-CN.md}.md"
+            if [[ ! -f "$en" ]]; then
+              echo "::error file=${zh#./}::missing English twin ${en#./}"
+              failed=1
+              continue
+            fi
+            if ! head -n 8 "$en" | grep -qF "$(basename "$zh")"; then
+              echo "::error file=${en#./}::missing language switch link to $(basename "$zh")"
+              failed=1
+            fi
+            if ! head -n 8 "$zh" | grep -qF "$(basename "$en")"; then
+              echo "::error file=${zh#./}::missing language switch link to $(basename "$en")"
+              failed=1
+            fi
+          done < <(find . -name '*.zh-CN.md' -not -path './.git/*' -not -path './target/*' | sort)
+          exit "$failed"
+
   deny:
     name: deny
     runs-on: ubuntu-latest

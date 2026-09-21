@@ -45,7 +45,7 @@ Stunt Double 是 Rust 实现的 Mock Server，面向对接真实外部依赖的�
 ├── plans/
 │   ├── product-definition.md
 │   ├── demo-document-catalog.md
-│   └── adr/                          # ADR 0001–0012
+│   └── adr/                          # ADR 0001–0013
 └── research/                         # 调研与选型证据
 ```
 
@@ -66,7 +66,7 @@ Stunt Double 是 Rust 实现的 Mock Server，面向对接真实外部依赖的�
 - 分支命名：`feat/`、`fix/`、`docs/`、`chore/`、`ci/`、`release/`。
 - 只允许 squash merge；PR 标题使用英文 Conventional Commits。
 - 每个 commit 必须 `git commit -s`（DCO）。
-- CI 硬门槛：`fmt`、`clippy`、`test`、`docs`、`deny`、`audit`、`msrv`、`pr-title`、`dco`。
+- CI 硬门槛：`fmt`、`clippy`、`test`、`docs`、`docs-links`、`deny`、`audit`、`msrv`、`pr-title`、`dco`。
 - 版本号遵循 SemVer，tag 为 `vMAJOR.MINOR.PATCH`。
 - 发布由 `release-plz` + `cargo-dist` 驱动；详细规则见 [docs/development.md](docs/development.md)。
 - 不要直接 push、force push 或删除 `main`。
@@ -84,7 +84,7 @@ cargo deny check
 cargo audit
 ```
 
-代码改动后跑上一节列出的本地门禁；只改文档时至少验证本地 Markdown 链接与 YAML 语法。
+代码改动后跑上一节列出的本地门禁；只改文档时至少检查 YAML 语法，Markdown 本地链接与双语配对由 `docs-links` 门槛自动校验，可用 lychee 本地预检。
 
 ## 安全与隐私
 
@@ -95,7 +95,7 @@ cargo audit
 
 ## 文档规则
 
-- 根目录社区文档使用英文；设计文档可以使用中文，欢迎补英文翻译。
+- 文档语言分三层：A 层英文单语、B 层英文 + `.zh-CN.md` 译本、C 层中文；见 [ADR 0013](plans/adr/0013-documentation-language-and-bilingual-structure.md) 与 [docs/development.md](docs/development.md)。
 - 公开契约变更必须同步更新 `docs/contracts/` 与 `CHANGELOG.md`。
 - 领域术语变化同步更新 `CONTEXT.md`。
 - 难以逆转的决策写入 `plans/adr/`，编号递增，文件名使用 kebab-case。
