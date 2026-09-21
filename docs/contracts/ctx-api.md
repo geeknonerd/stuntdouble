@@ -61,12 +61,13 @@ Within one `apiVersion`:
 
 Scripts receive no raw `fetch`, `fs`, `os`, `subprocess`, or `socket`. All external capabilities come from host functions and are subject to:
 
-- script timeout
-- memory limit
+- script deadline (`sandbox.script_timeout_ms`) that answers the client with 500 `script_error`
 - network allowlist
 - static file root confinement
 - upload size limit
 - stack traces never returned to clients
+
+Boa 0.22 exposes no heap metric, heap limit, or interrupt hook, so no heap cap is enforced; a script abandoned at the deadline is stopped only by a host-side loop-iteration backstop. The T3 amendment to [ADR 0003](../../plans/adr/0003-script-first-multi-runtime.md) records that tradeoff, the remaining resource bounds, and the process-isolation upgrade path.
 
 ## Type definitions
 

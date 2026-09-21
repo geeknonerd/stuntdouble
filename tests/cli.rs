@@ -989,15 +989,95 @@ fn script_without_respond_maps_to_script_no_response() {
 #[test]
 fn script_timeout_maps_to_500_script_error() {
     let script = "while (true) {}";
-    let (response, _) = with_server_full(&with_sandbox(good_config(), 200), script, &[], |port| {
-        request(port, "GET", "/demo/documents/manifest/group-a", &[])
-    });
+    let ((elapsed, response), _) =
+        with_server_full(&with_sandbox(good_config(), 200), script, &[], |port| {
+            let started = Instant::now();
+            let response = request(port, "GET", "/demo/documents/manifest/group-a", &[]);
+            (started.elapsed(), response)
+        });
     assert_eq!(response.status, 500, "body: {}", response.body);
     assert!(
         response.body.contains("\"error\":\"script_error\""),
         "body: {}",
         response.body
     );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "configured timeout was not enforced: {elapsed:?}"
+    );
+}
+
+#[test]
+fn scripts_cannot_reach_raw_host_capabilities() {
+    let script = r#"
+var names = ["fetch", "fs", "process", "require", "socket", "__sd_http_get", "__sd_http_pipe"];
+var leaked = [];
+for (var i = 0; i < names.length; i++) {
+  if (typeof globalThis[names[i]] !== "undefined") { leaked.push(names[i]); }
+}
+ctx.respond(200, {}, leaked.length === 0 ? "clean" : leaked.join(","));
+"#;
+    let (response, _) = with_server_full(good_config(), script, &[], |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(response.body, "clean", "raw host globals leaked");
+}
+
+#[test]
+fn failing_route_leaves_other_routes_and_the_server_healthy() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("files")).expect("files dir");
+    std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
+    std::fs::write(
+        dir.path().join("scripts/runaway.js"),
+        "function dive() { dive(); }\ndive();\n",
+    )
+    .expect("runaway script");
+    std::fs::write(dir.path().join("scripts/ok.js"), OK_SCRIPT).expect("ok script");
+    let port = reserve_port();
+    let config = dir.path().join("stuntdouble.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"config_version = "1"
+
+[server]
+bind = "127.0.0.1"
+port = {port}
+
+[files]
+root = "./files"
+
+[[routes]]
+name = "runaway"
+method = "GET"
+path = "/runaway"
+script = "scripts/runaway.js"
+
+[[routes]]
+name = "healthy"
+method = "GET"
+path = "/healthy"
+script = "scripts/ok.js"
+"#
+        ),
+    )
+    .expect("config");
+    let (responses, stderr) = serve_and_run(&config, port, &[], |port| {
+        (
+            request(port, "GET", "/runaway", &[]),
+            request(port, "GET", "/healthy", &[]),
+            request(port, "GET", "/runaway", &[]),
+        )
+    });
+    let (first, healthy, second) = responses;
+    assert_eq!(first.status, 500, "body: {} stderr: {stderr}", first.body);
+    assert_eq!(error_class(&first.body).as_deref(), Some("script_error"));
+    assert_eq!(healthy.status, 200, "stderr: {stderr}");
+    assert_eq!(healthy.body, "ok");
+    assert_eq!(second.status, 500, "body: {} stderr: {stderr}", second.body);
+    assert_eq!(error_class(&second.body).as_deref(), Some("script_error"));
 }
 
 #[test]
