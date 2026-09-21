@@ -56,13 +56,14 @@ Stunt Double 是一个用 Rust 实现的 Mock Server，面向需要对接真实�
 
 详细流程与契约见 [docs/README.md](docs/README.md)。
 
+- [快速开始](docs/guide/getting-started.zh-CN.md)
 - [产品功能定义](plans/product-definition.md)
 - [公开演示场景](plans/demo-document-catalog.md)
-- [演示夹具](demo/README.md)
+- [演示夹具](demo/README.zh-CN.md)
 - [架构决策](plans/adr/)
 - [开发和发布流程](docs/development.md)
 - [治理规范](GOVERNANCE.md)
-- [公开契约](docs/contracts/)
+- [公开契约](docs/contracts/README.zh-CN.md)
 - [领域词汇表](CONTEXT.md)
 - [变更日志](CHANGELOG.md)
 - [文档索引](docs/README.md)

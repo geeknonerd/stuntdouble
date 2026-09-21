@@ -58,6 +58,7 @@ See [plans/product-definition.md](plans/product-definition.md) for the full scop
 
 ## Documentation
 
+- [Getting started](docs/guide/getting-started.md) — install, first route, and upstream calls.
 - [Public contracts](docs/contracts/) — configuration, `ctx` API, and CLI.
 - [Demo fixture](demo/README.md) — runnable configuration, script, and error mapping for the CSV manifest.
 - [Documentation site](https://geeknonerd.github.io/stuntdouble/) — the same contracts and demo entry points, rendered.
