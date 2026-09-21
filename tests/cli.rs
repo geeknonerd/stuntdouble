@@ -1013,6 +1013,38 @@ fn script_env_reflects_process_environment() {
 }
 
 #[test]
+fn ctx_respond_rejects_invalid_header_name_as_script_error() {
+    let script = r#"ctx.respond(200, { "Bad Header": "x" }, "no");"#;
+    let (response, _) = with_server_full(good_config(), script, &[], |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 500, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("script_error"),
+        "body: {}",
+        response.body
+    );
+}
+
+#[test]
+fn ctx_respond_rejects_invalid_header_value_as_script_error() {
+    let script = r#"
+try {
+  ctx.respond(200, { "X-Test": "bad\nvalue" }, "no");
+  ctx.respond(500, {}, "not caught");
+} catch (error) {
+  ctx.respond(502, {}, error.code || "missing");
+}
+"#;
+    let (response, _) = with_server_full(good_config(), script, &[], |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 502, "body: {}", response.body);
+    assert_eq!(response.body, "script_error", "body: {}", response.body);
+}
+
+#[test]
 fn uncaught_script_error_maps_to_500_with_request_id() {
     let script = r#"throw new Error("secret stack detail");"#;
     let (response, _) = with_server_full(good_config(), script, &[], |port| {
@@ -1080,7 +1112,7 @@ fn script_timeout_maps_to_500_script_error() {
 #[test]
 fn scripts_cannot_reach_raw_host_capabilities() {
     let script = r#"
-var names = ["fetch", "fs", "process", "require", "socket", "__sd_http_get", "__sd_http_pipe"];
+var names = ["fetch", "fs", "process", "require", "socket", "__sd_http_get", "__sd_http_pipe", "__sd_validate_headers"];
 var leaked = [];
 for (var i = 0; i < names.length; i++) {
   if (typeof globalThis[names[i]] !== "undefined") { leaked.push(names[i]); }
@@ -1713,7 +1745,7 @@ if (!produced) { ctx.respond(500, {}, "pipe did not produce a response"); }
 }
 
 #[test]
-fn ctx_http_pipe_rejects_invalid_opts_as_script_error() {
+fn ctx_http_pipe_rejects_invalid_opts_and_headers_as_script_error() {
     let scripts = [
         r#"ctx.http.pipe(ctx.env.UPSTREAM_URL, { retries: 1 }); ctx.respond(200, {}, "no");"#,
         r#"ctx.http.pipe(ctx.env.UPSTREAM_URL, { status: 0 }); ctx.respond(200, {}, "no");"#,
@@ -1723,6 +1755,8 @@ fn ctx_http_pipe_rejects_invalid_opts_as_script_error() {
         r#"ctx.http.pipe(ctx.env.UPSTREAM_URL, null); ctx.respond(200, {}, "no");"#,
         r#"var opts = Object.create({ status: 200 }); ctx.http.pipe(ctx.env.UPSTREAM_URL, opts); ctx.respond(200, {}, "no");"#,
         r#"var opts = {}; opts[Symbol("extra")] = 1; ctx.http.pipe(ctx.env.UPSTREAM_URL, opts); ctx.respond(200, {}, "no");"#,
+        r#"ctx.http.pipe(ctx.env.UPSTREAM_URL, { headers: { "Bad Header": "x" } }); ctx.respond(200, {}, "no");"#,
+        r#"ctx.http.pipe(ctx.env.UPSTREAM_URL, { headers: { "X-Test": "bad\nvalue" } }); ctx.respond(200, {}, "no");"#,
     ];
     for script in scripts {
         let upstream = Upstream::start(vec![UpstreamResponse::new(200, b"%PDF")]);
@@ -1749,6 +1783,32 @@ fn ctx_http_pipe_rejects_invalid_opts_as_script_error() {
             "invalid opts reached the upstream: {script}"
         );
     }
+}
+
+#[test]
+fn ctx_http_pipe_invalid_headers_are_catchable_before_upstream() {
+    let upstream = Upstream::start(vec![UpstreamResponse::new(200, b"%PDF")]);
+    let script = r#"
+try {
+  ctx.http.pipe(ctx.env.UPSTREAM_URL, { headers: { "Bad Header": "x" } });
+  ctx.respond(500, {}, "not caught");
+} catch (error) {
+  ctx.respond(502, {}, error.code || "missing");
+}
+"#;
+    let url = upstream.url("/file.pdf");
+    let (response, _) = with_server_full(
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+        &[("UPSTREAM_URL", url.as_str())],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 502, "body: {}", response.body);
+    assert_eq!(response.body, "script_error", "body: {}", response.body);
+    assert!(
+        upstream.requests().is_empty(),
+        "invalid headers reached the upstream"
+    );
 }
 
 #[test]

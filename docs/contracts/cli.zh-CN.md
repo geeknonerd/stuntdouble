@@ -33,10 +33,14 @@ stuntdouble serve [--config <path>] [--verbose]
 
 | 码 | 含义 |
 | ---: | --- |
-| `0` | 服务成功启动并正常关闭 |
+| `0` | server 正常返回；`validate`、`--help` 与 `--version` 也以 `0` 表示成功 |
 | `1` | 运行期／服务错误，包括 socket bind 或 listen 失败 |
 | `2` | 配置错误（TOML 非法、schema 违规、未知 `config_version` 或非 IP 的 `server.bind`）或 CLI 用法错误（未知 flag、缺少子命令）——消息打印到 stderr |
 | `3` | 构造异步运行时的内部错误 |
+
+#### 关闭信号
+
+v1 切片没有安装 graceful-shutdown 信号处理器。SIGINT 或 SIGTERM 会按信号终止进程，shell 通常报告 130 或 143，而不是 `0`。`0` 只保留给 server 正常返回。graceful shutdown 由 [#33](https://github.com/geeknonerd/stuntdouble/issues/33) 跟踪。
 
 #### 绑定语义
 
@@ -88,7 +92,7 @@ stuntdouble validate [--config <path>]
 
 | 码 | 含义 |
 | ---: | --- |
-| `0` | 成功 |
+| `0` | 成功；`serve` 只在正常返回时使用，不由信号终止路径产生 |
 | `1` | 运行期／服务错误（由 `serve` 报告） |
 | `2` | 配置错误或 CLI 用法错误 |
 | `3` | 内部错误 |

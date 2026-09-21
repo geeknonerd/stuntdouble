@@ -46,3 +46,11 @@ Stunt Double 面向 CI 与本地开发，使用者需要可信的二进制与容
 - 发布自动化需要访问仓库与包注册表的 secret。
 - 产物可以从 tag 与锁定的依赖图复现。
 - release notes 是发布产物的一部分，不是事后补充。
+
+## T8/T9 修订（2026-09-22）
+
+T8 与 T9 共同完成本 ADR 的发布目标，但职责分开：
+
+- T8 冻结并发布 `apiVersion` 1 的 `types/ctx-api-v1.d.ts` 源码定义，不激活发布流水线。
+- T9（#12）激活 release-plz、cargo-dist、容器、attestation 与 GitHub Release，并把每个受支持 `apiVersion` 的 `.d.ts` 作为必带资产。
+- T9 的验收必须包含 GitHub Release 附件验证；在验证完成前，文档只能声明“发布契约要求包含”，不得声明“已经随发布产物提供”。

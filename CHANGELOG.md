@@ -86,6 +86,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Documentation now follows the three-tier language model recorded in ADR 0013: community and legal documents stay English, public documents (README, Pages landing page, `docs/guide/`, `docs/contracts/`, `demo/README.md`) ship English plus a `.zh-CN.md` translation, and development documents are Chinese. A new `docs-links` CI gate checks local Markdown links and translation pairs.
 - Dependency license and advisory checks now cover the shipped platforms (Linux x86_64, macOS arm64, Windows x86_64) instead of every target in the lockfile; `rustls-platform-verifier` carries Android/wasm-only root bundles whose data license is outside the project allowlist.
+- The CLI contract now documents that this slice's `serve` is terminated by SIGINT/SIGTERM rather than returning `0`; graceful shutdown is tracked in [#33](https://github.com/geeknonerd/stuntdouble/issues/33). The T8/T9 amendment to ADR 0012 records that `.d.ts` publication is a release-blocking T9 acceptance item.
 - Contract documents are frozen for the v1 slice (T1–T8): `docs/contracts/config.md` includes the complete configuration and Route schema, `docs/contracts/cli.md` documents commands, flags, output, and exit codes, and `docs/contracts/ctx-api.md` marks the implemented `apiVersion` 1 subset and pending capabilities. `types/ctx-api-v1.d.ts` is the matching public type definition.
 
 - Open-source repository baseline: README, contribution guide, security policy, code of conduct, issue templates, and pull request template.
@@ -100,6 +101,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Script-supplied response headers are validated when `ctx.respond` or `ctx.http.pipe` is called and
+  again before the Response is constructed. Malformed header names or values now return 500
+  `script_error` instead of being silently dropped; `ctx.http.pipe` fails before contacting the
+  upstream.
 - `stuntdouble validate` now rejects unknown `config_version` values, non-IP `server.bind` values,
   and an empty `routes` array with exit code `2`, and it reports `routes` and `files.root`
   violations together, matching the frozen v1 configuration contract.

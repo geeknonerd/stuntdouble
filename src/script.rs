@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use axum::http::{HeaderMap, Method, StatusCode};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use boa_engine::native_function::NativeFunction;
 use boa_engine::{js_string, Context, JsError, JsNativeError, JsString, JsValue, Source};
 use serde_json::{json, Value as Json};
@@ -225,7 +225,7 @@ impl Outcome {
 // The prelude is the only writer of `__sd`; `ctx` is a frozen view over it.
 const PRELUDE: &str = r#"
 var __sd = { response: null, logs: [] };
-var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_upstream_marker) {
+var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_upstream_marker) {
   "use strict";
   var state = __sd;
   function format(value) {
@@ -256,20 +256,34 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_upstream_marker) {
         }
         out.push([String(row[0]), String(row[1])]);
       }
-      return out;
-    }
-    if (typeof headers !== "object") {
+    } else if (typeof headers !== "object") {
       throw new TypeError(label + ": headers must be an object or [name, value] pairs");
-    }
-    var names = Object.keys(headers);
-    for (var j = 0; j < names.length; j++) {
-      var name = names[j];
-      var value = headers[name];
-      if (Array.isArray(value)) {
-        for (var k = 0; k < value.length; k++) { out.push([name, String(value[k])]); }
-      } else {
-        out.push([name, String(value)]);
+    } else {
+      var names = Object.keys(headers);
+      for (var j = 0; j < names.length; j++) {
+        var name = names[j];
+        var value = headers[name];
+        if (Array.isArray(value)) {
+          for (var k = 0; k < value.length; k++) { out.push([name, String(value[k])]); }
+        } else {
+          out.push([name, String(value)]);
+        }
       }
+    }
+    var raw;
+    try {
+      raw = __sd_validate_headers(JSON.stringify(out));
+    } catch (bridgeError) {
+      throw makeError(label + ": host bridge failed", "script_error");
+    }
+    var result;
+    try {
+      result = JSON.parse(raw);
+    } catch (parseError) {
+      throw makeError(label + ": host bridge failed", "script_error");
+    }
+    if (!result.ok) {
+      throw makeError(label + ": " + result.message, result.code || "script_error");
     }
     return out;
   }
@@ -444,9 +458,10 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_upstream_marker) {
       return true;
     }
   });
-})(__sd_http_get, __sd_http_pipe, __SD_UPSTREAM_MARKER__);
+})(__sd_http_get, __sd_http_pipe, __sd_validate_headers, __SD_UPSTREAM_MARKER__);
 delete globalThis.__sd_http_get;
 delete globalThis.__sd_http_pipe;
+delete globalThis.__sd_validate_headers;
 "#;
 
 /// Read the recorded response and log lines back out of the realm.
@@ -552,6 +567,52 @@ fn sd_http_pipe(
     })
 }
 
+/// Native bridge used by the prelude to validate script-supplied response
+/// headers before `ctx.respond` stores them or `ctx.http.pipe` starts an
+/// upstream call. The script sees a catchable `script_error`.
+fn sd_validate_headers(
+    _this: &JsValue,
+    args: &[JsValue],
+    _context: &mut Context,
+) -> boa_engine::JsResult<JsValue> {
+    let Some(raw) = args.first().and_then(JsValue::as_string) else {
+        return Err(JsNativeError::typ()
+            .with_message("__sd_validate_headers: expected a JSON string")
+            .into());
+    };
+    let pairs: Vec<(String, String)> =
+        serde_json::from_str(&raw.to_std_string_escaped()).map_err(|error| {
+            JsNativeError::typ()
+                .with_message(format!("__sd_validate_headers: invalid payload: {error}"))
+        })?;
+    let result = match validated_header_pairs(&pairs) {
+        Ok(_) => json!({ "ok": true }),
+        Err(message) => json!({
+            "ok": false,
+            "code": "script_error",
+            "message": message,
+        }),
+    };
+    Ok(JsValue::from(JsString::from(result.to_string())))
+}
+
+/// Validate script-supplied response headers with the HTTP grammar shared by
+/// the final response path.
+pub(crate) fn validated_header_pairs(
+    pairs: &[(String, String)],
+) -> Result<Vec<(HeaderName, HeaderValue)>, String> {
+    pairs
+        .iter()
+        .map(|(name, value)| {
+            let header_name = HeaderName::from_bytes(name.as_bytes())
+                .map_err(|_| format!("invalid header name {name:?}"))?;
+            let header_value = HeaderValue::from_str(value)
+                .map_err(|_| format!("invalid value for header {name:?}"))?;
+            Ok((header_name, header_value))
+        })
+        .collect()
+}
+
 /// Process environment snapshot exposed as `ctx.env`.
 /// tradeoff: read per request and never persisted; no `.env` file in v1.
 fn env_json() -> Json {
@@ -637,6 +698,13 @@ fn evaluate(
                 js_string!("__sd_http_pipe"),
                 1,
                 NativeFunction::from_fn_ptr(sd_http_pipe),
+            )
+            .map_err(|error| (None, error.to_string()))?;
+        context
+            .register_global_builtin_callable(
+                js_string!("__sd_validate_headers"),
+                1,
+                NativeFunction::from_fn_ptr(sd_validate_headers),
             )
             .map_err(|error| (None, error.to_string()))?;
         let evaluated = (|| -> Result<String, JsError> {

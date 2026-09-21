@@ -1,6 +1,6 @@
 // Configuration contract: docs/contracts/config.md
 use std::fmt;
-use std::net::IpAddr;
+use std::net::{AddrParseError, IpAddr};
 use std::path::{Path, PathBuf};
 
 const HTTP_METHODS: [&str; 7] = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"];
@@ -34,7 +34,7 @@ pub struct UpstreamConfig {
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
-    pub bind: IpAddr,
+    pub bind: String,
     pub port: u16,
 }
 
@@ -147,9 +147,8 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
         &mut v,
     );
 
-    let config_version =
-        req_string(root_table, "config_version", "config_version", &mut v).unwrap_or_default();
-    validate_config_version(&config_version, &mut v);
+    let config_version = req_string(root_table, "config_version", "config_version", &mut v);
+    validate_config_version(config_version.as_deref(), &mut v);
 
     let server = match root_table.get("server") {
         None => {
@@ -213,7 +212,7 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
     let root_dir = root_dir.expect("files.root presence is enforced by violations");
 
     Ok(Config {
-        config_version,
+        config_version: config_version.expect("config_version presence is enforced by violations"),
         server,
         files: FilesConfig { root: root_dir },
         sandbox,
@@ -244,8 +243,8 @@ fn existing_dir(root: Option<PathBuf>, out: &mut Vec<Violation>) -> Option<PathB
 }
 
 /// The v1 slice defines exactly one configuration family.
-fn validate_config_version(value: &str, out: &mut Vec<Violation>) {
-    if !value.is_empty() && value != "1" {
+fn validate_config_version(value: Option<&str>, out: &mut Vec<Violation>) {
+    if let Some(value) = value.filter(|value| *value != "1") {
         out.push(Violation {
             field: "config_version".into(),
             expected: "\"1\"".into(),
@@ -480,20 +479,25 @@ fn req_string(table: &Table, key: &str, field: &str, out: &mut Vec<Violation>) -
     opt_string(table, key, field, out)
 }
 
+/// Shared parser for the `server.bind` IP-literal rule.
+pub(crate) fn parse_bind(value: &str) -> Result<IpAddr, AddrParseError> {
+    value.parse()
+}
+
 /// IP literal for `server.bind`; the CLI does not resolve hostnames in this slice.
-fn opt_bind(table: &Table, field: &str, out: &mut Vec<Violation>) -> Option<IpAddr> {
+fn opt_bind(table: &Table, field: &str, out: &mut Vec<Violation>) -> Option<String> {
     match table.get("bind") {
         None => None,
         Some(toml::Value::String(value)) if !value.is_empty() => {
-            let Ok(ip) = value.parse() else {
+            if parse_bind(value).is_err() {
                 out.push(Violation {
                     field: field.into(),
                     expected: "IP address literal".into(),
                     actual: format!("string {value:?}"),
                 });
                 return None;
-            };
-            Some(ip)
+            }
+            Some(value.clone())
         }
         Some(toml::Value::String(value)) => {
             out.push(Violation {
@@ -611,8 +615,8 @@ fn describe(value: &toml::Value) -> String {
     }
 }
 
-fn default_bind() -> IpAddr {
-    IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+fn default_bind() -> String {
+    String::from("127.0.0.1")
 }
 
 fn default_port() -> u16 {

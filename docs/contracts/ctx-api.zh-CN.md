@@ -40,7 +40,7 @@
 
 - `ctx.apiVersion` 为 `"1"`。
 - `ctx.request` 是只读快照，含 `method`、`path`、`params`、`query`、`headers` 与 `bodyText`。Header 名小写化；请求 body 不是合法 UTF-8 时 `bodyText` 为 `null`。Query 名与值都会做百分号解码，Header 名小写化。重复的 query 或 Header 名在快照中保留最后一个值。
-- `ctx.respond(status, headers, body)` 接受 `[100, 599]` 范围内的状态码、对象或 `[name, value]` 对形式的 headers，以及字符串、字节数组、`Uint8Array` 或 `ArrayBuffer` 类型的 body。第一次调用生效并返回 `true`；后续调用被忽略、返回 `false`，并在服务端产生警告。字节数组的每个值必须是 `[0, 255]` 范围内的整数。
+- `ctx.respond(status, headers, body)` 接受 `[100, 599]` 范围内的状态码、对象或 `[name, value]` 对形式的 headers，以及字符串、字节数组、`Uint8Array` 或 `ArrayBuffer` 类型的 body。第一次调用生效并返回 `true`；后续调用被忽略、返回 `false`，并在服务端产生警告。字节数组的每个值必须是 `[0, 255]` 范围内的整数。Header 名与值在调用时校验；畸形 pair 抛出可捕获的 `script_error`，不会记录 Response，也绝不静默丢弃。
 - `ctx.http.get(url, opts)` 执行 allowlist 约束的上游 GET，返回 `{status, headers, text(), bytes()}`。
   - `url` 必须是绝对的 `http` 或 `https` URL，其 host 大小写不敏感地匹配 `upstream.allow_hosts`；端口不参与匹配，IP 字面量与 `localhost` 需要显式条目。
   - `opts` 必须是普通对象，且只接受 `{ timeout_ms }`。未知字符串或 symbol 键、继承键、非对象值，以及显式 `null`、`NaN`、`Infinity`、非整数或非正数的 `timeout_ms` 都是脚本错误（fail-closed）。
@@ -51,7 +51,7 @@
   - 上游 4xx/5xx 响应是数据，绝不抛出。DNS、连接、TLS 与超时失败抛出可捕获错误，其 `error.code` 为 `"upstream_unreachable"`；非法 URL、不支持的 scheme 或 allowlist 拒绝属于 `"script_error"`。未捕获的传输层失败返回 502 `upstream_unreachable` 并带 `request_id`。
 - `ctx.http.pipe(url, opts)` 把一次 allowlist 约束的上游 GET body 直接流式转发到客户端 Response；字节从不进入脚本堆。
   - `url` 遵循与 `ctx.http.get` 相同的绝对 URL 与 allowlist 规则。重定向由宿主手动跟随，最多 3 跳，每跳都重新校验协议与 host。
-  - `opts` 可选，且只接受 `{status, headers}`。`status` 必须是 `[100, 599]` 范围内的整数；`headers` 接受与 `ctx.respond` 相同的对象或 `[name, value]` 对形状。未知键、非普通对象与畸形值都是脚本错误（fail-closed）。
+  - `opts` 可选，且只接受 `{status, headers}`。`status` 必须是 `[100, 599]` 范围内的整数；`headers` 接受与 `ctx.respond` 相同的对象或 `[name, value]` 对形状。未知键、非普通对象与畸形值都是脚本错误（fail-closed）。Header pair 在发起上游调用前校验；畸形 pair 抛出可捕获的 `script_error`，且不发起上游请求。
   - `status` 默认取上游 2xx 状态，因此普通下载答 `200`，Range 请求答 `206` 时保留其部分响应状态。脚本提供的 headers 按原样发送；除脚本设置了同名 header，上游的 `Content-Range` 与 `Content-Length` 会被保留。
   - 客户端的 `Range` 请求 header 会转发给上游调用。
   - 上游响应在 `[200, 299]` 范围时开始流式传输。最终非 2xx 响应抛出可捕获错误，其 `error.code` 为 `"upstream_http_error"`；URL 无法解析或 scheme 不是 `http`/`https` 时抛出 `"upstream_url_invalid"`；宿主无法跟随的重定向链（超过 3 跳或 `Location` 不可用）抛出 `"upstream_redirect_error"`；DNS、连接、TLS 与超时失败抛出 `"upstream_unreachable"`；allowlist 拒绝抛出 `"script_error"`。
