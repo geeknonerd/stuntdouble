@@ -10,7 +10,7 @@ Stunt Double 暴露三个公开契约。它们各自演进，在此统一跟踪�
 | --- | --- | --- | --- |
 | [配置](config.zh-CN.md) | v0.x 切片 T6 稳定 | v0.x | 1.0 之前允许带弃用窗口的破坏性变更 |
 | [`ctx` API](ctx-api.zh-CN.md) | draft（已实现 T6 子集） | `apiVersion` 1 | 同一 `apiVersion` 内只做增量；移除需要新版本 |
-| [CLI](cli.zh-CN.md) | v0.x 切片 T6 稳定 | v0.x | 1.0 之前允许带弃用窗口的破坏性变更 |
+| [CLI](cli.zh-CN.md) | v0.x 切片 T7 稳定 | v0.x | 1.0 之前允许带弃用窗口的破坏性变更 |
 
 ## 变更流程
 

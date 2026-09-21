@@ -89,6 +89,14 @@ if (upstream.status >= 400) {
 
 `sandbox.script_timeout_ms` bounds script runtime; the default is 10000 ms.
 
+Add `--verbose` to `serve` when diagnosing one of these failures:
+
+```bash
+stuntdouble serve --config stuntdouble.toml --verbose
+```
+
+The 500/502 JSON body then carries a stable `detail` string such as `upstream transport failure: timeout`; it never includes stack traces, script messages, upstream bodies, or internal addresses. Treat it as local diagnostic output and leave it off in shared environments. `serve` also writes one structured JSON log line per request to stderr, including the upstream call chain, body sizes, and allowlisted headers. A streamed response writes its line when the body ends; a mid-stream upstream failure appears as `upstream_stream_error`.
+
 ## Next steps
 
 - [Public contracts](../contracts/) — configuration, `ctx` API, and CLI.

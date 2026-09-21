@@ -54,9 +54,9 @@
   - 客户端的 `Range` 请求 header 会转发给上游调用。
   - 上游响应在 `[200, 299]` 范围时开始流式传输。最终非 2xx 响应抛出可捕获错误，其 `error.code` 为 `"upstream_http_error"`；URL 无法解析或 scheme 不是 `http`/`https` 时抛出 `"upstream_url_invalid"`；宿主无法跟随的重定向链（超过 3 跳或 `Location` 不可用）抛出 `"upstream_redirect_error"`；DNS、连接、TLS 与超时失败抛出 `"upstream_unreachable"`；allowlist 拒绝抛出 `"script_error"`。
   - 第一次 `ctx.respond` 或 `ctx.http.pipe` 调用生效；之后的调用被忽略并在服务端产生警告。未捕获的 `upstream_http_error` 是普通脚本错误（500 `script_error`），绝不变成 `502 upstream_unreachable`。
-  - 上游 body 读取始终受有效上游超时约束；已经开始流式传输的 body 不能被变换，也不能转成缓冲响应；需要字节的脚本请用 `ctx.http.get`。流一旦开始，body 中途的上游失败只能截断客户端 body，因为状态与 headers 已经在网络上发出。
+  - 上游 body 读取始终受有效上游超时约束；已经开始流式传输的 body 不能被变换，也不能转成缓冲响应；需要字节的脚本请用 `ctx.http.get`。流一旦开始，body 中途的上游失败只能截断客户端 body，因为状态与 headers 已经在网络上发出。宿主会在请求日志中把该失败记为 `upstream_stream_error`；日志字段见 [CLI 契约](./cli.zh-CN.md)。
 - `ctx.env` 是进程环境变量快照。不加载 `.env` 文件。
-- `ctx.log.info` / `warn` / `error` 只写入服务端日志，绝不进客户端响应。
+- `ctx.log.info` / `warn` / `error` 只写入服务端日志，绝不进客户端响应。消息不会被脱敏或过滤：脚本作者必须确保消息中不含请求/响应 body、Token、Cookie 或其他机密。宿主自身不会自动记录 body。
 - 脚本抛错、超过 `sandbox.script_timeout_ms`（默认 10000）或加载失败时返回 500 `script_error`；脚本结束却没有调用 `ctx.respond` 时返回 500 `script_no_response`；未捕获的上游传输层失败返回 502 `upstream_unreachable`。三者都带 `request_id`。
 
 ## 安全边界

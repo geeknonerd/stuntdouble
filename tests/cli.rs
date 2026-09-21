@@ -85,11 +85,12 @@ fn run(args: &[&str]) -> (i32, String, String) {
     )
 }
 
-fn serve_with_env(config: &Path, env: &[(&str, &str)]) -> Child {
+fn serve_with_args(config: &Path, env: &[(&str, &str)], args: &[&str]) -> Child {
     let mut command = Command::new(BIN);
     command
         .args(["serve", "--config"])
         .arg(config)
+        .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     for (key, value) in env {
@@ -176,6 +177,7 @@ struct UpstreamResponse {
     headers: Vec<(String, String)>,
     body: Vec<u8>,
     delay: Duration,
+    content_length: Option<usize>,
 }
 
 impl UpstreamResponse {
@@ -185,6 +187,7 @@ impl UpstreamResponse {
             headers: Vec::new(),
             body: body.to_vec(),
             delay: Duration::ZERO,
+            content_length: None,
         }
     }
 
@@ -195,6 +198,13 @@ impl UpstreamResponse {
 
     fn delay(mut self, delay: Duration) -> Self {
         self.delay = delay;
+        self
+    }
+
+    /// Announce a length different from the bytes actually written, so tests
+    /// can exercise a truncated upstream body.
+    fn content_length(mut self, length: usize) -> Self {
+        self.content_length = Some(length);
         self
     }
 }
@@ -256,10 +266,10 @@ impl Upstream {
                             503 => "Service Unavailable",
                             _ => "Status",
                         };
+                        let content_length = response.content_length.unwrap_or(response.body.len());
                         let mut raw = format!(
-                            "HTTP/1.1 {} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n",
+                            "HTTP/1.1 {} {reason}\r\nContent-Length: {content_length}\r\nConnection: close\r\n",
                             response.status,
-                            response.body.len()
                         );
                         for (name, value) in &response.headers {
                             let _ = write!(raw, "{name}: {value}\r\n");
@@ -364,7 +374,17 @@ fn serve_and_run<T>(
     env: &[(&str, &str)],
     run_tests: impl FnOnce(u16) -> T,
 ) -> (T, String) {
-    let mut child = serve_with_env(config, env);
+    serve_and_run_with_args(config, port, env, &[], run_tests)
+}
+
+fn serve_and_run_with_args<T>(
+    config: &Path,
+    port: u16,
+    env: &[(&str, &str)],
+    args: &[&str],
+    run_tests: impl FnOnce(u16) -> T,
+) -> (T, String) {
+    let mut child = serve_with_args(config, env, args);
     wait_ready(port, &mut child);
     let value = run_tests(port);
     child.kill().expect("kill server");
@@ -535,6 +555,229 @@ fn client_request_id_is_recorded_but_never_adopted() {
 }
 
 #[test]
+fn verbose_adds_a_stable_detail_to_script_errors() {
+    let script = r#"throw new Error("secret stack detail");"#;
+    let (plain, _) = with_server_full(good_config(), script, &[], |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(plain.status, 500, "body: {}", plain.body);
+    assert!(
+        json_string(&plain.body, "detail").is_none(),
+        "detail appeared without --verbose: {}",
+        plain.body
+    );
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let port = reserve_port();
+    let config = fixture_with_script(dir.path(), port, good_config(), script);
+    let (verbose, _) = serve_and_run_with_args(&config, port, &[], &["--verbose"], |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(verbose.status, 500, "body: {}", verbose.body);
+    assert_eq!(
+        json_string(&verbose.body, "detail").as_deref(),
+        Some("script execution failed")
+    );
+    assert!(
+        !verbose.body.contains("secret stack detail"),
+        "script message leaked with --verbose: {}",
+        verbose.body
+    );
+}
+
+#[test]
+fn verbose_upstream_detail_omits_internal_addresses() {
+    let upstream_port = closed_port();
+    let url = format!("http://127.0.0.1:{upstream_port}/private/token");
+    let script = r#"
+ctx.http.get(ctx.env.UPSTREAM_URL);
+ctx.respond(200, {}, "should not respond");
+"#;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let port = reserve_port();
+    let config = fixture_with_script(
+        dir.path(),
+        port,
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+    );
+    let (response, _) = serve_and_run_with_args(
+        &config,
+        port,
+        &[("UPSTREAM_URL", url.as_str())],
+        &["--verbose"],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 502, "body: {}", response.body);
+    assert_eq!(
+        json_string(&response.body, "detail").as_deref(),
+        Some("upstream transport failure: transport")
+    );
+    assert!(
+        !response.body.contains("127.0.0.1"),
+        "upstream host leaked: {}",
+        response.body
+    );
+    assert!(
+        !response
+            .body
+            .contains(&format!("127.0.0.1:{upstream_port}")),
+        "upstream address leaked: {}",
+        response.body
+    );
+    assert!(
+        !response.body.contains("/private/token"),
+        "upstream path leaked: {}",
+        response.body
+    );
+}
+
+#[test]
+fn error_messages_do_not_carry_request_bodies_into_logs() {
+    let script = r"throw new Error(ctx.request.bodyText);";
+    let request_body = "request-body-secret";
+    let (response, stderr) = with_server_full(good_config(), script, &[], |port| {
+        request_with_body(
+            port,
+            "GET",
+            "/demo/documents/manifest/group-a",
+            &[],
+            request_body,
+        )
+    });
+    assert_eq!(response.status, 500, "body: {}", response.body);
+    assert!(
+        !stderr.contains(request_body),
+        "request body leaked into logs: {stderr}"
+    );
+    assert!(
+        !response.body.contains(request_body),
+        "request body leaked into the response: {}",
+        response.body
+    );
+}
+
+#[test]
+fn structured_logs_record_upstream_chain_sizes_and_allowlisted_headers() {
+    let upstream = Upstream::start(vec![UpstreamResponse::new(200, b"upstream-secret-body")
+        .header("Content-Type", "text/plain")
+        .header("X-Upstream-Secret", "upstream-secret-header")]);
+    let script = r#"
+var r = ctx.http.get(ctx.env.UPSTREAM_URL);
+ctx.respond(200, { "Content-Type": "text/plain", "X-Response-Secret": "response-secret" }, "client-body");
+"#;
+    let url = upstream.url("/meta?token=query-secret");
+    let request_body = "request-body";
+    let (response, stderr) = with_server_full(
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+        &[("UPSTREAM_URL", url.as_str())],
+        |port| {
+            request_with_body(
+                port,
+                "GET",
+                "/demo/documents/manifest/group-a",
+                &[
+                    ("Content-Type", "text/plain"),
+                    ("Range", "bytes=0-4"),
+                    ("Authorization", "Bearer request-secret"),
+                ],
+                request_body,
+            )
+        },
+    );
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    let line = stderr
+        .lines()
+        .find(|line| line.contains("\"request_id\""))
+        .unwrap_or_else(|| panic!("request log missing: {stderr}"));
+    let log: serde_json::Value = serde_json::from_str(line).expect("structured log json");
+    assert_eq!(log["route"], "manifest");
+    assert_eq!(log["status"], 200);
+    assert_eq!(
+        log["request_body_bytes"].as_u64(),
+        Some(request_body.len() as u64)
+    );
+    assert_eq!(
+        log["response_body_bytes"].as_u64(),
+        Some(response.body.len() as u64)
+    );
+    assert!(log["script_duration_ms"].is_number(), "log: {line}");
+    let call = &log["upstream_calls"][0];
+    assert_eq!(call["api"], "http.get");
+    assert_eq!(call["host"], "127.0.0.1");
+    assert_eq!(call["path"], "/meta");
+    assert_eq!(call["status"], 200);
+    assert_eq!(
+        call["response_bytes"],
+        u64::try_from("upstream-secret-body".len()).expect("body length")
+    );
+    assert_eq!(call["redirects"], 0);
+    assert!(call["duration_ms"].is_number(), "log: {line}");
+    assert!(call["error"].is_null(), "log: {line}");
+    assert_eq!(log["request_headers"]["content-type"], "text/plain");
+    assert_eq!(log["request_headers"]["range"], "bytes=0-4");
+    assert!(
+        log["request_headers"].get("authorization").is_none(),
+        "sensitive request header logged: {line}"
+    );
+    assert_eq!(log["response_headers"]["content-type"], "text/plain");
+    assert!(
+        log["response_headers"].get("x-response-secret").is_none(),
+        "sensitive response header logged: {line}"
+    );
+    for secret in [
+        "request-body",
+        "client-body",
+        "upstream-secret-body",
+        "upstream-secret-header",
+        "response-secret",
+        "query-secret",
+        "request-secret",
+    ] {
+        assert!(!line.contains(secret), "secret {secret:?} logged: {line}");
+    }
+}
+
+#[test]
+fn client_request_id_reaches_logs_but_not_upstream() {
+    let upstream = Upstream::start(vec![UpstreamResponse::new(200, b"ok")]);
+    let script = r"
+var r = ctx.http.get(ctx.env.UPSTREAM_URL);
+ctx.respond(200, {}, r.text());
+";
+    let url = upstream.url("/meta");
+    let (response, stderr) = with_server_full(
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+        &[("UPSTREAM_URL", url.as_str())],
+        |port| {
+            request(
+                port,
+                "GET",
+                "/demo/documents/manifest/group-a",
+                &[("X-Request-ID", "caller-supplied")],
+            )
+        },
+    );
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    let heads = upstream.requests();
+    assert_eq!(heads.len(), 1, "expected one upstream call");
+    assert!(
+        !heads[0].to_ascii_lowercase().contains("x-request-id"),
+        "client request id was forwarded upstream: {}",
+        heads[0]
+    );
+    let line = stderr
+        .lines()
+        .find(|line| line.contains("\"request_id\""))
+        .unwrap_or_else(|| panic!("request log missing: {stderr}"));
+    let log: serde_json::Value = serde_json::from_str(line).expect("structured log json");
+    assert_eq!(log["client_request_id"], "caller-supplied");
+    assert_ne!(log["request_id"], "caller-supplied");
+}
+
+#[test]
 fn each_request_writes_one_structured_log_line() {
     let (statuses, stderr) = with_server(good_config(), |port| {
         vec![
@@ -575,6 +818,26 @@ fn each_request_writes_one_structured_log_line() {
     assert!(
         lines[0].contains("\"host\":"),
         "listen host missing: {}",
+        lines[0]
+    );
+    assert!(
+        lines[0].contains("\"script_duration_ms\":"),
+        "script duration missing: {}",
+        lines[0]
+    );
+    assert!(
+        lines[0].contains("\"request_body_bytes\":"),
+        "request size missing: {}",
+        lines[0]
+    );
+    assert!(
+        lines[0].contains("\"response_body_bytes\":"),
+        "response size missing: {}",
+        lines[0]
+    );
+    assert!(
+        lines[0].contains("\"upstream_calls\":"),
+        "upstream chain missing: {}",
         lines[0]
     );
 }
@@ -1000,7 +1263,7 @@ var r = ctx.http.get(ctx.env.UPSTREAM_URL);
 ctx.respond(200, {}, r.text());
 ";
     let url = upstream.url("/start");
-    let (response, _) = with_server_full(
+    let (response, stderr) = with_server_full(
         &with_upstream(good_config(), &["127.0.0.1"]),
         script,
         &[("UPSTREAM_URL", url.as_str())],
@@ -1008,6 +1271,13 @@ ctx.respond(200, {}, r.text());
     );
     assert_eq!(response.status, 200, "body: {}", response.body);
     assert_eq!(response.body, "done");
+    let line = stderr
+        .lines()
+        .find(|line| line.contains("\"request_id\""))
+        .unwrap_or_else(|| panic!("request log missing: {stderr}"));
+    let log: serde_json::Value = serde_json::from_str(line).expect("structured log json");
+    assert_eq!(log["upstream_calls"][0]["redirects"], 3);
+    assert_eq!(log["upstream_calls"][0]["status"], 200);
 }
 
 #[test]
@@ -1084,7 +1354,7 @@ fn uncaught_ctx_http_get_transport_failure_maps_to_502() {
 ctx.http.get(ctx.env.UPSTREAM_URL);
 ctx.respond(200, {}, "should not respond");
 "#;
-    let (response, _) = with_server_full(
+    let (response, stderr) = with_server_full(
         &with_upstream(good_config(), &["127.0.0.1"]),
         script,
         &[("UPSTREAM_URL", url.as_str())],
@@ -1096,7 +1366,15 @@ ctx.respond(200, {}, "should not respond");
         Some("upstream_unreachable")
     );
     assert!(json_string(&response.body, "request_id").is_some());
+    assert!(json_string(&response.body, "detail").is_none());
     assert!(response.header("x-request-id").is_some());
+    let line = stderr
+        .lines()
+        .find(|line| line.contains("\"request_id\""))
+        .unwrap_or_else(|| panic!("request log missing: {stderr}"));
+    let log: serde_json::Value = serde_json::from_str(line).expect("structured log json");
+    assert_eq!(log["upstream_calls"][0]["error"], "upstream_unreachable");
+    assert_eq!(log["upstream_calls"][0]["kind"], "transport");
 }
 
 #[test]
@@ -1205,7 +1483,7 @@ var produced = ctx.http.pipe(ctx.env.UPSTREAM_URL, {
 if (!produced) { ctx.respond(500, {}, "pipe did not produce a response"); }
 "#;
     let url = upstream.url("/file.pdf");
-    let (response, _) = with_server_full(
+    let (response, stderr) = with_server_full(
         &with_upstream(good_config(), &["127.0.0.1"]),
         script,
         &[("UPSTREAM_URL", url.as_str())],
@@ -1221,6 +1499,67 @@ if (!produced) { ctx.respond(500, {}, "pipe did not produce a response"); }
         "upstream length must travel with the stream"
     );
     assert_eq!(upstream.requests().len(), 1);
+    let line = stderr
+        .lines()
+        .find(|line| line.contains("\"request_id\""))
+        .unwrap_or_else(|| panic!("request log missing: {stderr}"));
+    let log: serde_json::Value = serde_json::from_str(line).expect("structured log json");
+    assert_eq!(log["error"], "");
+    assert_eq!(log["response_body_bytes"], 13);
+    let call = &log["upstream_calls"][0];
+    assert_eq!(call["api"], "http.pipe");
+    assert_eq!(call["status"], 200);
+    assert_eq!(call["response_bytes"], 13);
+    assert!(call["duration_ms"].is_number(), "log: {line}");
+    assert!(call["error"].is_null(), "log: {line}");
+}
+
+#[test]
+fn ctx_http_pipe_mid_stream_failure_is_logged_after_headers() {
+    let body = b"short-body";
+    let upstream = Upstream::start(vec![
+        UpstreamResponse::new(200, body).content_length(body.len() + 54)
+    ]);
+    let script = r#"
+var produced = ctx.http.pipe(ctx.env.UPSTREAM_URL);
+if (!produced) { ctx.respond(500, {}, "pipe did not produce a response"); }
+"#;
+    let url = upstream.url("/file.pdf");
+    let (response, stderr) = with_server_full(
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+        &[("UPSTREAM_URL", url.as_str())],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    // hyper may drop a buffered chunk when the body stream errors, so the
+    // client can see fewer bytes than the relay counted.
+    assert!(
+        response.body.len() <= body.len(),
+        "client body exceeded the upstream body: {}",
+        response.body
+    );
+    let line = stderr
+        .lines()
+        .find(|line| line.contains("\"request_id\""))
+        .unwrap_or_else(|| panic!("request log missing: {stderr}"));
+    let log: serde_json::Value = serde_json::from_str(line).expect("structured log json");
+    assert_eq!(log["status"], 200);
+    assert_eq!(log["error"], "upstream_stream_error");
+    assert_eq!(
+        log["response_body_bytes"],
+        u64::try_from(body.len()).expect("body length")
+    );
+    let call = &log["upstream_calls"][0];
+    assert_eq!(call["api"], "http.pipe");
+    assert_eq!(call["status"], 200);
+    assert_eq!(
+        call["response_bytes"],
+        u64::try_from(body.len()).expect("body length")
+    );
+    assert_eq!(call["error"], "upstream_stream_error");
+    assert_eq!(call["kind"], "transport");
+    assert!(call["duration_ms"].is_number(), "log: {line}");
 }
 
 #[test]

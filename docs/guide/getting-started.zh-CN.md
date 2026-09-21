@@ -91,6 +91,14 @@ if (upstream.status >= 400) {
 
 `sandbox.script_timeout_ms` 限制脚本运行时长，默认 10000 ms。
 
+诊断这些失败时，可以给 `serve` 加上 `--verbose`：
+
+```bash
+stuntdouble serve --config stuntdouble.toml --verbose
+```
+
+此时 500/502 JSON body 会多出一个稳定的 `detail` 字符串，例如 `upstream transport failure: timeout`；它绝不包含堆栈、脚本消息、上游 body 或内部地址。把 `detail` 当作本地诊断输出，不要在共享环境开启 `--verbose`。`serve` 还会为每个请求向 stderr 写出一条结构化日志，包含上游调用链、body 大小与白名单 header。流式响应的日志在 body 结束时写出；中途上游失败记为 `upstream_stream_error`。
+
 ## 下一步
 
 - [公开契约](../contracts/README.zh-CN.md) —— 配置、`ctx` API 与 CLI。

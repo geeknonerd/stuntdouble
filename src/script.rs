@@ -12,6 +12,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::http::{HeaderMap, Method, StatusCode};
@@ -31,6 +32,10 @@ pub const API_VERSION: &str = "1";
 // and the orphaned worker thread is bounded by this iteration backstop.
 // Upgrade path: use the engine's interrupter once the pinned release has one.
 const LOOP_ITERATION_LIMIT: u64 = 100_000_000;
+
+/// Failure payload shared by the host bridge and its panic-catching wrapper:
+/// an optional transport kind plus the operator-facing message.
+type BridgeError = (Option<&'static str>, String);
 
 /// Read-only view of one client request, frozen into `ctx.request`.
 #[derive(Debug, Clone)]
@@ -112,7 +117,7 @@ pub enum ResponseBody {
     Bytes(Vec<u8>),
     /// Streamed by `ctx.http.pipe`: frames move from the upstream connection
     /// to the client without entering the JavaScript heap.
-    Stream(upstream::BodyStream),
+    Stream(upstream::PipeBody),
 }
 
 /// Response produced by `ctx.respond` or `ctx.http.pipe`.
@@ -139,8 +144,12 @@ pub enum Error {
     TimedOut,
     /// Script finished without calling `ctx.respond`.
     NoResponse,
-    /// An uncaught transport failure from `ctx.http.get`.
-    UpstreamUnreachable(String),
+    /// An uncaught transport failure from `ctx.http.get` or `ctx.http.pipe`.
+    UpstreamUnreachable {
+        message: String,
+        /// Stable kind: `"timeout"`, `"dns"`, or `"transport"`.
+        kind: &'static str,
+    },
 }
 
 impl Error {
@@ -150,7 +159,7 @@ impl Error {
         match self {
             Self::NoResponse => "script_no_response",
             Self::Failed(_) | Self::TimedOut => "script_error",
-            Self::UpstreamUnreachable(_) => "upstream_unreachable",
+            Self::UpstreamUnreachable { .. } => "upstream_unreachable",
         }
     }
 
@@ -158,20 +167,26 @@ impl Error {
     #[must_use]
     pub fn status(&self) -> StatusCode {
         match self {
-            Self::UpstreamUnreachable(_) => StatusCode::BAD_GATEWAY,
+            Self::UpstreamUnreachable { .. } => StatusCode::BAD_GATEWAY,
             Self::Failed(_) | Self::TimedOut | Self::NoResponse => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
         }
     }
 
-    /// Operator-facing reason; only exposed to clients under `--verbose` (T7).
+    /// Client-visible diagnostic under `--verbose`: a stable class only, never
+    /// a stack trace, script message, upstream body, or upstream address.
     #[must_use]
-    pub fn detail(&self) -> String {
+    pub fn detail(&self) -> &'static str {
         match self {
-            Self::Failed(message) | Self::UpstreamUnreachable(message) => message.clone(),
-            Self::TimedOut => "script exceeded sandbox.script_timeout_ms".into(),
-            Self::NoResponse => "script finished without calling ctx.respond".into(),
+            Self::Failed(_) => "script execution failed",
+            Self::TimedOut => "script exceeded the configured timeout",
+            Self::NoResponse => "script finished without calling ctx.respond",
+            Self::UpstreamUnreachable { kind, .. } => match *kind {
+                "timeout" => "upstream transport failure: timeout",
+                "dns" => "upstream transport failure: dns",
+                _ => "upstream transport failure: transport",
+            },
         }
     }
 }
@@ -182,6 +197,8 @@ pub struct Outcome {
     pub response: Option<ScriptResponse>,
     pub logs: Vec<LogRecord>,
     pub error: Option<Error>,
+    /// Ordered upstream calls made by this script run.
+    pub upstream_calls: Vec<Json>,
 }
 
 impl Outcome {
@@ -192,6 +209,7 @@ impl Outcome {
             response: None,
             logs: Vec::new(),
             error: Some(error),
+            upstream_calls: Vec::new(),
         }
     }
 }
@@ -279,9 +297,9 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_upstream_marker) {
     error.code = code;
     return error;
   }
-  function makeUpstreamError(message) {
+  function makeUpstreamError(message, kind) {
     var error = makeError(message, "upstream_unreachable");
-    Object.defineProperty(error, __sd_upstream_marker, { value: true });
+    Object.defineProperty(error, __sd_upstream_marker, { value: kind || "transport" });
     return error;
   }
   var BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -335,7 +353,7 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_upstream_marker) {
     var result = JSON.parse(raw);
     if (!result.ok) {
       if (result.code === "upstream_unreachable") {
-        throw makeUpstreamError(result.message);
+        throw makeUpstreamError(result.message, result.kind);
       }
       throw makeError(result.message, result.code);
     }
@@ -441,7 +459,7 @@ thread_local! {
 
     /// Per-request piped body captured by `__sd_http_pipe` and claimed by
     /// `parse_host_record` once the script finishes.
-    static PIPE_STREAM: RefCell<Option<upstream::BodyStream>> = const { RefCell::new(None) };
+    static PIPE_STREAM: RefCell<Option<upstream::PipeBody>> = const { RefCell::new(None) };
 }
 
 /// Decode one host-bridge argument, run it against the request-scoped host,
@@ -488,6 +506,7 @@ fn sd_http_get(
         Err(error) => json!({
             "ok": false,
             "code": error.code(),
+            "kind": error.transport_kind(),
             "message": error.message()
         }),
     })
@@ -519,6 +538,7 @@ fn sd_http_pipe(
         Err(error) => json!({
             "ok": false,
             "code": error.code(),
+            "kind": error.transport_kind(),
             "message": error.message()
         }),
     })
@@ -555,6 +575,7 @@ fn evaluate(
     request: &RequestSnapshot,
     upstream: &UpstreamConfig,
     script_deadline: Instant,
+    calls: upstream::CallLog,
 ) -> Outcome {
     let client_range = request
         .headers
@@ -567,6 +588,7 @@ fn evaluate(
             Duration::from_millis(upstream.timeout_ms),
             script_deadline,
             client_range,
+            calls,
         ));
     });
     PIPE_STREAM.with(|cell| {
@@ -586,21 +608,21 @@ fn evaluate(
         .runtime_limits_mut()
         .set_loop_iteration_limit(LOOP_ITERATION_LIMIT);
     // A Rust-side panic in the engine must not take the request thread down.
-    let staged = catch_unwind(AssertUnwindSafe(|| -> Result<String, (bool, String)> {
+    let staged = catch_unwind(AssertUnwindSafe(|| -> Result<String, BridgeError> {
         context
             .register_global_builtin_callable(
                 js_string!("__sd_http_get"),
                 1,
                 NativeFunction::from_fn_ptr(sd_http_get),
             )
-            .map_err(|error| (false, error.to_string()))?;
+            .map_err(|error| (None, error.to_string()))?;
         context
             .register_global_builtin_callable(
                 js_string!("__sd_http_pipe"),
                 1,
                 NativeFunction::from_fn_ptr(sd_http_pipe),
             )
-            .map_err(|error| (false, error.to_string()))?;
+            .map_err(|error| (None, error.to_string()))?;
         let evaluated = (|| -> Result<String, JsError> {
             context.eval(Source::from_bytes(&prelude))?;
             context.eval(Source::from_bytes(source))?;
@@ -613,10 +635,9 @@ fn evaluate(
         match evaluated {
             Ok(dump) => Ok(dump),
             Err(error) => {
-                let upstream_unreachable =
-                    is_upstream_unreachable(&error, &upstream_marker, &mut context);
+                let kind = upstream_unreachable_kind(&error, &upstream_marker, &mut context);
                 let message = error.to_string();
-                Err((upstream_unreachable, message))
+                Err((kind, message))
             }
         }
     }));
@@ -626,8 +647,10 @@ fn evaluate(
     });
     match staged {
         Err(_) => Outcome::failed(Error::Failed("script panicked in the engine".into())),
-        Ok(Err((true, message))) => Outcome::failed(Error::UpstreamUnreachable(message)),
-        Ok(Err((false, message))) => Outcome::failed(Error::Failed(message)),
+        Ok(Err((Some(kind), message))) => {
+            Outcome::failed(Error::UpstreamUnreachable { message, kind })
+        }
+        Ok(Err((None, message))) => Outcome::failed(Error::Failed(message)),
         Ok(Ok(dump)) => parse_host_record(&dump, stream),
     }
 }
@@ -651,21 +674,38 @@ fn upstream_marker() -> String {
     format!("__sd_upstream_{:016x}", hasher.finish())
 }
 
-/// Recognize an uncaught error created by the `ctx.http.get` transport path.
-/// The script-visible `error.code` is deliberately not trusted on its own.
-fn is_upstream_unreachable(error: &JsError, marker: &str, context: &mut Context) -> bool {
-    let Some(object) = error.as_opaque().and_then(JsValue::as_object) else {
-        return false;
-    };
-    object
-        .has_own_property(JsString::from(marker), context)
+/// Recognize an uncaught error created by the `ctx.http` transport path and
+/// recover its stable kind. The script-visible `error.code` is deliberately
+/// not trusted on its own.
+fn upstream_unreachable_kind(
+    error: &JsError,
+    marker: &str,
+    context: &mut Context,
+) -> Option<&'static str> {
+    let object = error.as_opaque().and_then(JsValue::as_object)?;
+    let key = JsString::from(marker);
+    if !object
+        .has_own_property(key.clone(), context)
         .unwrap_or(false)
+    {
+        return None;
+    }
+    let kind = object
+        .get(key, context)
+        .ok()
+        .and_then(|value| value.as_string())
+        .map(|value| value.to_std_string_escaped());
+    Some(match kind.as_deref() {
+        Some("timeout") => "timeout",
+        Some("dns") => "dns",
+        _ => "transport",
+    })
 }
 
 /// Turn the extracted JSON record into an `Outcome`. A piped response carries
 /// only its status and headers through the realm; the body stream is handed
 /// back separately by the host bridge.
-fn parse_host_record(raw: &str, stream: Option<upstream::BodyStream>) -> Outcome {
+fn parse_host_record(raw: &str, stream: Option<upstream::PipeBody>) -> Outcome {
     let host: Json = match serde_json::from_str(raw) {
         Ok(value) => value,
         Err(error) => {
@@ -691,6 +731,7 @@ fn parse_host_record(raw: &str, stream: Option<upstream::BodyStream>) -> Outcome
             response: None,
             logs,
             error: Some(Error::NoResponse),
+            upstream_calls: Vec::new(),
         };
     };
     let Some(status) = response
@@ -702,6 +743,7 @@ fn parse_host_record(raw: &str, stream: Option<upstream::BodyStream>) -> Outcome
             response: None,
             logs,
             error: Some(Error::Failed("ctx.respond: status was not recorded".into())),
+            upstream_calls: Vec::new(),
         };
     };
     let headers = response
@@ -726,6 +768,7 @@ fn parse_host_record(raw: &str, stream: Option<upstream::BodyStream>) -> Outcome
                 error: Some(Error::Failed(
                     "ctx.http.pipe: streamed response was not recorded".into(),
                 )),
+                upstream_calls: Vec::new(),
             };
         };
         ResponseBody::Stream(stream)
@@ -750,6 +793,7 @@ fn parse_host_record(raw: &str, stream: Option<upstream::BodyStream>) -> Outcome
         }),
         logs,
         error: None,
+        upstream_calls: Vec::new(),
     }
 }
 
@@ -767,13 +811,18 @@ pub async fn execute(
     let deadline = Instant::now()
         .checked_add(timeout)
         .unwrap_or_else(Instant::now);
-    let worker =
-        tokio::task::spawn_blocking(move || evaluate(&source, &request, &upstream, deadline));
-    match tokio::time::timeout(timeout, worker).await {
+    let calls: upstream::CallLog = Arc::new(Mutex::new(Vec::new()));
+    let worker_calls = Arc::clone(&calls);
+    let worker = tokio::task::spawn_blocking(move || {
+        evaluate(&source, &request, &upstream, deadline, worker_calls)
+    });
+    let mut outcome = match tokio::time::timeout(timeout, worker).await {
         Err(_) => Outcome::failed(Error::TimedOut),
         Ok(Err(_)) => Outcome::failed(Error::Failed("script worker panicked".into())),
         Ok(Ok(outcome)) => outcome,
-    }
+    };
+    outcome.upstream_calls = upstream::calls_json(&calls);
+    outcome
 }
 
 #[cfg(test)]

@@ -24,6 +24,8 @@ curl -i -H 'Range: bytes=0-1023' \
   http://127.0.0.1:3000/demo/documents/download/DOC-0001
 ```
 
+诊断引擎生成的 500/502 时，给 `serve` 加 `--verbose`：JSON body 会带稳定的 `detail` 字段。演示自身的 502 body（`metadata_bad_gateway`、`pdf_url_invalid`、`pdf_bad_gateway`）是脚本映射的结果，宿主不会向其中注入 `detail`。
+
 文件：
 
 - `stuntdouble.toml` —— 路由声明与上游 allowlist。
@@ -46,7 +48,7 @@ curl -i -H 'Range: bytes=0-1023' \
 - `pdf_url` 缺失、无法解析或非 `http`/`https` 时答 502 `{"error":"pdf_url_invalid"}`；宿主把该 URL 拒绝以 `upstream_url_invalid` 报告给脚本。
 - PDF body 经 `ctx.http.pipe` 流给客户端，因此字节从不进入脚本堆。响应带 `Content-Type: application/pdf` 与 `Content-Disposition: attachment;filename="DOC-0001.pdf"`。
 - 客户端 `Range` header 转发给上游调用，上游 206 响应连同其 `Content-Range` header 抵达客户端。
-- body 边到边流：上游 `Content-Length` 会被透传，而 chunked 上游响应以 chunked、无长度抵达客户端。响应头一旦上线，body 中途的上游失败只能截断 body。
+- body 边到边流：上游 `Content-Length` 会被透传，而 chunked 上游响应以 chunked、无长度抵达客户端。响应头一旦上线，body 中途的上游失败只能截断 body；宿主在流结束时把该失败记为请求日志中的 `upstream_stream_error`。
 - PDF 传输失败、PDF 非 2xx 响应，以及宿主无法跟随的重定向链（超过 3 跳、`Location` 不可用，或 3xx 且没有 `Location`）都答 502 `{"error":"pdf_bad_gateway"}`；元数据失败答 502 `metadata_bad_gateway`。allowlist 拒绝保持 500 `script_error`，见 [ADR 0005](../plans/adr/0005-upstream-failure-semantics.md) 的 T6 修订。
 
 ## 测试
