@@ -1,5 +1,7 @@
 # `ctx` host API contract
 
+**English** | [中文](./ctx-api.zh-CN.md)
+
 - Status: draft; slices T2–T6 implement the `apiVersion`, `request`, `http.get`, `http.pipe`, `respond`, `log`, and `env` subset
 - Applies to: `apiVersion` 1
 - Stability: additive within an `apiVersion`; removals require a new `apiVersion`
