@@ -177,6 +177,7 @@ struct UpstreamResponse {
     headers: Vec<(String, String)>,
     body: Vec<u8>,
     delay: Duration,
+    content_length: Option<usize>,
 }
 
 impl UpstreamResponse {
@@ -186,6 +187,7 @@ impl UpstreamResponse {
             headers: Vec::new(),
             body: body.to_vec(),
             delay: Duration::ZERO,
+            content_length: None,
         }
     }
 
@@ -196,6 +198,13 @@ impl UpstreamResponse {
 
     fn delay(mut self, delay: Duration) -> Self {
         self.delay = delay;
+        self
+    }
+
+    /// Announce a length different from the bytes actually written, so tests
+    /// can exercise a truncated upstream body.
+    fn content_length(mut self, length: usize) -> Self {
+        self.content_length = Some(length);
         self
     }
 }
@@ -257,10 +266,10 @@ impl Upstream {
                             503 => "Service Unavailable",
                             _ => "Status",
                         };
+                        let content_length = response.content_length.unwrap_or(response.body.len());
                         let mut raw = format!(
-                            "HTTP/1.1 {} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n",
+                            "HTTP/1.1 {} {reason}\r\nContent-Length: {content_length}\r\nConnection: close\r\n",
                             response.status,
-                            response.body.len()
                         );
                         for (name, value) in &response.headers {
                             let _ = write!(raw, "{name}: {value}\r\n");
@@ -699,6 +708,10 @@ ctx.respond(200, { "Content-Type": "text/plain", "X-Response-Secret": "response-
     assert_eq!(call["host"], "127.0.0.1");
     assert_eq!(call["path"], "/meta");
     assert_eq!(call["status"], 200);
+    assert_eq!(
+        call["response_bytes"],
+        u64::try_from("upstream-secret-body".len()).expect("body length")
+    );
     assert_eq!(call["redirects"], 0);
     assert!(call["duration_ms"].is_number(), "log: {line}");
     assert!(call["error"].is_null(), "log: {line}");
@@ -1470,7 +1483,7 @@ var produced = ctx.http.pipe(ctx.env.UPSTREAM_URL, {
 if (!produced) { ctx.respond(500, {}, "pipe did not produce a response"); }
 "#;
     let url = upstream.url("/file.pdf");
-    let (response, _) = with_server_full(
+    let (response, stderr) = with_server_full(
         &with_upstream(good_config(), &["127.0.0.1"]),
         script,
         &[("UPSTREAM_URL", url.as_str())],
@@ -1486,6 +1499,67 @@ if (!produced) { ctx.respond(500, {}, "pipe did not produce a response"); }
         "upstream length must travel with the stream"
     );
     assert_eq!(upstream.requests().len(), 1);
+    let line = stderr
+        .lines()
+        .find(|line| line.contains("\"request_id\""))
+        .unwrap_or_else(|| panic!("request log missing: {stderr}"));
+    let log: serde_json::Value = serde_json::from_str(line).expect("structured log json");
+    assert_eq!(log["error"], "");
+    assert_eq!(log["response_body_bytes"], 13);
+    let call = &log["upstream_calls"][0];
+    assert_eq!(call["api"], "http.pipe");
+    assert_eq!(call["status"], 200);
+    assert_eq!(call["response_bytes"], 13);
+    assert!(call["duration_ms"].is_number(), "log: {line}");
+    assert!(call["error"].is_null(), "log: {line}");
+}
+
+#[test]
+fn ctx_http_pipe_mid_stream_failure_is_logged_after_headers() {
+    let body = b"short-body";
+    let upstream = Upstream::start(vec![
+        UpstreamResponse::new(200, body).content_length(body.len() + 54)
+    ]);
+    let script = r#"
+var produced = ctx.http.pipe(ctx.env.UPSTREAM_URL);
+if (!produced) { ctx.respond(500, {}, "pipe did not produce a response"); }
+"#;
+    let url = upstream.url("/file.pdf");
+    let (response, stderr) = with_server_full(
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+        &[("UPSTREAM_URL", url.as_str())],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    // hyper may drop a buffered chunk when the body stream errors, so the
+    // client can see fewer bytes than the relay counted.
+    assert!(
+        response.body.len() <= body.len(),
+        "client body exceeded the upstream body: {}",
+        response.body
+    );
+    let line = stderr
+        .lines()
+        .find(|line| line.contains("\"request_id\""))
+        .unwrap_or_else(|| panic!("request log missing: {stderr}"));
+    let log: serde_json::Value = serde_json::from_str(line).expect("structured log json");
+    assert_eq!(log["status"], 200);
+    assert_eq!(log["error"], "upstream_stream_error");
+    assert_eq!(
+        log["response_body_bytes"],
+        u64::try_from(body.len()).expect("body length")
+    );
+    let call = &log["upstream_calls"][0];
+    assert_eq!(call["api"], "http.pipe");
+    assert_eq!(call["status"], 200);
+    assert_eq!(
+        call["response_bytes"],
+        u64::try_from(body.len()).expect("body length")
+    );
+    assert_eq!(call["error"], "upstream_stream_error");
+    assert_eq!(call["kind"], "transport");
+    assert!(call["duration_ms"].is_number(), "log: {line}");
 }
 
 #[test]

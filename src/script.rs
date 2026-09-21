@@ -117,7 +117,7 @@ pub enum ResponseBody {
     Bytes(Vec<u8>),
     /// Streamed by `ctx.http.pipe`: frames move from the upstream connection
     /// to the client without entering the JavaScript heap.
-    Stream(upstream::BodyStream),
+    Stream(upstream::PipeBody),
 }
 
 /// Response produced by `ctx.respond` or `ctx.http.pipe`.
@@ -459,7 +459,7 @@ thread_local! {
 
     /// Per-request piped body captured by `__sd_http_pipe` and claimed by
     /// `parse_host_record` once the script finishes.
-    static PIPE_STREAM: RefCell<Option<upstream::BodyStream>> = const { RefCell::new(None) };
+    static PIPE_STREAM: RefCell<Option<upstream::PipeBody>> = const { RefCell::new(None) };
 }
 
 /// Decode one host-bridge argument, run it against the request-scoped host,
@@ -705,7 +705,7 @@ fn upstream_unreachable_kind(
 /// Turn the extracted JSON record into an `Outcome`. A piped response carries
 /// only its status and headers through the realm; the body stream is handed
 /// back separately by the host bridge.
-fn parse_host_record(raw: &str, stream: Option<upstream::BodyStream>) -> Outcome {
+fn parse_host_record(raw: &str, stream: Option<upstream::PipeBody>) -> Outcome {
     let host: Json = match serde_json::from_str(raw) {
         Ok(value) => value,
         Err(error) => {
@@ -821,9 +821,7 @@ pub async fn execute(
         Ok(Err(_)) => Outcome::failed(Error::Failed("script worker panicked".into())),
         Ok(Ok(outcome)) => outcome,
     };
-    if let Ok(calls) = calls.lock() {
-        outcome.upstream_calls = calls.iter().map(upstream::CallRecord::to_json).collect();
-    }
+    outcome.upstream_calls = upstream::calls_json(&calls);
     outcome
 }
 

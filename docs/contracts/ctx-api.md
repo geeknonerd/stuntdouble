@@ -54,7 +54,7 @@ Within one `apiVersion`:
   - The first `ctx.respond` or `ctx.http.pipe` call wins; a later call is ignored and produces a server-side warning. An uncaught `upstream_http_error` is an ordinary script error (500 `script_error`), never `502 upstream_unreachable`.
   - The upstream body read stays bounded by the effective upstream timeout, and a body already being streamed cannot be transformed or converted into a buffered response; scripts that need the bytes use `ctx.http.get`. Once the stream starts, a mid-body upstream failure can only truncate the client body, because the status and headers are already on the wire.
 - `ctx.env` is the process environment snapshot. No `.env` file is loaded.
-- `ctx.log.info` / `warn` / `error` write to server logs only and never to the client response.
+- `ctx.log.info` / `warn` / `error` write to server logs only and never to the client response. Messages are not redacted or filtered: the script author must keep request/response bodies, tokens, cookies, and other secrets out of them. The host itself never logs bodies automatically.
 - A script that throws, exceeds `sandbox.script_timeout_ms` (default 10000), or fails to load returns 500 `script_error`; a script that finishes without calling `ctx.respond` returns 500 `script_no_response`; an uncaught upstream transport failure returns 502 `upstream_unreachable`. All three carry a `request_id`.
 
 ## Security boundary

@@ -43,10 +43,11 @@ stuntdouble serve --config <path> [--verbose]
 
 `serve` 每个请求向 stderr 写出一条 JSON 日志，包含 `request_id`、命中的 `route`、`method`、`path`、`params`、`status`、`error`、`elapsed_ms`、`script_duration_ms`、`upstream_calls`、`request_body_bytes`、`response_body_bytes`、`request_headers`、`response_headers`、`client_request_id`、`host`，以及脚本有日志时的 `script_logs`。
 
-- `upstream_calls` 是脚本发起调用的有序列表。每项记录 `api`（`http.get` 或 `http.pipe`）、`host`、`path`、`status`、`duration_ms`、`redirects`，失败时还记录稳定的 `error`/`kind`。query string 不写入日志。
-- 请求体与响应体永不写日志，只记录大小与白名单 header：请求 header 为 `accept`、`content-type`、`content-length`、`range`、`user-agent`；响应 header 为 `content-type`、`content-length`、`content-range`。Authorization、Cookie 及其他 header 永不写日志。
-- 没有已知 `Content-Length` 的流式响应，其 `response_body_bytes` 为 `null`。
-- 脚本到达截止时间时仍在途的调用，其 `status` 与 `duration_ms` 保持 `null`；截止前完成的调用保留已记录的值。
+- `upstream_calls` 是脚本发起调用的有序列表。每项记录 `api`（`http.get` 或 `http.pipe`）、`host`、`path`、`status`、`response_bytes`、`duration_ms`、`redirects`，失败时还记录稳定的 `error`/`kind`。query string 不写入日志。`http.pipe` 的记录在 body 流结束时定稿。
+- 宿主不会自动记录请求体或响应体，只记录大小与白名单 header：请求 header 为 `accept`、`content-type`、`content-length`、`range`、`user-agent`；响应 header 为 `content-type`、`content-length`、`content-range`。Authorization、Cookie 及其他 header 永不写日志。`script_logs[].message` 由脚本产生且不做脱敏：`ctx.log.*` 中不得包含 body、Token、Cookie 或其他机密。
+- 缓冲响应在写出前落日志。流式响应（`ctx.http.pipe`）在 body 结束或客户端断开后落一条完成日志：`response_body_bytes` 统计转发进响应 body 的字节数；`error` 可能是 `upstream_stream_error`（2xx 状态已经发出后上游读取失败，客户端状态不变）或 `client_disconnected`。该行的 `elapsed_ms` 覆盖整个流。
+- 脚本到达截止时间时仍在途的 `http.get` 调用，其 `status`、`response_bytes` 与 `duration_ms` 保持 `null`；截止前完成的调用保留已记录的值。
+- 这些日志是运维诊断面，可能包含 allowlist 中的上游 host 与 path；发布到 issue、pull request 或其他公开产物前必须脱敏。
 - `client_request_id` 记录客户端传入的 `X-Request-ID`；它既不会被采用为 `request_id`，也不会转发给上游调用。
 
 ### validate

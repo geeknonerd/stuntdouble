@@ -1,9 +1,10 @@
 // HTTP surface: transport in, match, script run, response out.
-// Error classes per docs/contracts/cli.md: not_found, script_error,
-// script_no_response.
+// Client error classes per docs/contracts/cli.md: not_found, script_error,
+// script_no_response. Stream failures are log-only classes.
 use crate::config::Config;
 use crate::matcher::match_route;
 use crate::script::{self, RequestSnapshot, ResponseBody, ScriptResponse};
+use crate::upstream;
 use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
@@ -220,8 +221,6 @@ async fn handle(
             .map(|record| json!({ "level": record.level, "message": record.message }))
             .collect::<Vec<_>>());
     }
-    log(&payload);
-
     let Mapped {
         status,
         headers,
@@ -232,7 +231,20 @@ async fn handle(
     if let Ok(value) = HeaderValue::from_str(&request_id) {
         headers.insert(HeaderName::from_static("x-request-id"), value);
     }
+    let body = match body {
+        MappedBody::Ready(body) => {
+            log(&payload);
+            body
+        }
+        MappedBody::Stream(pipe) => stream_body(pipe, payload, started),
+    };
     (status, headers, body).into_response()
+}
+
+/// Script response body, either buffered and ready or still streaming.
+enum MappedBody {
+    Ready(Body),
+    Stream(upstream::PipeBody),
 }
 
 /// One handled route mapped onto the HTTP response plus its log-only fields.
@@ -240,7 +252,7 @@ struct Mapped {
     status: StatusCode,
     error_class: &'static str,
     headers: HeaderMap,
-    body: Body,
+    body: MappedBody,
     body_bytes: Option<u64>,
 }
 
@@ -253,7 +265,7 @@ fn map_handled(handled: Handled, request_id: &str, verbose: bool) -> Mapped {
                 error_class: "not_found",
                 headers: HeaderMap::new(),
                 body_bytes: u64::try_from(body.len()).ok(),
-                body: Body::from(body),
+                body: MappedBody::Ready(Body::from(body)),
             }
         }
         Handled::Failed(error) => {
@@ -265,7 +277,7 @@ fn map_handled(handled: Handled, request_id: &str, verbose: bool) -> Mapped {
                 error_class: class,
                 headers: HeaderMap::new(),
                 body_bytes: u64::try_from(body.len()).ok(),
-                body: Body::from(body),
+                body: MappedBody::Ready(Body::from(body)),
             }
         }
         Handled::Responded(response) => Mapped {
@@ -274,7 +286,11 @@ fn map_handled(handled: Handled, request_id: &str, verbose: bool) -> Mapped {
             error_class: "",
             headers: response_headers(&response.headers),
             body_bytes: script_body_size(&response),
-            body: script_body(response.body),
+            body: match response.body {
+                ResponseBody::Text(text) => MappedBody::Ready(Body::from(text.into_bytes())),
+                ResponseBody::Bytes(bytes) => MappedBody::Ready(Body::from(bytes)),
+                ResponseBody::Stream(pipe) => MappedBody::Stream(pipe),
+            },
         },
     }
 }
@@ -292,6 +308,9 @@ const REQUEST_LOG_HEADERS: [&str; 5] = [
 /// Response headers copied into the per-request log.
 const RESPONSE_LOG_HEADERS: [&str; 3] = ["content-type", "content-length", "content-range"];
 
+/// Bounded frames between the stream relay and the HTTP response body.
+const STREAM_CHANNEL_CAPACITY: usize = 4;
+
 fn loggable_headers(headers: &HeaderMap, allowlist: &[&str]) -> Map<String, Value> {
     let mut logged = Map::new();
     for name in allowlist {
@@ -307,18 +326,13 @@ fn loggable_headers(headers: &HeaderMap, allowlist: &[&str]) -> Map<String, Valu
     logged
 }
 
-/// Client-visible body length when it is known up front. A pipe without an
-/// upstream `Content-Length` stays `null`; its bytes are never buffered for
-/// logging.
+/// Buffered body length. A streamed body is counted by the relay that writes
+/// its completion log, so its payload starts from `null`.
 fn script_body_size(response: &ScriptResponse) -> Option<u64> {
     match &response.body {
         ResponseBody::Text(text) => u64::try_from(text.len()).ok(),
         ResponseBody::Bytes(bytes) => u64::try_from(bytes.len()).ok(),
-        ResponseBody::Stream(_) => response
-            .headers
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-            .and_then(|(_, value)| value.parse::<u64>().ok()),
+        ResponseBody::Stream(_) => None,
     }
 }
 
@@ -327,13 +341,62 @@ fn elapsed_ms(started: Instant) -> f64 {
     (millis * 100.0).round() / 100.0
 }
 
-/// Map a script response body onto the HTTP body. `ctx.http.pipe` keeps
-/// streaming from the upstream connection instead of buffering here.
-fn script_body(body: ResponseBody) -> Body {
-    match body {
-        ResponseBody::Text(text) => Body::from(text.into_bytes()),
-        ResponseBody::Bytes(bytes) => Body::from(bytes),
-        ResponseBody::Stream(stream) => Body::from_stream(ReceiverStream::new(stream)),
+/// Relay a piped body to the client and write the request log when it ends.
+/// The status line is already on the wire, so a mid-stream failure is recorded
+/// in the log without changing the client-visible status.
+fn stream_body(pipe: upstream::PipeBody, payload: Value, started: Instant) -> Body {
+    let upstream::PipeBody { stream, call } = pipe;
+    let (sender, receiver) =
+        tokio::sync::mpsc::channel::<Result<Bytes, io::Error>>(STREAM_CHANNEL_CAPACITY);
+    tokio::spawn(async move {
+        relay_stream(stream, call, sender, payload, started).await;
+    });
+    Body::from_stream(ReceiverStream::new(receiver))
+}
+
+async fn relay_stream(
+    mut stream: upstream::BodyStream,
+    call: upstream::StreamCall,
+    sender: tokio::sync::mpsc::Sender<Result<Bytes, io::Error>>,
+    mut payload: Value,
+    started: Instant,
+) {
+    let mut bytes = 0_u64;
+    let mut outcome = upstream::StreamOutcome::Complete;
+    let mut terminal_error = None;
+    loop {
+        tokio::select! {
+            item = stream.recv() => match item {
+                Some(Ok(chunk)) => {
+                    bytes = bytes.saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+                    if sender.send(Ok(Bytes::from(chunk))).await.is_err() {
+                        outcome = upstream::StreamOutcome::ClientDisconnected;
+                        break;
+                    }
+                }
+                Some(Err(error)) => {
+                    outcome = upstream::StreamOutcome::UpstreamError;
+                    terminal_error = Some(error);
+                    break;
+                }
+                None => break,
+            },
+            () = sender.closed() => {
+                outcome = upstream::StreamOutcome::ClientDisconnected;
+                break;
+            }
+        }
+    }
+    call.finish(outcome, bytes);
+    payload["response_body_bytes"] = json!(bytes);
+    payload["elapsed_ms"] = json!(elapsed_ms(started));
+    payload["upstream_calls"] = json!(call.calls_json());
+    if let Some(class) = outcome.error_class() {
+        payload["error"] = json!(class);
+    }
+    log(&payload);
+    if let Some(error) = terminal_error {
+        let _ = sender.send(Err(error)).await;
     }
 }
 

@@ -8,6 +8,7 @@
 //! channel of frames, so bytes never enter the script heap.
 use std::cell::OnceCell;
 use std::io::Read;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -36,6 +37,7 @@ pub struct CallRecord {
     host: Option<String>,
     path: Option<String>,
     status: Option<u16>,
+    response_bytes: Option<u64>,
     duration_ms: Option<f64>,
     redirects: u8,
     error: Option<&'static str>,
@@ -49,6 +51,7 @@ impl CallRecord {
             host: None,
             path: None,
             status: None,
+            response_bytes: None,
             duration_ms: None,
             redirects: 0,
             error: None,
@@ -64,6 +67,7 @@ impl CallRecord {
             "host": self.host,
             "path": self.path,
             "status": self.status,
+            "response_bytes": self.response_bytes,
             "duration_ms": self.duration_ms,
             "redirects": self.redirects,
             "error": self.error,
@@ -75,6 +79,15 @@ impl CallRecord {
 /// Shared per-request upstream call chain. The worker thread appends; the
 /// request handler reads it even when a timeout orphans the worker.
 pub type CallLog = Arc<Mutex<Vec<CallRecord>>>;
+
+/// Snapshot a request's upstream call chain for the structured log.
+#[must_use]
+pub fn calls_json(calls: &CallLog) -> Vec<Json> {
+    calls.lock().map_or_else(
+        |_| Vec::new(),
+        |calls| calls.iter().map(CallRecord::to_json).collect(),
+    )
+}
 
 /// Per-request allowlist and timeout guard for upstream calls.
 #[derive(Debug)]
@@ -98,13 +111,97 @@ pub struct Response {
 /// Streamed body frames for `ctx.http.pipe`; they never enter the script heap.
 pub type BodyStream = tokio::sync::mpsc::Receiver<Result<Vec<u8>, std::io::Error>>;
 
+/// How a piped body ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamOutcome {
+    Complete,
+    UpstreamError,
+    ClientDisconnected,
+}
+
+impl StreamOutcome {
+    /// Request-log error class when the stream did not complete normally.
+    #[must_use]
+    pub fn error_class(self) -> Option<&'static str> {
+        match self {
+            Self::Complete => None,
+            Self::UpstreamError => Some("upstream_stream_error"),
+            Self::ClientDisconnected => Some("client_disconnected"),
+        }
+    }
+}
+
+/// Handle used to finalize one piped call after its body ends. Dropping it
+/// without an explicit finish records an abandoned stream, so the call chain
+/// never keeps a half-open entry when a script discards a piped response.
+#[derive(Debug)]
+pub struct StreamCall {
+    calls: CallLog,
+    index: usize,
+    started: Instant,
+    finished: AtomicBool,
+}
+
+impl StreamCall {
+    fn new(calls: CallLog, index: usize, started: Instant) -> Self {
+        Self {
+            calls,
+            index,
+            started,
+            finished: AtomicBool::new(false),
+        }
+    }
+
+    /// Finalize this call with the outcome of its body stream.
+    pub fn finish(&self, outcome: StreamOutcome, bytes: u64) {
+        self.finalize(Some(outcome), bytes);
+    }
+
+    fn finalize(&self, outcome: Option<StreamOutcome>, bytes: u64) {
+        if self.finished.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let Ok(mut calls) = self.calls.lock() else {
+            return;
+        };
+        let Some(record) = calls.get_mut(self.index) else {
+            return;
+        };
+        record.duration_ms = Some(elapsed_ms(self.started.elapsed()));
+        record.response_bytes = Some(bytes);
+        if outcome == Some(StreamOutcome::UpstreamError) {
+            record.error = Some("upstream_stream_error");
+            record.kind = Some("transport");
+        }
+    }
+
+    /// Snapshot the call chain after this stream finalized it.
+    #[must_use]
+    pub fn calls_json(&self) -> Vec<Json> {
+        calls_json(&self.calls)
+    }
+}
+
+impl Drop for StreamCall {
+    fn drop(&mut self) {
+        self.finalize(None, 0);
+    }
+}
+
+/// Piped body plus the call handle finalized when the stream ends.
+#[derive(Debug)]
+pub struct PipeBody {
+    pub stream: BodyStream,
+    pub call: StreamCall,
+}
+
 /// Client response produced by `ctx.http.pipe`: status and headers are decided
 /// here, the body streams from the upstream connection as it arrives.
 #[derive(Debug)]
 pub struct PipeResponse {
     pub status: u16,
     pub headers: Vec<(String, String)>,
-    pub body: BodyStream,
+    pub body: PipeBody,
 }
 
 /// Category of a transport-layer failure. These stable strings are the only
@@ -212,7 +309,10 @@ impl UpstreamAccess {
         let started = Instant::now();
         let result = self.get_inner(call, index);
         if let Ok(response) = &result {
-            self.update_call(index, |record| record.status = Some(response.status));
+            self.update_call(index, |record| {
+                record.status = Some(response.status);
+                record.response_bytes = u64::try_from(response.body.len()).ok();
+            });
         }
         self.finish_call(index, started, result.as_ref().err());
         result
@@ -268,12 +368,19 @@ impl UpstreamAccess {
     pub fn pipe(&self, call: &Json) -> Result<PipeResponse, Error> {
         let index = self.begin_call("http.pipe");
         let started = Instant::now();
-        let result = self.pipe_inner(call, index);
-        self.finish_call(index, started, result.as_ref().err());
+        let result = self.pipe_inner(call, index, started);
+        if let Err(error) = &result {
+            self.finish_call(index, started, Some(error));
+        }
         result
     }
 
-    fn pipe_inner(&self, call: &Json, index: usize) -> Result<PipeResponse, Error> {
+    fn pipe_inner(
+        &self,
+        call: &Json,
+        index: usize,
+        started: Instant,
+    ) -> Result<PipeResponse, Error> {
         let call = self.parse_pipe_call(call)?;
         let url = Url::parse(&call.url)
             .map_err(|error| Error::InvalidUrl(format!("ctx.http.pipe: invalid URL: {error}")))?;
@@ -314,13 +421,16 @@ impl UpstreamAccess {
             }
         }
         let status = client_status.unwrap_or(upstream_status);
-        let (sender, body) = tokio::sync::mpsc::channel(PIPE_CHANNEL_CAPACITY);
+        let (sender, stream) = tokio::sync::mpsc::channel(PIPE_CHANNEL_CAPACITY);
         let reader = response.into_body().into_reader();
         tokio::task::spawn_blocking(move || pump_body(reader, sender));
         Ok(PipeResponse {
             status,
             headers,
-            body,
+            body: PipeBody {
+                stream,
+                call: StreamCall::new(self.calls.clone(), index, started),
+            },
         })
     }
 
