@@ -66,9 +66,6 @@ fn serve(path: &Path, verbose: bool) -> i32 {
             return 2;
         }
     };
-    // tradeoff: --verbose is accepted now so runbooks can pin the flag; the
-    // detail payload itself lands with the observability slice (T7).
-    let _ = verbose;
     let addr = match server::bind_address(&config) {
         Ok(addr) => addr,
         Err(err) => {
@@ -87,7 +84,7 @@ fn serve(path: &Path, verbose: bool) -> i32 {
         }
     };
     // run() binds the socket and only then announces the listening address.
-    match runtime.block_on(server::run(config, addr)) {
+    match runtime.block_on(server::run(config, addr, verbose)) {
         Ok(()) => 0,
         Err(err) => {
             eprintln!("runtime error: {err}");

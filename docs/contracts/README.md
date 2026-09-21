@@ -8,7 +8,7 @@ Stunt Double exposes three public contracts. They evolve separately and are trac
 | --- | --- | --- | --- |
 | [Configuration](config.md) | stable for v0.x slice T6 | v0.x | Breaking changes allowed before 1.0 with a deprecation window |
 | [`ctx` API](ctx-api.md) | draft (T6 subset implemented) | `apiVersion` 1 | Additive within an `apiVersion`; removals require a new version |
-| [CLI](cli.md) | stable for v0.x slice T6 | v0.x | Breaking changes allowed before 1.0 with a deprecation window |
+| [CLI](cli.md) | stable for v0.x slice T7 | v0.x | Breaking changes allowed before 1.0 with a deprecation window |
 
 ## Change process
 

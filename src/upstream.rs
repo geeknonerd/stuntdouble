@@ -8,6 +8,7 @@
 //! channel of frames, so bytes never enter the script heap.
 use std::cell::OnceCell;
 use std::io::Read;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -28,6 +29,53 @@ const PIPE_CHANNEL_CAPACITY: usize = 4;
 /// Read size for one pipe frame.
 const PIPE_CHUNK_BYTES: usize = 64 * 1024;
 
+/// One upstream call attempt, serialized into the per-request log line.
+#[derive(Debug, Clone)]
+pub struct CallRecord {
+    api: &'static str,
+    host: Option<String>,
+    path: Option<String>,
+    status: Option<u16>,
+    duration_ms: Option<f64>,
+    redirects: u8,
+    error: Option<&'static str>,
+    kind: Option<&'static str>,
+}
+
+impl CallRecord {
+    fn new(api: &'static str) -> Self {
+        Self {
+            api,
+            host: None,
+            path: None,
+            status: None,
+            duration_ms: None,
+            redirects: 0,
+            error: None,
+            kind: None,
+        }
+    }
+
+    /// Log shape shared by every upstream call. Query strings never enter it.
+    #[must_use]
+    pub fn to_json(&self) -> Json {
+        json!({
+            "api": self.api,
+            "host": self.host,
+            "path": self.path,
+            "status": self.status,
+            "duration_ms": self.duration_ms,
+            "redirects": self.redirects,
+            "error": self.error,
+            "kind": self.kind,
+        })
+    }
+}
+
+/// Shared per-request upstream call chain. The worker thread appends; the
+/// request handler reads it even when a timeout orphans the worker.
+pub type CallLog = Arc<Mutex<Vec<CallRecord>>>;
+
 /// Per-request allowlist and timeout guard for upstream calls.
 #[derive(Debug)]
 pub struct UpstreamAccess {
@@ -36,6 +84,7 @@ pub struct UpstreamAccess {
     script_deadline: Instant,
     /// Client `Range` request header; only `ctx.http.pipe` forwards it.
     client_range: Option<String>,
+    calls: CallLog,
 }
 
 /// HTTP response returned to the script as `{status, headers, text(), bytes()}`.
@@ -58,6 +107,26 @@ pub struct PipeResponse {
     pub body: BodyStream,
 }
 
+/// Category of a transport-layer failure. These stable strings are the only
+/// transport detail allowed to reach a client-visible diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportKind {
+    Timeout,
+    Dns,
+    Other,
+}
+
+impl TransportKind {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::Dns => "dns",
+            Self::Other => "transport",
+        }
+    }
+}
+
 /// Why `ctx.http.get` did not return a response.
 #[derive(Debug)]
 pub enum Error {
@@ -71,8 +140,12 @@ pub enum Error {
     /// more than 3 hops, or a Location it cannot resolve. Raised only by
     /// `ctx.http.pipe`; an allowlist rejection stays a policy error.
     Redirect(String),
-    /// DNS, connection, TLS, or timeout failure.
-    Transport(String),
+    /// DNS, connection, TLS, or timeout failure. The message stays
+    /// operator-facing; `kind` is the only part that may reach a client.
+    Transport {
+        kind: TransportKind,
+        message: String,
+    },
     /// The upstream answered with a final non-2xx status. `ctx.http.pipe`
     /// cannot hand a streaming body to the script, so it raises this
     /// catchable error and the script maps the route's client-visible code.
@@ -87,7 +160,7 @@ impl Error {
             Self::Policy(_) => "script_error",
             Self::InvalidUrl(_) => "upstream_url_invalid",
             Self::Redirect(_) => "upstream_redirect_error",
-            Self::Transport(_) => "upstream_unreachable",
+            Self::Transport { .. } => "upstream_unreachable",
             Self::Status(_) => "upstream_http_error",
         }
     }
@@ -99,8 +172,17 @@ impl Error {
             Self::Policy(message)
             | Self::InvalidUrl(message)
             | Self::Redirect(message)
-            | Self::Transport(message) => message.clone(),
+            | Self::Transport { message, .. } => message.clone(),
             Self::Status(status) => format!("ctx.http.pipe: upstream returned status {status}"),
+        }
+    }
+
+    /// Stable transport kind for logs and `--verbose` detail.
+    #[must_use]
+    pub fn transport_kind(&self) -> Option<&'static str> {
+        match self {
+            Self::Transport { kind, .. } => Some(kind.as_str()),
+            Self::Policy(_) | Self::InvalidUrl(_) | Self::Redirect(_) | Self::Status(_) => None,
         }
     }
 }
@@ -113,25 +195,45 @@ impl UpstreamAccess {
         timeout: Duration,
         script_deadline: Instant,
         client_range: Option<String>,
+        calls: CallLog,
     ) -> Self {
         Self {
             allow_hosts,
             default_timeout: timeout,
             script_deadline,
             client_range,
+            calls,
         }
     }
 
     /// Perform one `ctx.http.get` call from its JSON bridge payload.
     pub fn get(&self, call: &Json) -> Result<Response, Error> {
+        let index = self.begin_call("http.get");
+        let started = Instant::now();
+        let result = self.get_inner(call, index);
+        if let Ok(response) = &result {
+            self.update_call(index, |record| record.status = Some(response.status));
+        }
+        self.finish_call(index, started, result.as_ref().err());
+        result
+    }
+
+    fn get_inner(&self, call: &Json, index: usize) -> Result<Response, Error> {
         let call = self.parse_get_call(call)?;
         let url = Url::parse(&call.url)
             .map_err(|error| Error::Policy(format!("ctx.http.get: invalid URL: {error}")))?;
+        self.record_url(index, &url);
         self.validate(&url, Error::Policy)?;
 
         let deadline = Instant::now() + self.budget(call.timeout)?;
-        let response =
-            self.send_following_redirects(url, deadline, None, "ctx.http.get", Error::Policy)?;
+        let response = self.send_following_redirects(
+            url,
+            deadline,
+            None,
+            "ctx.http.get",
+            Error::Policy,
+            index,
+        )?;
 
         let status = response.status();
         let headers = response
@@ -164,9 +266,18 @@ impl UpstreamAccess {
     /// non-2xx answer is a catchable `upstream_http_error`, because a piped
     /// body cannot be inspected by the script.
     pub fn pipe(&self, call: &Json) -> Result<PipeResponse, Error> {
+        let index = self.begin_call("http.pipe");
+        let started = Instant::now();
+        let result = self.pipe_inner(call, index);
+        self.finish_call(index, started, result.as_ref().err());
+        result
+    }
+
+    fn pipe_inner(&self, call: &Json, index: usize) -> Result<PipeResponse, Error> {
         let call = self.parse_pipe_call(call)?;
         let url = Url::parse(&call.url)
             .map_err(|error| Error::InvalidUrl(format!("ctx.http.pipe: invalid URL: {error}")))?;
+        self.record_url(index, &url);
         self.validate(&url, Error::InvalidUrl)?;
         // `ctx.http.pipe` keeps the configured upstream timeout; its opts are
         // (status, headers) only, so a pipe borrows the whole remaining budget.
@@ -177,8 +288,10 @@ impl UpstreamAccess {
             self.client_range.as_deref(),
             "ctx.http.pipe",
             Error::Redirect,
+            index,
         )?;
         let upstream_status = response.status().as_u16();
+        self.update_call(index, |record| record.status = Some(upstream_status));
         if !(200..=299).contains(&upstream_status) {
             return Err(Error::Status(upstream_status));
         }
@@ -209,6 +322,45 @@ impl UpstreamAccess {
             headers,
             body,
         })
+    }
+
+    fn begin_call(&self, api: &'static str) -> usize {
+        let Ok(mut calls) = self.calls.lock() else {
+            return usize::MAX;
+        };
+        calls.push(CallRecord::new(api));
+        calls.len() - 1
+    }
+
+    fn update_call(&self, index: usize, update: impl FnOnce(&mut CallRecord)) {
+        let Ok(mut calls) = self.calls.lock() else {
+            return;
+        };
+        if let Some(record) = calls.get_mut(index) {
+            update(record);
+        }
+    }
+
+    fn finish_call(&self, index: usize, started: Instant, error: Option<&Error>) {
+        self.update_call(index, |record| {
+            record.duration_ms = Some(elapsed_ms(started.elapsed()));
+            if let Some(error) = error {
+                record.error = Some(error.code());
+                record.kind = error.transport_kind();
+                if let Error::Status(status) = error {
+                    record.status = Some(*status);
+                }
+            }
+        });
+    }
+
+    fn record_url(&self, index: usize, url: &Url) {
+        let host = url.host_str().map(str::to_string);
+        let path = Some(url.path().to_string());
+        self.update_call(index, |record| {
+            record.host = host;
+            record.path = path;
+        });
     }
 
     /// Effective upstream budget for one call: the smaller of the remaining
@@ -245,6 +397,7 @@ impl UpstreamAccess {
         range: Option<&str>,
         call: &str,
         redirect_error: fn(String) -> Error,
+        index: usize,
     ) -> Result<ureq::http::Response<ureq::Body>, Error> {
         let mut redirects = 0_u8;
         loop {
@@ -269,6 +422,8 @@ impl UpstreamAccess {
                     self.validate(&next, redirect_error)?;
                     url = next;
                     redirects += 1;
+                    self.update_call(index, |record| record.redirects = redirects);
+                    self.record_url(index, &url);
                     continue;
                 }
             }
@@ -448,8 +603,15 @@ fn reply_margin(remaining: Duration) -> Duration {
     std::cmp::min(remaining / 10, Duration::from_millis(100))
 }
 
+fn elapsed_ms(elapsed: Duration) -> f64 {
+    (elapsed.as_secs_f64() * 1000.0 * 100.0).round() / 100.0
+}
+
 fn timeout_error() -> Error {
-    Error::Transport("ctx.http: upstream timeout".into())
+    Error::Transport {
+        kind: TransportKind::Timeout,
+        message: "ctx.http: upstream timeout".into(),
+    }
 }
 
 /// Move upstream bytes into the response channel until the body ends, fails,
@@ -520,11 +682,17 @@ fn map_ureq_error(error: ureq::Error) -> Error {
         ureq::Error::BadUri(message) => Error::Policy(format!("ctx.http: invalid URL: {message}")),
         ureq::Error::Http(error) => Error::Policy(format!("ctx.http: invalid request: {error}")),
         ureq::Error::Timeout(_) => timeout_error(),
-        ureq::Error::HostNotFound => Error::Transport("ctx.http: upstream host not found".into()),
+        ureq::Error::HostNotFound => Error::Transport {
+            kind: TransportKind::Dns,
+            message: "ctx.http: upstream host not found".into(),
+        },
         ureq::Error::BodyExceedsLimit(limit) => Error::Policy(format!(
             "ctx.http.get: upstream response body exceeds the {limit}-byte limit"
         )),
-        other => Error::Transport(format!("ctx.http: {other}")),
+        other => Error::Transport {
+            kind: TransportKind::Other,
+            message: format!("ctx.http: {other}"),
+        },
     }
 }
 

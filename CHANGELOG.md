@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Seventh implementation slice (T7): every request now writes one structured log line with the
+  matched route, script duration, ordered upstream call chain (`api`, `host`, `path`, `status`,
+  `duration_ms`, `redirects`, `error`/`kind`), request/response body sizes, and allowlisted headers;
+  request and response bodies, cookies, and authorization headers are never logged. `serve --verbose`
+  now attaches a stable `detail` string to 500/502 JSON error bodies (for example
+  `upstream transport failure: timeout`); without the flag, error bodies keep only `error` and
+  `request_id`. Stack traces, script messages, upstream bodies, hostnames, and URLs never reach
+  clients in either mode, and a client `X-Request-ID` is recorded as `client_request_id` but never
+  adopted or forwarded upstream.
 - `docs/guide/getting-started.md` and its `.zh-CN.md` translation walk through the first route, `validate`/`serve`, and an allowlisted `ctx.http.get` call; the Chinese translations of the public contracts, the Pages landing page, and the demo README ship alongside it.
 - Sixth implementation slice (T6): `ctx.http.pipe(url, {status, headers})` streams one allowlisted
   upstream 2xx body straight to the client without entering the script heap. The client `Range` request
