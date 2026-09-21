@@ -1,19 +1,26 @@
-// Type definitions for the Stunt Double `ctx` API, apiVersion 1.
-// This file is part of the public contract: docs/contracts/ctx-api.md.
-// It covers the T2-T6 subset; T8 (#11) publishes it with release artifacts
-// and extends it as later capability groups land.
+// Type definitions for the Stunt Double host-injected `ctx` object, apiVersion 1.
+//
+// This file is part of the public contract; the release artifact set defined by
+// plans/adr/0012-release-artifacts-and-supply-chain.md must include it. T9 wires
+// the release pipeline.
+// It covers the first-slice subset implemented by T1-T8; pending capabilities
+// are intentionally absent until they land. Keep this file in sync with
+// docs/contracts/ctx-api.md.
 
 /** A read-only snapshot of the incoming client request. */
 interface SdRequest {
   readonly method: string;
   readonly path: string;
   readonly params: Readonly<Record<string, string>>;
+  /** Percent-decoded query names and values; a repeated name keeps the last value. */
   readonly query: Readonly<Record<string, string>>;
+  /** Lowercased header names; a repeated name keeps the last value. */
   readonly headers: Readonly<Record<string, string>>;
+  /** `null` when the request body is not valid UTF-8. */
   readonly bodyText: string | null;
 }
 
-/** An allowlisted upstream HTTP response. */
+/** An allowlisted upstream HTTP response returned by `ctx.http.get`. */
 interface SdUpstreamResponse {
   readonly status: number;
   readonly headers: Readonly<Record<string, string>>;
@@ -33,11 +40,11 @@ interface SdHttpGetOptions {
 
 interface SdHttpPipeOptions {
   /**
-   * Client response status; defaults to the upstream 2xx status (for example
-   * 200, or 206 for a partial response). Must be an integer in [100, 599].
+   * Client Response status; defaults to the upstream 2xx status (for example
+   * 200, or 206 for a partial Response). Must be an integer in [100, 599].
    */
   status?: number;
-  headers?: SdRespondHeaders | ReadonlyArray<readonly [string, string]>;
+  headers?: SdHeaders;
 }
 
 interface SdHttp {
@@ -45,8 +52,8 @@ interface SdHttp {
   /**
    * Streams the upstream body to the client without entering the script heap.
    * The client Range header is forwarded, and an upstream 206 keeps its
-   * Content-Range header. Returns true when it produced the response, or
-   * false when an earlier response already won. A final non-2xx upstream
+   * Content-Range header. Returns true when it produced the Response, or
+   * false when an earlier Response already won. A final non-2xx upstream
    * answer throws a catchable error with code "upstream_http_error".
    */
   pipe(url: string, opts?: SdHttpPipeOptions): boolean;
@@ -58,39 +65,44 @@ interface SdRespondHeaders {
   readonly [name: string]: SdHeaderValue;
 }
 
+type SdHeaderPairs = ReadonlyArray<readonly [string, string]>;
+type SdHeaders = SdRespondHeaders | SdHeaderPairs;
+
 interface SdLog {
   info(...values: unknown[]): void;
   warn(...values: unknown[]): void;
   error(...values: unknown[]): void;
 }
 
+type SdErrorCode =
+  | "script_error"
+  | "upstream_url_invalid"
+  | "upstream_redirect_error"
+  | "upstream_unreachable"
+  | "upstream_http_error";
+
+/** Host-created errors carry a stable `code`; ordinary script errors may omit it. */
 interface SdError extends Error {
-  /**
-   * Host errors use "script_error" (policy and validation failures),
-   * "upstream_url_invalid" (ctx.http.pipe URL or scheme rejection),
-   * "upstream_redirect_error" (an unfollowable ctx.http.pipe redirect chain),
-   * "upstream_unreachable" (transport failures), or "upstream_http_error"
-   * (a final non-2xx answer to ctx.http.pipe).
-   */
-  code?:
-    | "script_error"
-    | "upstream_url_invalid"
-    | "upstream_redirect_error"
-    | "upstream_unreachable"
-    | "upstream_http_error";
+  readonly code?: SdErrorCode;
 }
 
+/** Host-injected global available in every Route script. */
 interface SdContext {
   readonly apiVersion: "1";
   readonly request: SdRequest;
   readonly http: SdHttp;
   readonly env: Readonly<Record<string, string>>;
   readonly log: SdLog;
+  /**
+   * Produces the client Response. The first call wins and returns true;
+   * later calls are ignored and return false. Bytes must be integers in [0, 255].
+   */
   respond(
     status: number,
-    headers?: SdRespondHeaders | ReadonlyArray<readonly [string, string]>,
+    headers?: SdHeaders,
     body?: string | Uint8Array | ArrayBuffer | readonly number[],
   ): boolean;
 }
 
+/** Host-injected global available in every Route script. */
 declare const ctx: SdContext;
