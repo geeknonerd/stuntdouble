@@ -139,18 +139,10 @@ enum Handled {
     Responded(ScriptResponse),
 }
 
-/// Bind address from configuration. Only numeric IP accepted in T1.
-pub fn bind_address(config: &Config) -> io::Result<SocketAddr> {
-    let ip: std::net::IpAddr = config.server.bind.parse().map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "server.bind must be an IP address, got {:?}",
-                config.server.bind
-            ),
-        )
-    })?;
-    Ok(SocketAddr::new(ip, config.server.port))
+/// Bind address from configuration. The loader has already validated the IP literal.
+#[must_use]
+pub fn bind_address(config: &Config) -> SocketAddr {
+    SocketAddr::new(config.server.bind, config.server.port)
 }
 
 pub async fn run(config: Config, addr: SocketAddr, verbose: bool) -> io::Result<()> {

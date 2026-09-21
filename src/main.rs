@@ -66,13 +66,7 @@ fn serve(path: &Path, verbose: bool) -> i32 {
             return 2;
         }
     };
-    let addr = match server::bind_address(&config) {
-        Ok(addr) => addr,
-        Err(err) => {
-            eprintln!("{}: configuration error: {err}", path.display());
-            return 2;
-        }
-    };
+    let addr = server::bind_address(&config);
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

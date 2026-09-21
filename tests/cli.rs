@@ -458,6 +458,76 @@ fn validate_rejects_unknown_keys() {
 }
 
 #[test]
+fn validate_rejects_unknown_config_version() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let version_two = good_config().replace("config_version = \"1\"", "config_version = \"2\"");
+    let config = fixture(dir.path(), 3000, &version_two);
+    let (code, _, stderr) = run(&["validate", "--config", config.to_str().unwrap()]);
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert!(
+        stderr.contains("config_version: expected \"1\", got string \"2\""),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn validate_rejects_non_ip_server_bind() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let hostname = good_config().replace("bind = \"127.0.0.1\"", "bind = \"localhost\"");
+    let config = fixture(dir.path(), 3000, &hostname);
+    let (code, _, stderr) = run(&["validate", "--config", config.to_str().unwrap()]);
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert!(
+        stderr.contains("server.bind: expected IP address literal, got string \"localhost\""),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn validate_rejects_empty_routes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let empty = r#"config_version = "1"
+routes = []
+
+[server]
+
+[files]
+root = "./files"
+"#;
+    let config = fixture(dir.path(), 3000, empty);
+    let (code, _, stderr) = run(&["validate", "--config", config.to_str().unwrap()]);
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert!(
+        stderr.contains("routes: expected at least one route table, got array of 0"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn validate_reports_route_and_files_root_violations_together() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let broken = r#"config_version = "1"
+routes = []
+
+[server]
+
+[files]
+root = "./nowhere"
+"#;
+    let config = fixture(dir.path(), 3000, broken);
+    let (code, _, stderr) = run(&["validate", "--config", config.to_str().unwrap()]);
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert!(
+        stderr.contains("routes: expected at least one route table"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("files.root: expected existing directory"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
 fn validate_requires_existing_static_file_root() {
     let dir = tempfile::tempdir().expect("tempdir");
     let moved = good_config().replace("./files", "./nowhere");
