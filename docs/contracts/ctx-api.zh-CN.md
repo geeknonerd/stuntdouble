@@ -57,7 +57,7 @@
   - 上游响应在 `[200, 299]` 范围时开始流式传输。最终非 2xx 响应抛出可捕获错误，其 `error.code` 为 `"upstream_http_error"`；URL 无法解析或 scheme 不是 `http`/`https` 时抛出 `"upstream_url_invalid"`；宿主无法跟随的重定向链（超过 3 跳或 `Location` 不可用）抛出 `"upstream_redirect_error"`；DNS、连接、TLS 与超时失败抛出 `"upstream_unreachable"`；allowlist 拒绝抛出 `"script_error"`。
   - 第一次 `ctx.respond` 或 `ctx.http.pipe` 调用生效；之后的调用被忽略、返回 `false`，并在服务端产生警告。未捕获的 `upstream_http_error` 是普通脚本错误（500 `script_error`），绝不变成 `502 upstream_unreachable`。
   - 上游 body 读取始终受有效上游超时约束；已经开始流式传输的 body 不能被变换，也不能转成缓冲 Response；需要字节的脚本请用 `ctx.http.get`。流一旦开始，body 中途的上游失败只能截断客户端 body，因为状态与 headers 已经在网络上发出。宿主会在请求日志中把该失败记为 `upstream_stream_error`；日志字段见 [CLI 契约](./cli.zh-CN.md)。
-- `ctx.file.readText(path)` 与 `ctx.file.readBytes(path)` 读取配置的静态文件根内的一个文件。路径相对于 `[files] root`；绝对路径与任何 `..` 组件在解析前即被拒绝，符号链接只有在规范化后的目标仍位于规范化根内时才会被跟随。`readText` 以严格 UTF-8 解码；`readBytes` 返回 `Uint8Array`。两者上限均为 8 MiB，并抛出可捕获错误：
+- `ctx.file.readText(path)` 与 `ctx.file.readBytes(path)` 读取配置的静态文件根内的一个文件。路径是相对于 `[files] root` 的文件系统路径，绝不按 URL 或其它平台的路径语法解析；绝对路径与任何 `..` 组件在解析前即被拒绝，符号链接只有在规范化后的目标仍位于规范化根内时才会被跟随。`readText` 以严格 UTF-8 解码；`readBytes` 返回 `Uint8Array`。两者上限均为 8 MiB，并抛出可捕获错误：
   - `file_path_invalid` —— 绝对路径、`..` 组件、空路径，或逃逸出根的符号链接；
   - `file_not_found` —— 解析后的路径上没有文件；
   - `file_too_large` —— 文件超过 8 MiB 缓冲读取上限；

@@ -1705,6 +1705,7 @@ ctx.respond(200, {}, ctx.file.stream(ctx.request.query.file));
                 &[("Range", "bytes=0-1"), ("Range", "bytes=3-4")],
             ),
             request_raw_range(port, digits, b"bytes=\x80"),
+            range_request(port, "digits.txt", "bytes=0 - 3"),
         ]
     });
     let expected = [
@@ -1712,6 +1713,7 @@ ctx.respond(200, {}, ctx.file.stream(ctx.request.query.file));
         "bytes */10",
         "bytes */10",
         "bytes */0",
+        "bytes */10",
         "bytes */10",
         "bytes */10",
     ];
@@ -1730,7 +1732,7 @@ ctx.respond(200, {}, ctx.file.stream(ctx.request.query.file));
         .filter(|line| line.contains("\"request_id\""))
         .map(|line| serde_json::from_str(line).expect("structured log json"))
         .collect();
-    assert_eq!(logs.len(), 6, "stderr: {stderr}");
+    assert_eq!(logs.len(), 7, "stderr: {stderr}");
     for log in logs {
         assert_eq!(log["file_calls"][0]["api"], "file.stream");
         assert_eq!(log["file_calls"][0]["bytes"], 0, "log: {log}");
@@ -1915,6 +1917,70 @@ ctx.respond(200, {}, code);
     });
     assert_eq!(response.status, 200, "body: {}", response.body);
     assert_eq!(response.body, "file_io_error");
+}
+
+#[cfg(unix)]
+#[test]
+fn ctx_file_rejects_non_regular_files_without_blocking() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("files")).expect("files dir");
+    let fifo = dir.path().join("files/pipe");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("run mkfifo");
+    assert!(status.success(), "mkfifo failed with {status}");
+    let script = r#"
+var code = "read unexpectedly succeeded";
+try { ctx.file.readText("pipe"); } catch (error) { code = error.code; }
+ctx.respond(200, {}, code);
+"#;
+    // Short deadline: without the pre-open check the FIFO open blocks until
+    // the script timeout, so the assertion fails fast instead of hanging.
+    let config = with_sandbox(good_config(), 500);
+    let (response, _) = serve_and_run(
+        |port| fixture_with_script(dir.path(), port, &config, script),
+        &[],
+        &[],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(response.body, "file_io_error");
+}
+
+#[test]
+fn ctx_file_never_resolves_url_style_or_platform_specific_names_outside_the_root() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("files")).expect("files dir");
+    let script = r#"
+function code(path) {
+  try { ctx.file.readText(path); return "read unexpectedly succeeded"; } catch (error) { return error.code; }
+}
+ctx.respond(200, {}, JSON.stringify({
+  url: code("file:///etc/passwd"),
+  drive: code("C:\\Windows\\win.ini"),
+  backslash: code("..\\..\\secret")
+}));
+"#;
+    let (response, _) = serve_fixture_dir(dir.path(), script, |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    // URL-shaped strings stay relative names inside the root, never system paths.
+    assert_eq!(json["url"], "file_not_found");
+    #[cfg(unix)]
+    {
+        // Backslashes are ordinary name bytes on Unix, so these stay in-root.
+        assert_eq!(json["drive"], "file_not_found");
+        assert_eq!(json["backslash"], "file_not_found");
+    }
+    #[cfg(windows)]
+    {
+        // On Windows the same strings are absolute and parent-directory escapes.
+        assert_eq!(json["drive"], "file_path_invalid");
+        assert_eq!(json["backslash"], "file_path_invalid");
+    }
 }
 
 #[test]

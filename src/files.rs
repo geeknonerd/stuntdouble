@@ -293,15 +293,22 @@ impl FileAccess {
 
     fn open(&self, raw: &str) -> Result<(File, u64), Error> {
         let (target, root) = self.resolve(raw)?;
-        let file = File::open(&target).map_err(|error| map_open_error(&error))?;
-        let metadata = file
-            .metadata()
-            .map_err(|error| Error::Io(error.to_string()))?;
+        // Check the path type before opening: a FIFO would block `File::open`
+        // until a writer appears, which must surface as a `file_io_error`
+        // instead of hanging the script past its deadline.
+        let metadata = std::fs::metadata(&target).map_err(|error| map_open_error(&error))?;
         if !metadata.is_file() {
             return Err(Error::Io("path is not a regular file".to_string()));
         }
+        let file = File::open(&target).map_err(|error| map_open_error(&error))?;
+        let opened = file
+            .metadata()
+            .map_err(|error| Error::Io(error.to_string()))?;
+        if !opened.is_file() {
+            return Err(Error::Io("path is not a regular file".to_string()));
+        }
         self.verify_open_target(&file, &root)?;
-        Ok((file, metadata.len()))
+        Ok((file, opened.len()))
     }
 
     /// Resolve one script-supplied path inside the root with component-based
@@ -397,17 +404,17 @@ pub fn decide_range(size: u64, range: Option<&str>) -> RangeDecision {
     let Some(header) = range else {
         return RangeDecision::Full;
     };
+    // Only the surrounding OWS allowed on a field value is dropped; interior
+    // whitespace is not valid in a range spec and must answer 416.
     let Some((unit, spec)) = header.trim().split_once('=') else {
         return RangeDecision::Unsatisfiable;
     };
-    let spec = spec.trim();
-    if !unit.trim().eq_ignore_ascii_case("bytes") || spec.contains(',') || size == 0 {
+    if !unit.eq_ignore_ascii_case("bytes") || spec.contains(',') || size == 0 {
         return RangeDecision::Unsatisfiable;
     }
     let Some((first, last)) = spec.split_once('-') else {
         return RangeDecision::Unsatisfiable;
     };
-    let (first, last) = (first.trim(), last.trim());
     if first.is_empty() {
         // suffix-byte-range-spec: `bytes=-N` asks for the last N bytes.
         let Some(suffix) = parse_index(last) else {
