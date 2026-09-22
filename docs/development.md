@@ -186,6 +186,16 @@ lychee --offline --no-progress --exclude-path target --exclude-path .git './**/*
 
 注意：MSRV（`rust-version`）声明在 [Cargo.toml](../Cargo.toml)，必须等于依赖树中的最高要求；MSRV CI job 用精确的该版本构建并检查锁定的依赖图。
 
+### 已评估的后续硬化项
+
+以下项目已评估，但不在 T9 当前切片处理，按触发条件跟踪：
+
+- [#41](https://github.com/geeknonerd/stuntdouble/issues/41) 发布原子性：当前 `release-extras` 失败时把 Release 回退为 draft；等 cargo-dist 支持完整 draft 编排或项目自管 Release 生命周期后升级。
+- [#42](https://github.com/geeknonerd/stuntdouble/issues/42) GHCR 匿名拉取验证：首次公开发布并确认 package visibility 后，把无凭据 `docker pull` 加入发布或定时验证。
+- [#43](https://github.com/geeknonerd/stuntdouble/issues/43) 必需资产清单单一来源：出现第二个受支持 `apiVersion` 或新资产类型时，从 dist manifest 派生校验清单。
+- [#44](https://github.com/geeknonerd/stuntdouble/issues/44) cargo-dist 权限与 installer 摘要：上游提供按 job 权限或摘要校验能力，或项目决定承担 `allow-dirty = ["ci"]` 代价时处理。
+- [#45](https://github.com/geeknonerd/stuntdouble/issues/45) CodeQL 合并保护：首次发布后评估 required check 或 code scanning merge protection，并记录最终决策。
+
 ## 构建说明
 
 Rust crate 采用 bin+lib 结构：`src/lib.rs` 定义 library，`src/main.rs` 从 `stuntdouble::{config,server}` 导入。该结构让 `cargo test --doc` 与 `cargo doc --no-deps` 能找到 library target。后续新增 crate 时保持这一模式，确保 CI 门禁不会因缺少 library target 而失败。
