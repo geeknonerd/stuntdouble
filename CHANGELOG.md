@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.1](https://github.com/geeknonerd/stuntdouble/releases/tag/v0.1.0-alpha.1) - 2026-09-22
+
+### Added
+
+- *(dist)* activate release automation and artifact pipeline
+- *(server)* add graceful shutdown on SIGINT and SIGTERM ([#40](https://github.com/geeknonerd/stuntdouble/pull/40))
+- *(sandbox)* pin script resource limits and isolate engine panics ([#30](https://github.com/geeknonerd/stuntdouble/pull/30))
+- *(obs)* complete request logs and verbose diagnostics ([#25](https://github.com/geeknonerd/stuntdouble/pull/25))
+- *(source)* stream upstream downloads through ctx.http.pipe ([#19](https://github.com/geeknonerd/stuntdouble/pull/19))
+- *(response)* add the manifest demo fixture with CSV generation ([#18](https://github.com/geeknonerd/stuntdouble/pull/18))
+- *(source)* add allowlisted upstream HTTP via ctx.http.get ([#16](https://github.com/geeknonerd/stuntdouble/pull/16))
+- *(transform)* execute route scripts in the embedded Boa runtime ([#15](https://github.com/geeknonerd/stuntdouble/pull/15))
+- implement T1 — Configuration, CLI, routing and request_id ([#13](https://github.com/geeknonerd/stuntdouble/pull/13))
+
+### Fixed
+
+- *(server)* classify completed pipe streams correctly ([#39](https://github.com/geeknonerd/stuntdouble/pull/39))
+- *(tests)* stabilize e2e ephemeral-port fixture startup ([#38](https://github.com/geeknonerd/stuntdouble/pull/38))
+- *(dist)* close T8 contract review gaps ([#36](https://github.com/geeknonerd/stuntdouble/pull/36))
+
+### Other
+
+- record T3 sandbox limits in the status docs ([#31](https://github.com/geeknonerd/stuntdouble/pull/31))
+- refresh script-owned upstream error mapping ([#27](https://github.com/geeknonerd/stuntdouble/pull/27))
+- compound stream completion logging learning ([#26](https://github.com/geeknonerd/stuntdouble/pull/26))
+- sync the structure references with the new layout
+- fix the language switch rendering on the Pages site
+- complete the bilingual public documentation
+- write the development documentation in Chinese
+- define the documentation language policy
+- sync T4 project status and release artifacts ([#17](https://github.com/geeknonerd/stuntdouble/pull/17))
+- record T1 learnings and refresh project state ([#14](https://github.com/geeknonerd/stuntdouble/pull/14))
+- *(deps)* bump the actions group with 3 updates ([#1](https://github.com/geeknonerd/stuntdouble/pull/1))
+- add documentation indexes and refresh agent guidance ([#2](https://github.com/geeknonerd/stuntdouble/pull/2))
+- run pr-title and dco checks on main
+- add required token for audit check
+- define git, release, and compatibility workflows
+- add GitHub Pages landing page
+- add code of conduct and open-source governance
+- restructure repository for open-source release
+- update label vocabulary and usage rules
+- document issue labels and privacy rules
+- initialize open-source documentation
+
 ### Added
 
 - Ninth implementation slice (T9): release automation is configured. `release-plz` owns version PRs,
