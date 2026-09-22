@@ -41,7 +41,7 @@ path = "/hello/:name"
 script = "scripts/hello.js"
 ```
 
-即使暂时没有 Route 读取文件，`files.root` 也必须存在。[配置契约](../contracts/config.zh-CN.md)列出了全部键与校验规则。
+`files.root` 必须存在；它是 `ctx.file` 唯一可读取的目录。[配置契约](../contracts/config.zh-CN.md)列出了全部键与校验规则。
 
 ## 写第一个 Route
 
@@ -87,6 +87,23 @@ if (upstream.status >= 400) {
 
 4xx/5xx 响应是数据；只有传输层失败才抛 `upstream_unreachable`。body 很大或是二进制时改用 `ctx.http.pipe`，它把上游 body 直接流给客户端并保留 `Range`/206——见[演示夹具](../../demo/README.zh-CN.md)与 [`ctx` API 契约](../contracts/ctx-api.zh-CN.md)。
 
+## 读取与流式发送本地文件
+
+`ctx.file` 只读取 `files.root` 内的文件。绝对路径与任何 `..` 组件都会被拒绝，符号链接必须解析到根内，缓冲读取上限为 8 MiB：
+
+```js
+const text = ctx.file.readText("metadata.json");
+ctx.respond(200, { "Content-Type": "application/json" }, text);
+```
+
+`readText` 以严格 UTF-8 解码；`readBytes` 返回 `Uint8Array`。两者都抛出可捕获错误（`file_path_invalid`、`file_not_found`、`file_too_large`、`file_encoding_error`、`file_io_error`），未捕获时返回 500 `script_error`。
+
+要把文件流给客户端而不进入脚本堆，把 `ctx.file.stream(path)` 作为 `ctx.respond` 的 body 传入（状态必须是 `200`）。`Accept-Ranges`、`Content-Length` 与 `Content-Range` 归宿主所有：合法的单 `Range` 答 206，不可用的 Range 答 416，`If-Range` 存在时禁用 Range 处理。`Content-Type` 不会自动推断，需要脚本在响应 header 中设置。
+
+```js
+ctx.respond(200, { "Content-Type": "application/pdf" }, ctx.file.stream("documents/DOC-0001.pdf"));
+```
+
 ## 出错时怎么判断
 
 | 你看到的 | 含义 |
@@ -105,7 +122,7 @@ if (upstream.status >= 400) {
 stuntdouble serve --config stuntdouble.toml --verbose
 ```
 
-此时 500/502 JSON body 会多出一个稳定的 `detail` 字符串，例如 `upstream transport failure: timeout`；它绝不包含堆栈、脚本消息、上游 body 或内部地址。把 `detail` 当作本地诊断输出，不要在共享环境开启 `--verbose`。`serve` 还会为每个请求向 stderr 写出一条结构化日志，包含上游调用链、body 大小与白名单 header。流式响应的日志在 body 结束时写出；中途上游失败记为 `upstream_stream_error`。
+此时 500/502 JSON body 会多出一个稳定的 `detail` 字符串，例如 `upstream transport failure: timeout`；它绝不包含堆栈、脚本消息、上游 body 或内部地址。把 `detail` 当作本地诊断输出，不要在共享环境开启 `--verbose`。`serve` 还会为每个请求向 stderr 写出一条结构化日志，包含上游调用链、body 大小与白名单 header。流式响应的日志在 body 结束时写出；中途失败记为 `upstream_stream_error` 或 `file_stream_error`，客户端中途离开记为 `client_disconnected`。
 
 ## 下一步
 
