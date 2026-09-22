@@ -38,6 +38,16 @@ Stunt Double 暴露三个公开面：配置文件、脚本宿主 API（`ctx`）�
 - `1.0` 及以后遵循 SemVer。
 - 细节见 `docs/contracts/cli.md`。
 
+## 修订（T10，#33）：信号驱动的关闭退出码
+
+原 CLI 决策只列出 `0–3` 退出码。T10 增加服务生命周期退出码，原有四类错误码语义不变：
+
+- 首次 SIGINT（Ctrl-C）或 SIGTERM 触发 graceful shutdown：停止接受新连接，排空在途请求，完成后退出 `0`。
+- 首次信号已经被观测后，再次收到 SIGINT/SIGTERM：放弃排空并立即终止，退出码沿用 shell 的 128+signal 约定；SIGINT/Ctrl-C 为 `130`，SIGTERM 为 `143`。
+- 标准信号不排队。两个信号在第一个被观测前背靠背到达时可能合并为一个通知；该退化路径只执行第一次信号的 graceful shutdown，正常排空并退出 `0`，不承诺强制退出。
+- Windows 只提供 Ctrl-C，语义等同 SIGINT。当前 CI 只运行 Linux；Windows 分支目前只覆盖目标平台类型检查，行为自动化待引入 Windows runner 后补充。
+- 本修订发生在首个 tag 之前（远程无已发布 tag），因此不适用“提前一个 minor 版本警告”的弃用窗口；迁移说明记录在 `CHANGELOG.md`。
+
 ## 弃用规则
 
 移除或改名任何公开面之前，至少提前一个 minor 版本给出警告。警告同时写入日志与 `CHANGELOG.md`。破坏性变更要在 release notes 中给出迁移示例。

@@ -35,12 +35,16 @@ Default config path is `stuntdouble.toml`. The configuration must contain a non-
 | `1` | runtime/server error, including a socket bind or listen failure |
 | `2` | configuration error (bad TOML, schema violation, unknown `config_version`, or non-IP `server.bind`) or CLI usage error (unknown flag or missing subcommand) — messages print to stderr |
 | `3` | internal error while constructing the async runtime |
+| `130` | Ctrl-C/SIGINT received again while the graceful shutdown is in progress; the drain was abandoned |
+| `143` | SIGTERM received again while the graceful shutdown is in progress; the drain was abandoned |
 
 #### Shutdown signals
 
-On Unix, `serve` handles SIGINT (Ctrl-C) and SIGTERM; on Windows it handles Ctrl-C. The first signal stops the server from accepting new connections and drains in-flight requests before returning exit code `0`.
+On Unix, `serve` handles SIGINT (Ctrl-C) and SIGTERM; on Windows it handles Ctrl-C (equivalent to SIGINT). The first signal writes one diagnostic line to stderr, stops the server from accepting new connections, and drains in-flight requests before returning exit code `0`.
 
-A second signal abandons the drain and terminates the process immediately: exit code `130` for SIGINT and `143` for SIGTERM. Use it only when an in-flight request must not finish.
+If a second signal arrives after the first signal has started the graceful shutdown, it abandons the drain and terminates the process immediately: exit code `130` for SIGINT/Ctrl-C and `143` for SIGTERM. Use it only when an in-flight request must not finish.
+
+Standard signals are not queued. Two signals delivered back-to-back before the first one is observed may be coalesced into one notification; that case follows the first signal only, drains normally, and exits `0`. The exact wording of the shutdown diagnostic is not part of this contract.
 
 #### Binding semantics
 
@@ -96,6 +100,8 @@ Used by every command:
 | `1` | runtime/server error (reported by `serve`) |
 | `2` | configuration error or CLI usage error |
 | `3` | internal error |
+
+`serve` additionally uses `130`/`143` when a second shutdown signal abandons the drain; see the shutdown signals section above.
 
 ## Deprecation
 

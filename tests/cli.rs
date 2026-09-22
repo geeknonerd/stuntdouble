@@ -2702,6 +2702,72 @@ fn demo_manifest_route_does_not_forward_client_request_id() {
 }
 
 #[cfg(unix)]
+#[derive(Clone, Copy)]
+enum SignalCase {
+    Interrupt,
+    Terminate,
+}
+
+#[cfg(unix)]
+impl SignalCase {
+    fn kill_arg(self) -> &'static str {
+        match self {
+            Self::Interrupt => "INT",
+            Self::Terminate => "TERM",
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Interrupt => "SIGINT",
+            Self::Terminate => "SIGTERM",
+        }
+    }
+
+    fn forced_exit_code(self) -> i32 {
+        match self {
+            Self::Interrupt => 130,
+            Self::Terminate => 143,
+        }
+    }
+}
+
+/// A served fixture whose route waits on a delayed upstream response.
+#[cfg(unix)]
+struct InFlightFixture {
+    upstream: Upstream,
+    child: Child,
+    log: PathBuf,
+    port: u16,
+    _dir: tempfile::TempDir,
+}
+
+#[cfg(unix)]
+fn start_in_flight_request(delay: Duration, body: &[u8]) -> InFlightFixture {
+    let upstream = Upstream::start(vec![UpstreamResponse::new(200, body).delay(delay)]);
+    let config_body = with_upstream(good_config(), &["127.0.0.1"]);
+    let script = format!(
+        r#"var r = ctx.http.get("{url}");
+ctx.respond(200, {{ "Content-Type": "text/plain; charset=utf-8" }}, r.text());
+"#,
+        url = upstream.url("/slow")
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (child, log, port) = start_serve(
+        |port| fixture_with_script(dir.path(), port, &config_body, &script),
+        &[],
+        &[],
+    );
+    InFlightFixture {
+        upstream,
+        child,
+        log,
+        port,
+        _dir: dir,
+    }
+}
+
+#[cfg(unix)]
 fn send_signal(child: &Child, signal: &str) {
     let pid = child.id().to_string();
     let status = Command::new("kill")
@@ -2743,12 +2809,28 @@ fn wait_for_upstream_request(upstream: &Upstream) {
 }
 
 #[cfg(unix)]
-fn assert_first_signal_exits(signal: &str, signal_name: &str) {
+fn wait_for_log(log: &Path, needle: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let text = std::fs::read_to_string(log).unwrap_or_default();
+        if text.contains(needle) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "log did not contain {needle:?}: {text}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(unix)]
+fn assert_first_signal_exits(signal: SignalCase) {
     let dir = tempfile::tempdir().expect("tempdir");
     let (mut child, log, _) =
         start_serve(|port| fixture(dir.path(), port, good_config()), &[], &[]);
 
-    send_signal(&child, signal);
+    send_signal(&child, signal.kill_arg());
     let status = wait_for_exit(&mut child, Duration::from_secs(5));
     let stderr = std::fs::read_to_string(&log).unwrap_or_default();
     assert_eq!(
@@ -2756,52 +2838,36 @@ fn assert_first_signal_exits(signal: &str, signal_name: &str) {
         Some(0),
         "status: {status:?}, stderr: {stderr}"
     );
-    let graceful = format!("{signal_name} received; starting graceful shutdown");
+    let graceful = format!("{} received; starting graceful shutdown", signal.name());
     assert!(stderr.contains(&graceful), "stderr: {stderr}");
 }
 
 #[cfg(unix)]
 #[test]
 fn sigterm_triggers_graceful_shutdown_with_exit_code_zero() {
-    assert_first_signal_exits("TERM", "SIGTERM");
+    assert_first_signal_exits(SignalCase::Terminate);
 }
 
 #[cfg(unix)]
 #[test]
 fn sigint_triggers_graceful_shutdown_with_exit_code_zero() {
-    assert_first_signal_exits("INT", "SIGINT");
+    assert_first_signal_exits(SignalCase::Interrupt);
 }
 
 #[cfg(unix)]
-#[test]
-fn graceful_shutdown_drains_in_flight_requests() {
-    let upstream = Upstream::start(vec![
-        UpstreamResponse::new(200, b"drained").delay(Duration::from_millis(500))
-    ]);
-    let config_body = with_upstream(good_config(), &["127.0.0.1"]);
-    let script = format!(
-        r#"var r = ctx.http.get("{url}");
-ctx.respond(200, {{ "Content-Type": "text/plain; charset=utf-8" }}, r.text());
-"#,
-        url = upstream.url("/slow")
-    );
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (mut child, log, port) = start_serve(
-        |port| fixture_with_script(dir.path(), port, &config_body, &script),
-        &[],
-        &[],
-    );
-
+fn assert_drain_preserves_in_flight_request(signal: SignalCase) {
+    let mut fixture = start_in_flight_request(Duration::from_millis(500), b"drained");
+    let port = fixture.port;
     let request_thread =
         std::thread::spawn(move || request(port, "GET", "/demo/documents/manifest/group-a", &[]));
-    wait_for_upstream_request(&upstream);
-    send_signal(&child, "TERM");
+    wait_for_upstream_request(&fixture.upstream);
+    send_signal(&fixture.child, signal.kill_arg());
 
     let response = request_thread.join().expect("request thread");
     assert_eq!(response.status, 200, "body: {}", response.body);
     assert_eq!(response.body, "drained");
-    let status = wait_for_exit(&mut child, Duration::from_secs(5));
-    let stderr = std::fs::read_to_string(&log).unwrap_or_default();
+    let status = wait_for_exit(&mut fixture.child, Duration::from_secs(5));
+    let stderr = std::fs::read_to_string(&fixture.log).unwrap_or_default();
     assert_eq!(
         status.code(),
         Some(0),
@@ -2810,57 +2876,77 @@ ctx.respond(200, {{ "Content-Type": "text/plain; charset=utf-8" }}, r.text());
 }
 
 #[cfg(unix)]
-fn assert_second_signal_forces_exit(signal: &str, signal_name: &str, exit_code: i32) {
-    let upstream = Upstream::start(vec![
-        UpstreamResponse::new(200, b"late").delay(Duration::from_secs(30))
-    ]);
-    let config_body = with_upstream(good_config(), &["127.0.0.1"]);
-    let script = format!(
-        r#"var r = ctx.http.get("{url}");
-ctx.respond(200, {{ "Content-Type": "text/plain; charset=utf-8" }}, r.text());
-"#,
-        url = upstream.url("/slow")
-    );
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (mut child, log, port) = start_serve(
-        |port| fixture_with_script(dir.path(), port, &config_body, &script),
-        &[],
-        &[],
-    );
+#[test]
+fn sigterm_drains_in_flight_requests() {
+    assert_drain_preserves_in_flight_request(SignalCase::Terminate);
+}
 
-    let mut client = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+#[cfg(unix)]
+#[test]
+fn sigint_drains_in_flight_requests() {
+    assert_drain_preserves_in_flight_request(SignalCase::Interrupt);
+}
+
+#[cfg(unix)]
+fn assert_second_signal_forces_exit(signal: SignalCase) {
+    let mut fixture = start_in_flight_request(Duration::from_secs(30), b"late");
+    let mut client = TcpStream::connect(("127.0.0.1", fixture.port)).expect("connect");
     let head = "GET /demo/documents/manifest/group-a HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
     client.write_all(head.as_bytes()).expect("write request");
     client.flush().expect("flush");
-    wait_for_upstream_request(&upstream);
+    wait_for_upstream_request(&fixture.upstream);
 
-    send_signal(&child, signal);
-    std::thread::sleep(Duration::from_millis(200));
+    send_signal(&fixture.child, signal.kill_arg());
+    let started = format!("{} received; starting graceful shutdown", signal.name());
+    wait_for_log(&fixture.log, &started);
     assert!(
-        child.try_wait().expect("try_wait").is_none(),
+        fixture.child.try_wait().expect("try_wait").is_none(),
         "server exited before the second signal"
     );
 
-    send_signal(&child, signal);
-    let status = wait_for_exit(&mut child, Duration::from_secs(5));
-    let stderr = std::fs::read_to_string(&log).unwrap_or_default();
+    send_signal(&fixture.child, signal.kill_arg());
+    let status = wait_for_exit(&mut fixture.child, Duration::from_secs(5));
+    let stderr = std::fs::read_to_string(&fixture.log).unwrap_or_default();
     assert_eq!(
         status.code(),
-        Some(exit_code),
+        Some(signal.forced_exit_code()),
         "status: {status:?}, stderr: {stderr}"
     );
-    let forced = format!("{signal_name} received again; terminating immediately");
+    let forced = format!("{} received again; terminating immediately", signal.name());
     assert!(stderr.contains(&forced), "stderr: {stderr}");
 }
 
 #[cfg(unix)]
 #[test]
 fn second_sigterm_terminates_immediately_with_exit_code_143() {
-    assert_second_signal_forces_exit("TERM", "SIGTERM", 143);
+    assert_second_signal_forces_exit(SignalCase::Terminate);
 }
 
 #[cfg(unix)]
 #[test]
 fn second_sigint_terminates_immediately_with_exit_code_130() {
-    assert_second_signal_forces_exit("INT", "SIGINT", 130);
+    assert_second_signal_forces_exit(SignalCase::Interrupt);
+}
+
+/// Back-to-back signals may be coalesced by the OS. Either the second signal is
+/// observed (exit 143) or the first signal drains normally (exit 0); neither
+/// path may hang.
+#[cfg(unix)]
+#[test]
+fn back_to_back_sigterm_signals_still_exit() {
+    let mut fixture = start_in_flight_request(Duration::from_secs(1), b"late");
+    let mut client = TcpStream::connect(("127.0.0.1", fixture.port)).expect("connect");
+    let head = "GET /demo/documents/manifest/group-a HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    client.write_all(head.as_bytes()).expect("write request");
+    client.flush().expect("flush");
+    wait_for_upstream_request(&fixture.upstream);
+
+    send_signal(&fixture.child, SignalCase::Terminate.kill_arg());
+    send_signal(&fixture.child, SignalCase::Terminate.kill_arg());
+    let status = wait_for_exit(&mut fixture.child, Duration::from_secs(5));
+    let stderr = std::fs::read_to_string(&fixture.log).unwrap_or_default();
+    assert!(
+        matches!(status.code(), Some(0 | 143)),
+        "status: {status:?}, stderr: {stderr}"
+    );
 }

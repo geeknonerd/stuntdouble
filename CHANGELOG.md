@@ -11,12 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Tenth implementation slice (T10): `serve` now handles Ctrl-C (SIGINT) on all platforms and
   SIGTERM on Unix. The first signal stops accepting new connections and drains in-flight requests
-  through `axum::serve(...).with_graceful_shutdown(...)` before exiting `0`; a second signal abandons
-  the drain and terminates immediately with exit code `130` (SIGINT) or `143` (SIGTERM). Signal
-  handling lives at the CLI boundary: `server::run` takes a shutdown future and only owns the drain.
-  Unix end-to-end tests cover both first signals, in-flight draining, and the forced second-signal
-  path. Migration: scripts that treated `130`/`143` as the normal stop code should accept `0`; those
-  codes now mean the operator forced an immediate stop.
+  through `axum::serve(...).with_graceful_shutdown(...)` before exiting `0`; a second signal observed
+  after the first has started the shutdown abandons the drain and terminates immediately with exit
+  code `130` (SIGINT/Ctrl-C) or `143` (SIGTERM). Standard signals are not queued, so back-to-back
+  signals delivered before the first is observed may coalesce into that first signal's normal drain.
+  Signal handling lives at the CLI boundary: `server::run` takes a shutdown future and only owns the
+  drain. Unix end-to-end tests cover both first signals, SIGINT/SIGTERM draining, the forced
+  second-signal path, and the coalesced-signal fallback. Migration: scripts that treated `130`/`143`
+  as the normal stop code should accept `0`; those codes now mean the operator forced an immediate
+  stop. The ADR 0011 T10 amendment records the exit-code and platform semantics.
 - Eighth implementation slice (T8): the first vertical slice's public contracts are frozen.
   `docs/contracts/config.md`, `docs/contracts/cli.md`, and `docs/contracts/ctx-api.md` now document the
   complete configuration schema, the actual CLI exit codes and output, and the implemented

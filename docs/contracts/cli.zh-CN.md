@@ -37,12 +37,16 @@ stuntdouble serve [--config <path>] [--verbose]
 | `1` | 运行期／服务错误，包括 socket bind 或 listen 失败 |
 | `2` | 配置错误（TOML 非法、schema 违规、未知 `config_version` 或非 IP 的 `server.bind`）或 CLI 用法错误（未知 flag、缺少子命令）——消息打印到 stderr |
 | `3` | 构造异步运行时的内部错误 |
+| `130` | graceful shutdown 进行中再次收到 Ctrl-C/SIGINT，放弃排空 |
+| `143` | graceful shutdown 进行中再次收到 SIGTERM，放弃排空 |
 
 #### 关闭信号
 
-在 Unix 上，`serve` 处理 SIGINT（Ctrl-C）与 SIGTERM；在 Windows 上处理 Ctrl-C。第一个信号让服务器停止接受新连接，并排空在途请求后以退出码 `0` 返回。
+在 Unix 上，`serve` 处理 SIGINT（Ctrl-C）与 SIGTERM；在 Windows 上处理 Ctrl-C（等同 SIGINT）。第一个信号会向 stderr 写一行诊断，让服务器停止接受新连接，并排空在途请求后以退出码 `0` 返回。
 
-第二次信号会放弃排空并立即终止进程：SIGINT 退出码为 `130`，SIGTERM 为 `143`。仅在必须立即放弃在途请求时使用。
+如果第二个信号在第一个信号已经启动 graceful shutdown 后到达，它会放弃排空并立即终止进程：SIGINT/Ctrl-C 退出码为 `130`，SIGTERM 为 `143`。仅在必须立即放弃在途请求时使用。
+
+标准信号不排队。若两个信号在第一个信号被观测前背靠背到达，它们可能被合并为一个通知；这种情况只遵循第一个信号，正常排空并退出 `0`。关闭诊断的具体文案不属于本契约。
 
 #### 绑定语义
 
@@ -98,6 +102,8 @@ stuntdouble validate [--config <path>]
 | `1` | 运行期／服务错误（由 `serve` 报告） |
 | `2` | 配置错误或 CLI 用法错误 |
 | `3` | 内部错误 |
+
+`serve` 在第二次关闭信号放弃排空时另用 `130`/`143`；见上文“关闭信号”。
 
 ## 弃用
 
