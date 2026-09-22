@@ -58,6 +58,12 @@ stuntdouble serve --config stuntdouble.toml
 curl -i http://127.0.0.1:3000/hello/world
 ```
 
+## 停止服务
+
+按 Ctrl-C（SIGINT），或在 Unix 上发送 SIGTERM。第一个信号会停止接受新连接、排空在途请求，然后以 `0` 退出。
+
+如果关闭耗时过长，可以再发一次信号：graceful shutdown 启动后观测到的第二个信号会放弃排空，立即以 `130`（SIGINT/Ctrl-C）或 `143`（SIGTERM）退出。标准信号不排队，因此第一个信号被观测前背靠背发送的两个信号可能合并；这种情况仍会正常排空并以 `0` 退出。完整规则见 [CLI 契约](../contracts/cli.zh-CN.md)。
+
 ## 调用上游 API
 
 上游调用只能到达 `[upstream] allow_hosts` 列出的 host：
