@@ -182,7 +182,9 @@ lychee --offline --no-progress --exclude-path target --exclude-path .git './**/*
 - `.github/workflows/codeql.yml`：Rust 高级代码扫描，在 `main`、pull request 与每周计划任务上运行；它作为并行安全扫描，不加入分支保护的 required checks。
 - 仓库必须允许 GitHub Actions 创建 pull request（Settings → Actions → General → Workflow permissions）。
 - crates.io 发布默认关闭（`release-plz.toml` 的 `publish = false`）。启用时把 `publish` 改为 `true`，并在 `release-plz.yml` 的 release job 中提供 `CARGO_REGISTRY_TOKEN`。
-- 可选：配置细粒度 PAT `RELEASE_PLZ_TOKEN`（contents: write、pull-requests: write），让 release PR 触发的 CI 自动运行；未配置时 workflow 回退到 `GITHUB_TOKEN`，PR 仍会创建，但需要手动触发该分支的 CI。
+- `RELEASE_PLZ_TOKEN`（推荐）：细粒度 PAT，权限为 `Contents: Read and write` 与 `Pull requests: Read and write`。它供 release-plz 创建 tag、分支和 release PR，使 PAT 创建的 release PR 自动触发 CI；PAT 不需要 `Actions: write`，触发 `release.yml` 使用 job 内 `GITHUB_TOKEN` 的 `actions: write`。
+- 未配置或 token 失效时，workflow 回退到 `GITHUB_TOKEN`：PR 仍会创建，但其 required checks 可能停在 `Expected` 等待人工批准；批准对应 run，或编辑 PR 触发 `edited` 事件，可恢复 `pr-title` 等检查。
+- 更新 PAT 后，用一次由该 PAT 发起的测试 PR 验证 `pull_request` workflows 会自动排队；不要只以 secret 名称存在作为验证。
 
 注意：MSRV（`rust-version`）声明在 [Cargo.toml](../Cargo.toml)，必须等于依赖树中的最高要求；MSRV CI job 用精确的该版本构建并检查锁定的依赖图。
 

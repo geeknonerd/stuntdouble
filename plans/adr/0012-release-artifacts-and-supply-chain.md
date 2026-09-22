@@ -63,4 +63,5 @@ T9 的发布工作流已落地，执行时补充以下约束：
 - GHCR tag 不可覆盖。tag 已存在时复用 digest 并验证已有 attestation，不重新生成 provenance；无法确认 tag 是否存在时 fail closed。tag 不存在时才构建、推送并生成 attestation。
 - `release-extras` 失败或取消时，把已公开但不完整的 GitHub Release 回退为 draft。完整的 draft 编排仍待解决，跟踪于 #41。
 - CodeQL 作为并行安全扫描运行，不加入分支保护的 required checks；是否启用合并保护跟踪于 #45。
+- release-plz 的 tag、分支与 release PR 使用 `RELEASE_PLZ_TOKEN`（细粒度 PAT：Contents 与 Pull requests 读写）；触发 cargo-dist 的 `workflow_dispatch` 使用 job `GITHUB_TOKEN` 的 `actions: write`，PAT 不需要 Actions 权限。
 - 其余后续硬化项：匿名 GHCR 拉取验证（#42）、资产清单单一来源（#43）、cargo-dist 权限与 installer 摘要（#44）。
