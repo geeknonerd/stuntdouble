@@ -9,8 +9,8 @@ Stunt Double 暴露三个公开契约。它们各自演进，在此统一跟踪�
 | 契约 | 状态 | 适用 | 稳定性 |
 | --- | --- | --- | --- |
 | [配置](config.zh-CN.md) | v1 切片（T1–T8）已冻结 | v0.x | 1.0 之前允许带弃用窗口的破坏性变更 |
-| [`ctx` API](ctx-api.zh-CN.md) | v1 切片（T1–T8）已公开；已实现第一切片子集 | `apiVersion` 1 | 同一 `apiVersion` 内只做增量；移除需要新版本 |
-| [CLI](cli.zh-CN.md) | v1 切片（T1–T8）已冻结 | v0.x | 1.0 之前允许带弃用窗口的破坏性变更 |
+| [`ctx` API](ctx-api.zh-CN.md) | v1 切片已公开；已实现子集至 T11 | `apiVersion` 1 | 同一 `apiVersion` 内只做增量；移除需要新版本 |
+| [CLI](cli.zh-CN.md) | v1 切片已冻结；增量更新至 T11 | v0.x | 1.0 之前允许带弃用窗口的破坏性变更 |
 
 ## 变更流程
 

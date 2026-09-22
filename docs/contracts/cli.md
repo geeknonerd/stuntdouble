@@ -2,7 +2,7 @@
 
 **English** \| [中文](./cli.zh-CN.md)
 
-- **Status**: frozen for the v1 slice (T1–T8)
+- **Status**: frozen for the v1 slice; additive updates through T11
 - **Applies to**: the `stuntdouble` binary from v0.1.0-alpha.1 onward within the same CLI family
 - **Stability**: breaking changes before 1.0 need a deprecation window
 
@@ -21,7 +21,7 @@ Usage:
 stuntdouble serve [--config <path>] [--verbose]
 ```
 
-Starts the mock server binding to the configured address. Matched Routes execute their JavaScript in the embedded Boa runtime with a host-injected `ctx`, including allowlisted `ctx.http.get` calls and streaming `ctx.http.pipe` calls; unmatched Routes answer 404 `not_found`. Script failures answer 500 `script_error` or `script_no_response`; an uncaught upstream transport failure answers 502 `upstream_unreachable`.
+Starts the mock server binding to the configured address. Matched Routes execute their JavaScript in the embedded Boa runtime with a host-injected `ctx`, including allowlisted `ctx.http.get` calls, streaming `ctx.http.pipe` calls, and rooted `ctx.file` reads with streamed local file responses; unmatched Routes answer 404 `not_found`. Script failures answer 500 `script_error` or `script_no_response`; an uncaught upstream transport failure answers 502 `upstream_unreachable`.
 
 `--verbose` attaches a `detail` field to engine-generated 500/502 JSON error bodies. The value is a stable failure class, for example `script execution failed`, `script exceeded the configured timeout`, `upstream transport failure: timeout`, `upstream transport failure: dns`, or `upstream transport failure: transport`. It never contains stack traces, script messages, upstream bodies, hostnames, IP addresses, or URLs. Without the flag, error bodies contain only `error` and `request_id`. Use it for local diagnosis only; do not enable it in shared environments. A 404 `not_found` response never carries `detail`.
 
@@ -54,11 +54,12 @@ The `server` table is required. Its `bind` field is optional and defaults to `12
 
 #### Request logging
 
-`serve` writes one JSON log line per request to stderr. The line contains `request_id`, matched `route`, `method`, `path`, `params`, `status`, `error`, `elapsed_ms`, `script_duration_ms`, `upstream_calls`, `request_body_bytes`, `response_body_bytes`, `request_headers`, `response_headers`, `client_request_id`, `host`, and `script_logs` when the script logged anything.
+`serve` writes one JSON log line per request to stderr. The line contains `request_id`, matched `route`, `method`, `path`, `params`, `status`, `error`, `elapsed_ms`, `script_duration_ms`, `upstream_calls`, `file_calls`, `request_body_bytes`, `response_body_bytes`, `request_headers`, `response_headers`, `client_request_id`, `host`, and `script_logs` when the script logged anything.
 
 - `upstream_calls` is an ordered list of the calls the script made. Each entry records `api` (`http.get` or `http.pipe`), `host`, `path`, `status`, `response_bytes`, `duration_ms`, `redirects`, and the stable `error`/`kind` when the call failed. Query strings are not logged. A `http.pipe` entry is finalized when its body stream ends.
+- `file_calls` is an ordered list of the file calls the script made with `api` (`file.readText`, `file.readBytes`, or `file.stream`), `bytes`, `duration_ms`, and the stable `error` when the call failed. File paths are never logged. A `file.stream` entry is finalized when its body ends or the client disconnects.
 - The host never logs request or response bodies automatically. Only sizes and allowlisted headers are recorded: request headers `accept`, `content-type`, `content-length`, `range`, `user-agent`; response headers `content-type`, `content-length`, `content-range`. Authorization, cookie, and other headers are never logged. `script_logs[].message` is script-authored and not redacted: `ctx.log.*` must not carry bodies, tokens, cookies, or other secrets.
-- Buffered Responses log before the Response is written. A streamed Response (`ctx.http.pipe`) logs one completion line after the body ends or the client disconnects: `response_body_bytes` counts the bytes relayed into the Response body, and `error` can be `upstream_stream_error` (the upstream read failed after a 2xx status was already sent, so the client status stays 2xx) or `client_disconnected`. `elapsed_ms` covers the whole stream in that line.
+- Buffered Responses log before the Response is written. A streamed Response (`ctx.http.pipe` or `ctx.file.stream`) logs one completion line after the body ends or the client disconnects: `response_body_bytes` counts the bytes relayed into the Response body, and `error` can be `upstream_stream_error` or `file_stream_error` (the read failed after the status was already sent, so the client status stays as sent) or `client_disconnected`. `elapsed_ms` covers the whole stream in that line.
 - A `http.get` call still in flight when the script deadline hits keeps `null` for `status`, `response_bytes`, and `duration_ms`; calls that finished before the deadline keep their recorded values.
 - These lines are operator-facing diagnostics: they can contain allowlisted upstream hosts and paths. Redact them before publishing them in issues, pull requests, or other public artifacts.
 - `client_request_id` records a client-supplied `X-Request-ID`. It is never adopted as `request_id` and is never forwarded to an upstream call.

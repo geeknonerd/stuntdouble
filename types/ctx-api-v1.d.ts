@@ -3,7 +3,7 @@
 // This file is part of the public contract; the release artifact set defined by
 // plans/adr/0012-release-artifacts-and-supply-chain.md must include it. T9 wires
 // the release pipeline.
-// It covers the first-slice subset implemented by T1-T8; pending capabilities
+// It covers the first-slice subset implemented by T1-T11; pending capabilities
 // are intentionally absent until they land. Keep this file in sync with
 // docs/contracts/ctx-api.md.
 
@@ -61,6 +61,36 @@ interface SdHttp {
   pipe(url: string, opts?: SdHttpPipeOptions): boolean;
 }
 
+declare const sdFileStreamBrand: unique symbol;
+
+/**
+ * Opaque, single-consumption handle returned by `ctx.file.stream`. It exposes
+ * no readable properties and is valid only as the `body` argument of
+ * `ctx.respond` in the same request. The brand symbol makes the handle
+ * impossible to construct outside the host.
+ */
+interface SdFileStream {
+  /** @internal */
+  readonly [sdFileStreamBrand]: true;
+}
+
+interface SdFile {
+  /**
+   * Reads one file inside the static file root as strict UTF-8. Throws a
+   * catchable error with code "file_path_invalid", "file_not_found",
+   * "file_too_large", "file_encoding_error", or "file_io_error".
+   */
+  readText(path: string): string;
+  /**
+   * Reads one file inside the static file root as bytes. Throws a catchable
+   * error with code "file_path_invalid", "file_not_found", "file_too_large",
+   * or "file_io_error".
+   */
+  readBytes(path: string): Uint8Array;
+  /** Opens one file inside the static file root as a streamed Response body. */
+  stream(path: string): SdFileStream;
+}
+
 type SdHeaderValue = string | number | boolean | readonly string[];
 
 interface SdRespondHeaders {
@@ -86,7 +116,12 @@ type SdErrorCode =
   | "upstream_url_invalid"
   | "upstream_redirect_error"
   | "upstream_unreachable"
-  | "upstream_http_error";
+  | "upstream_http_error"
+  | "file_path_invalid"
+  | "file_not_found"
+  | "file_too_large"
+  | "file_encoding_error"
+  | "file_io_error";
 
 /** Host-created errors carry a stable `code`; ordinary script errors may omit it. */
 interface SdError extends Error {
@@ -98,6 +133,7 @@ interface SdContext {
   readonly apiVersion: "1";
   readonly request: SdRequest;
   readonly http: SdHttp;
+  readonly file: SdFile;
   readonly env: Readonly<Record<string, string>>;
   readonly log: SdLog;
   /**
@@ -109,7 +145,7 @@ interface SdContext {
   respond(
     status: number,
     headers?: SdHeaders,
-    body?: string | Uint8Array | ArrayBuffer | readonly number[],
+    body?: string | Uint8Array | ArrayBuffer | readonly number[] | SdFileStream,
   ): boolean;
 }
 

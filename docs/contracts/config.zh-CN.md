@@ -76,7 +76,7 @@ script = "scripts/x.js"   # .js/.mjs/.cjs；相对或绝对路径
 
 ## Route 执行模型
 
-Route 遵循唯一流水线：`match → source → transform → response`。本切片实现 Match 与脚本 Transform：命中的 Route 运行其 JavaScript，脚本通过 `ctx.respond` 或 `ctx.http.pipe` 产生 Response。未命中的请求返回 404 `not_found`；脚本抛错、超时或加载失败返回 500 `script_error`；脚本结束却没有产生 Response 时返回 500 `script_no_response`。`ctx.http.get` 把上游响应（含 4xx/5xx）视为数据；`ctx.http.pipe` 把上游 2xx Response 流式转发给客户端，并对最终非 2xx 响应抛出可捕获的 `upstream_http_error`；未捕获的上游传输层失败返回 502 `upstream_unreachable`。本地静态文件读取与上传在后续切片落地。
+Route 遵循唯一流水线：`match → source → transform → response`。本切片实现 Match 与脚本 Transform：命中的 Route 运行其 JavaScript，脚本通过 `ctx.respond` 或 `ctx.http.pipe` 产生 Response。未命中的请求返回 404 `not_found`；脚本抛错、超时或加载失败返回 500 `script_error`；脚本结束却没有产生 Response 时返回 500 `script_no_response`。`ctx.http.get` 把上游响应（含 4xx/5xx）视为数据；`ctx.http.pipe` 把上游 2xx Response 流式转发给客户端，并对最终非 2xx 响应抛出可捕获的 `upstream_http_error`；未捕获的上游传输层失败返回 502 `upstream_unreachable`。本地静态文件读取已实现；上传在后续切片落地。
 
 ### 匹配语义
 
