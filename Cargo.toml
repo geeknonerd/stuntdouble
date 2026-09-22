@@ -5,6 +5,7 @@ edition = "2021"
 rust-version = "1.91"
 license = "MIT OR Apache-2.0"
 description = "Rust mock server for integration testing against real external dependencies"
+repository = "https://github.com/geeknonerd/stuntdouble"
 
 [[bin]]
 name = "stuntdouble"
@@ -37,3 +38,8 @@ module_name_repetitions = "allow"
 unused_self = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

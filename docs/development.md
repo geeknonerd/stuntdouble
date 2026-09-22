@@ -17,7 +17,7 @@
 每个 pull request 必须：
 
 - 使用 Conventional Commits 标题，因为 squash commit 会继承它
-- 通过 `fmt`、`clippy`、`test`、`docs`、`docs-links`、`deny`、`audit`、`msrv`、`pr-title`、`dco`
+- 通过 `fmt`、`clippy`、`test`、`docs`、`docs-links`、`deny`、`audit`、`msrv`、`codeql`、`pr-title`、`dco`
 - 解决全部 review 会话
 - 与 `main` 保持同步
 - 每个 commit 带 DCO 签名（`git commit -s`）
@@ -53,19 +53,35 @@ docs: describe the release process
 
 ## 发布流程
 
-1. 把已完成的改动合并进 `main`。
-2. 让 `release-plz` 打开或更新 release PR。
-3. 核对版本号变更、`CHANGELOG.md` 与 release notes。
-4. 核对 B 层文档的中文译本（README、`docs/index.md`、`docs/guide/`、`docs/contracts/`、`demo/README.md`）。
-5. 合并 release PR；该合并即授权发布。
-6. `release-plz` 创建 tag，并可选发布到 crates.io。
-7. `cargo-dist` 从 tag 构建发布产物。
-8. 发布 GitHub Release、容器镜像、校验和、attestation、SBOM 与 `ctx` API `.d.ts` 类型定义，并验证 `.d.ts` 已作为 release asset 附带。
-9. 在仓库内公告发布。
+发布由两条 GitHub Actions 工作流串联；版本号的唯一来源仍是 workspace 的 `Cargo.toml`：
+
+1. 把已完成的改动合并进 `main`。这次 push 触发 `.github/workflows/release-plz.yml`。
+2. `release-plz release` 根据 `release-plz.toml` 的 `git_only = true` 从 git tag 判断未发布版本；需要发布时创建 tag，并在同一 job 中用 `gh workflow run release.yml -f tag=<tag>` 触发产物流水线。
+3. `release-plz release-pr` 按 Conventional Commits 计算下一版本，打开或更新 release PR；PR 包含 `Cargo.toml` 与 `CHANGELOG.md` 改动。
+4. 核对 release PR 的版本号、`CHANGELOG.md`、release notes 与 B 层文档的中文译本。
+5. 合并 release PR；下一次 `release-plz release` 会为合并后的版本创建 tag，并触发产物流水线。
+6. `.github/workflows/release.yml` 由 `cargo-dist` 从 `dist-workspace.toml` 生成，只接受 `workflow_dispatch` 的 tag 输入；`.github/release-build-setup.yml` 会在构建前断言 ref 就是 `vMAJOR.MINOR.PATCH[-prerelease]` 形式的输入 tag，绝不直接发布 `main`。它构建 Linux x86_64、macOS arm64、Windows x86_64 的 `.tar.gz`/`.zip`、逐文件 `.sha256`、`sha256.sum`、源码归档与 `types/ctx-api-v1.d.ts`，生成 GitHub artifact attestation，并创建 GitHub Release。
+7. `release-extras` post-announce job 在 Release 创建后生成 CycloneDX SBOM、附加 `SHA256SUMS`、构建并推送 `ghcr.io/geeknonerd/stuntdouble:<tag>`、附加镜像 digest，并用 `gh attestation verify` 验证已发布的 Linux 二进制。
+8. 用“发布验证”中的命令复核 Release；全部资产存在后再公告。
+
+首次发布当前 `0.1.0-alpha.1` 时，第 2 步会为 `Cargo.toml` 中的版本创建 `v0.1.0-alpha.1` tag，第 3 步同时打开下一次版本的 release PR。
 
 发布失败不得复用或覆盖已有 tag；修复问题后发布新的 patch 或预发布版本。只有 crates.io 发布损坏时才用 `cargo yank`，绝不删除已发布的版本。
 
-首个发布可以由人工引导 release PR，之后由 `release-plz` 生成。
+### 发布验证
+
+```bash
+tag=v0.1.0-alpha.1
+gh release view "$tag" --repo geeknonerd/stuntdouble
+gh release download "$tag" --repo geeknonerd/stuntdouble --pattern '*x86_64-unknown-linux-gnu.tar.gz'
+gh attestation verify stuntdouble-x86_64-unknown-linux-gnu.tar.gz --repo geeknonerd/stuntdouble
+docker pull "ghcr.io/geeknonerd/stuntdouble:${tag}"
+docker buildx imagetools inspect "ghcr.io/geeknonerd/stuntdouble:${tag}"
+```
+
+Release 页面必须列出三个平台的归档、`SHA256SUMS`（同时保留 cargo-dist 的 `sha256.sum`）、`stuntdouble-<version>.cdx.json`、`ctx-api-v1.d.ts`、`stuntdouble-<version>-image.txt`（镜像 tag 与 digest）以及 release notes。
+
+首次发布后，在 GHCR package settings 中确认镜像可见性与仓库一致（public repository 对应 public package），否则匿名 `docker pull` 会失败。
 
 ## 发布产物
 
@@ -115,7 +131,7 @@ cargo audit
 - 新增依赖需要理由、维护状况检查与许可证检查。
 - 不允许 GPL 与 AGPL 依赖。
 - `cargo-deny` 检查许可证、来源、重复版本与公告。依赖图通过 `deny.toml` 的 `[graph] targets` 限定在发布目标（Linux x86_64、macOS arm64、Windows x86_64），因此不受支持平台的平台专属依赖不会导致许可证门禁失败。
-- Dependabot 每周检查 Cargo 与 GitHub Actions。
+- Dependabot 每周检查 Cargo、Docker 基础镜像与 GitHub Actions。
 - 安全修复不得保留给付费层。
 
 ## 文档语言与双语结构
@@ -157,16 +173,18 @@ lychee --offline --no-progress --exclude-path target --exclude-path .git './**/*
 
 其余约定：公开契约在 `docs/contracts/`；领域词汇在 `CONTEXT.md`，不含实现细节；难以逆转的决策写入 `plans/adr/`。
 
-## 发布自动化启用
+## 发布自动化配置
 
-以下各项必须在首个 crate 落地后补上：
+- `.github/workflows/release-plz.yml`：release PR、tag 与 cargo-dist 触发。
+- `.github/workflows/release.yml`：由 `dist-workspace.toml` 生成；改配置后运行 `dist generate`，不要手工编辑该文件。
+- `.github/workflows/release-extras.yml`：cargo-dist 的 post-announce job，负责 SBOM、GHCR 镜像、digest，以及二进制、容器与必需 Release 资产的验证。
+- `.github/release-build-setup.yml`：cargo-dist 注入到每个构建 job 的步骤，拒绝非 tag 或其他 ref 的发布构建。
+- `.github/workflows/codeql.yml`：Rust 高级代码扫描，在 `main`、pull request 与每周计划任务上运行。
+- 仓库必须允许 GitHub Actions 创建 pull request（Settings → Actions → General → Workflow permissions）。
+- crates.io 发布默认关闭（`release-plz.toml` 的 `publish = false`）。启用时把 `publish` 改为 `true`，并在 `release-plz.yml` 的 release job 中提供 `CARGO_REGISTRY_TOKEN`。
+- 可选：配置细粒度 PAT `RELEASE_PLZ_TOKEN`（contents: write、pull-requests: write），让 release PR 触发的 CI 自动运行；未配置时 workflow 回退到 `GITHUB_TOKEN`，PR 仍会创建，但需要手动触发该分支的 CI。
 
-- `release-plz` workflow 与 `CARGO_REGISTRY_TOKEN`
-- `cargo-dist` 配置与 release workflow
-- 容器构建与 GHCR 发布
-- CodeQL 或其他高级代码扫描
-
-注意：MSRV（`rust-version`）声明在 [Cargo.toml](../Cargo.toml)，必须等于依赖树中的最高要求；MSRV CI job 用精确的该版本构建。
+注意：MSRV（`rust-version`）声明在 [Cargo.toml](../Cargo.toml)，必须等于依赖树中的最高要求；MSRV CI job 用精确的该版本构建并检查锁定的依赖图。
 
 ## 构建说明
 

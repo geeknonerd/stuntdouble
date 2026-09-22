@@ -1,0 +1,252 @@
+name: Release extras
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        description: cargo-dist manifest for the release
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  release-extras:
+    name: SBOM, container image, attestation verification
+    runs-on: ubuntu-22.04
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
+      packages: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Resolve the release tag
+        id: release
+        env:
+          PLAN: ${{ inputs.plan }}
+        run: |
+          set -euo pipefail
+          tag="$(jq -r '.announcement_tag' <<<"$PLAN")"
+          if [[ -z "$tag" || "$tag" == "null" ]]; then
+            echo "The dist plan does not contain an announcement_tag" >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.release.outputs.tag }}
+          persist-credentials: false
+
+      - name: Generate a CycloneDX SBOM
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=0.5.9
+          archive="cargo-cyclonedx-x86_64-unknown-linux-gnu.tar.xz"
+          expected_sha256=fb8dbee9f182173e062a64a387b21a0badc6fab8b2abf9294973f012972bf6d8
+          tmpdir="$(mktemp -d)"
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            "https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-${version}/${archive}" \
+            -o "$tmpdir/$archive"
+          printf '%s  %s\n' "$expected_sha256" "$archive" | (cd "$tmpdir" && sha256sum --check -)
+          mkdir -p "$HOME/.cargo/bin"
+          tar -xJf "$tmpdir/$archive" -C "$HOME/.cargo/bin" --strip-components=1 \
+            "cargo-cyclonedx-x86_64-unknown-linux-gnu/cargo-cyclonedx"
+          export PATH="$HOME/.cargo/bin:$PATH"
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" cargo cyclonedx -f json -v
+          tag="${{ steps.release.outputs.tag }}"
+          mv stuntdouble.cdx.json "stuntdouble-${tag#v}.cdx.json"
+
+      - name: Attach the conventional checksum file
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p checksums
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'sha256.sum' --dir checksums
+          cp checksums/sha256.sum SHA256SUMS
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -Fxq 'SHA256SUMS'; then
+            echo "SHA256SUMS is already attached to $TAG; leaving it unchanged."
+          else
+            gh release upload "$TAG" SHA256SUMS --repo "$GITHUB_REPOSITORY"
+          fi
+
+      - name: Attach the SBOM to the GitHub Release
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          asset="stuntdouble-${TAG#v}.cdx.json"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -Fxq "$asset"; then
+            echo "$asset is already attached to $TAG; leaving it unchanged."
+          else
+            gh release upload "$TAG" "$asset" --repo "$GITHUB_REPOSITORY"
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check the container tag
+        id: image
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY}:${TAG}"
+          if digest="$(docker buildx imagetools inspect "$image" 2>/dev/null | awk '/^Digest:/ { print $2; exit }')" && [[ -n "$digest" ]]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "digest=$digest" >> "$GITHUB_OUTPUT"
+            echo "$image already exists at $digest; skipping the push."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push the container image
+        id: container
+        if: ${{ steps.image.outputs.exists != 'true' }}
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/${{ github.repository }}:${{ steps.release.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.release.outputs.tag }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          provenance: false
+
+      - name: Resolve the container digest
+        id: container-digest
+        env:
+          EXISTING_DIGEST: ${{ steps.image.outputs.digest }}
+          PUSHED_DIGEST: ${{ steps.container.outputs.digest }}
+        run: |
+          set -euo pipefail
+          digest="${PUSHED_DIGEST:-$EXISTING_DIGEST}"
+          if [[ -z "$digest" ]]; then
+            echo "container digest is empty" >&2
+            exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Attest the container image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.container-digest.outputs.digest }}
+          push-to-registry: true
+
+      - name: Verify the container image is pullable
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY}:${TAG}"
+          for attempt in 1 2 3 4 5; do
+            if docker pull "$image" >/dev/null; then
+              exit 0
+            fi
+            echo "pull attempt $attempt failed; retrying" >&2
+            sleep 5
+          done
+          echo "failed to pull $image" >&2
+          exit 1
+
+      - name: Verify the container attestation
+        env:
+          DIGEST: ${{ steps.container-digest.outputs.digest }}
+        run: |
+          set -euo pipefail
+          image="oci://ghcr.io/${GITHUB_REPOSITORY}@${DIGEST}"
+          for attempt in 1 2 3 4 5; do
+            if gh attestation verify "$image" --repo "$GITHUB_REPOSITORY"; then
+              exit 0
+            fi
+            echo "container attestation attempt $attempt failed; retrying" >&2
+            sleep 5
+          done
+          echo "failed to verify the container attestation for $image" >&2
+          exit 1
+
+      - name: Attach the container reference to the GitHub Release
+        shell: bash
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+          DIGEST: ${{ steps.container-digest.outputs.digest }}
+        run: |
+          set -euo pipefail
+          asset="stuntdouble-${TAG#v}-image.txt"
+          reference="ghcr.io/${GITHUB_REPOSITORY}:${TAG}@${DIGEST}"
+          existing="$(mktemp -d)"
+          if gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --dir "$existing" 2>/dev/null; then
+            if diff -q <(printf '%s\n' "$reference") "$existing/$asset" >/dev/null; then
+              echo "$asset already matches $DIGEST; leaving it unchanged."
+              exit 0
+            fi
+            echo "$asset already exists with a different digest; refusing to overwrite" >&2
+            exit 1
+          fi
+          printf '%s\n' "$reference" > "$asset"
+          gh release upload "$TAG" "$asset" --repo "$GITHUB_REPOSITORY"
+
+      - name: Download the Linux archive
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p verify
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'stuntdouble-x86_64-unknown-linux-gnu.tar.gz' --dir verify
+
+      - name: Verify the binary attestation
+        run: |
+          set -euo pipefail
+          archive=verify/stuntdouble-x86_64-unknown-linux-gnu.tar.gz
+          for attempt in 1 2 3 4 5; do
+            if gh attestation verify "$archive" --repo "$GITHUB_REPOSITORY"; then
+              exit 0
+            fi
+            echo "binary attestation attempt $attempt failed; retrying" >&2
+            sleep 5
+          done
+          echo "failed to verify the binary attestation for $archive" >&2
+          exit 1
+
+      - name: Verify the required release assets
+        shell: bash
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          required=(
+            "ctx-api-v1.d.ts"
+            "SHA256SUMS"
+            "sha256.sum"
+            "stuntdouble-${version}.cdx.json"
+            "stuntdouble-${version}-image.txt"
+            "stuntdouble-aarch64-apple-darwin.tar.gz"
+            "stuntdouble-x86_64-pc-windows-msvc.zip"
+            "stuntdouble-x86_64-unknown-linux-gnu.tar.gz"
+          )
+          actual="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          missing=0
+          for asset in "${required[@]}"; do
+            if ! grep -Fxq "$asset" <<<"$actual"; then
+              echo "missing release asset: $asset" >&2
+              missing=1
+            fi
+          done
+          exit "$missing"

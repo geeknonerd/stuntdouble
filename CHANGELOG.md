@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Ninth implementation slice (T9): release automation is active. `release-plz` owns version PRs,
+  tags, and changelog updates (`publish = false`, `git_only = true`) and dispatches cargo-dist for
+  each tag. cargo-dist builds Linux x86_64, macOS arm64, and Windows x86_64 `.tar.gz`/`.zip`
+  archives with per-file checksums and `sha256.sum`, attaches `SHA256SUMS` and
+  `types/ctx-api-v1.d.ts`, and creates GitHub artifact attestations. A post-announce job generates a
+  CycloneDX SBOM, publishes the multi-stage container image to
+  `ghcr.io/geeknonerd/stuntdouble:<tag>` with an `actions/attest-build-provenance` attestation and a
+  digest asset, verifies the released Linux archive and container attestations with
+  `gh attestation verify`, and asserts that every required release asset is attached. CodeQL
+  advanced scanning runs on `main`, pull requests, and a weekly schedule, and the MSRV job now
+  checks the locked dependency graph. Repository setup enables GitHub Actions-created pull requests;
+  a fine-grained `RELEASE_PLZ_TOKEN` secret is optional and makes release-PR CI run automatically.
 - Tenth implementation slice (T10): `serve` now handles Ctrl-C (SIGINT) on all platforms and
   SIGTERM on Unix. The first signal stops accepting new connections and drains in-flight requests
   through `axum::serve(...).with_graceful_shutdown(...)` before exiting `0`; a second signal observed

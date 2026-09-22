@@ -1,0 +1,10 @@
+[workspace]
+# This repository currently publishes release binaries and container images,
+# not the crate itself. Set publish = true and provide CARGO_REGISTRY_TOKEN in
+# the release-plz workflow to enable crates.io publishing.
+publish = false
+# release-plz creates the tag; cargo-dist owns the GitHub Release and its assets.
+git_release_enable = false
+git_tag_enable = true
+# Published state is derived from git tags because the crate is not on crates.io.
+git_only = true
