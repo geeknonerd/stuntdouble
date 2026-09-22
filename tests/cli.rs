@@ -1,11 +1,13 @@
 //! End-to-end checks through the only seam: the built binary plus real HTTP.
+use std::cell::RefCell;
 use std::fmt::Write as _;
+use std::fs::File;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -71,9 +73,58 @@ fn with_sandbox(body: &str, timeout_ms: u64) -> String {
     )
 }
 
-fn reserve_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
-    listener.local_addr().expect("local addr").port()
+/// Fixture ports are allocated explicitly instead of asking the kernel for an
+/// ephemeral one: `bind(127.0.0.1:0)` draws from the same range as client
+/// sockets, so a concurrent test could take a port another test just proved
+/// closed and then answer that test's "unreachable upstream" call, or bind a
+/// port that is meant to stay free. Walking a private range keeps fixture ports
+/// disjoint; it starts below the common ephemeral ranges so client sockets do
+/// not land in it either.
+const FIXTURE_PORT_START: u16 = 20_000;
+const FIXTURE_PORT_END: u16 = 30_000;
+const FIXTURE_PORT_SPAN: u16 = FIXTURE_PORT_END - FIXTURE_PORT_START + 1;
+
+/// Bind the next free fixture port. Callers that must own the port keep the
+/// listener (`Upstream`); callers that only need the number drop it.
+fn bind_fixture_port() -> TcpListener {
+    static NEXT: OnceLock<Mutex<u16>> = OnceLock::new();
+    let mut next = NEXT
+        .get_or_init(|| Mutex::new(fixture_port_start()))
+        .lock()
+        .expect("fixture port cursor");
+    for _ in 0..FIXTURE_PORT_SPAN {
+        let port = *next;
+        *next = if port >= FIXTURE_PORT_END {
+            FIXTURE_PORT_START
+        } else {
+            port + 1
+        };
+        if let Ok(listener) = TcpListener::bind(("127.0.0.1", port)) {
+            return listener;
+        }
+    }
+    panic!("no free fixture port in {FIXTURE_PORT_START}..={FIXTURE_PORT_END}");
+}
+
+/// Concurrent copies of this suite must not walk the same ports in lockstep,
+/// so the cursor starts at a process-specific offset inside the private range.
+fn fixture_port_start() -> u16 {
+    let offset = std::process::id().wrapping_mul(4099) % u32::from(FIXTURE_PORT_SPAN);
+    FIXTURE_PORT_START + u16::try_from(offset).expect("offset inside fixture range")
+}
+
+/// Port handed to a served child, which binds it after this returns.
+fn next_fixture_port() -> u16 {
+    bind_fixture_port()
+        .local_addr()
+        .expect("fixture addr")
+        .port()
+}
+
+/// Port that has to stay free for the whole test: the cursor never hands it out
+/// again, so no fixture in this process can bind it.
+fn closed_port() -> u16 {
+    next_fixture_port()
 }
 
 fn run(args: &[&str]) -> (i32, String, String) {
@@ -85,32 +136,103 @@ fn run(args: &[&str]) -> (i32, String, String) {
     )
 }
 
-fn serve_with_args(config: &Path, env: &[(&str, &str)], args: &[&str]) -> Child {
+/// Fresh ports a served fixture tries before the startup failure is fatal.
+const SERVE_ATTEMPTS: usize = 5;
+
+/// Outcome of waiting for a served child to announce its listening socket.
+enum Started {
+    Ready,
+    /// The child exited before owning the port: usually a concurrent test took
+    /// it, but a genuine startup failure looks the same here. The message
+    /// carries the child's stderr.
+    Exited(String),
+    /// The child stayed alive past the deadline without announcing a listener.
+    Silent(String),
+}
+
+/// Serve `prepare(port)`'s config with `env`/`args` and run `run_tests`
+/// against it once the child owns the announced port.
+///
+/// Readiness cannot be a bare connect probe: `next_fixture_port()` releases the
+/// port before the child binds it, so anything else on the machine can take it
+/// in between, answer the probe and leave the child dying with "Address already
+/// in use" while the client talks to the wrong process. Only the child's own
+/// announcement proves readiness; a lost port is retried on a fresh one.
+/// `prepare` runs per attempt so the fixture lands on the port the child bound.
+fn serve_and_run<T>(
+    prepare: impl Fn(u16) -> PathBuf,
+    env: &[(&str, &str)],
+    args: &[&str],
+    run_tests: impl FnOnce(u16) -> T,
+) -> (T, String) {
+    let mut last_failure = String::new();
+    for _ in 1..=SERVE_ATTEMPTS {
+        let port = next_fixture_port();
+        let config = prepare(port);
+        let log = config.with_extension("serve.stderr");
+        let mut child = serve_with_args(&config, env, args, &log);
+        match wait_ready(port, &mut child, &log) {
+            Started::Ready => {
+                let value = run_tests(port);
+                stop(&mut child);
+                return (value, std::fs::read_to_string(&log).unwrap_or_default());
+            }
+            Started::Exited(message) => {
+                stop(&mut child);
+                last_failure = message;
+            }
+            Started::Silent(message) => {
+                stop(&mut child);
+                panic!("{message}");
+            }
+        }
+    }
+    panic!("serve did not own a fresh port in {SERVE_ATTEMPTS} attempts: {last_failure}");
+}
+
+fn stop(child: &mut Child) {
+    let _ = child.kill();
+    child.wait().expect("reap server");
+}
+
+/// Spawn `serve` with its stderr captured in `log`, which carries both the
+/// startup announcement and the request logs the tests assert on.
+fn serve_with_args(config: &Path, env: &[(&str, &str)], args: &[&str], log: &Path) -> Child {
     let mut command = Command::new(BIN);
     command
         .args(["serve", "--config"])
         .arg(config)
         .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(File::create(log).expect("serve log")));
     for (key, value) in env {
         command.env(key, value);
     }
     command.spawn().expect("spawn serve")
 }
 
-fn wait_ready(port: u16, child: &mut Child) {
+fn wait_ready(port: u16, child: &mut Child, log: &Path) -> Started {
     let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return;
+    loop {
+        let text = std::fs::read_to_string(log).unwrap_or_default();
+        if text.lines().any(|line| listener_announcement(line, port)) {
+            return Started::Ready;
         }
         if let Some(status) = child.try_wait().expect("try_wait") {
-            panic!("server exited early with {status}");
+            return Started::Exited(format!("server exited early with {status}: {text}"));
         }
-        std::thread::sleep(Duration::from_millis(20));
+        if Instant::now() >= deadline {
+            return Started::Silent(format!("server never announced port {port}: {text}"));
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
-    panic!("server never accepted connections on port {port}");
+}
+
+/// `serve` prints this once its socket is bound, e.g.
+/// `stuntdouble listening on http://127.0.0.1:34567`.
+fn listener_announcement(line: &str, port: u16) -> bool {
+    line.strip_prefix("stuntdouble listening on http://")
+        .is_some_and(|addr| addr.ends_with(&format!(":{port}")))
 }
 
 fn request(port: u16, method: &str, path: &str, headers: &[(&str, &str)]) -> Response {
@@ -226,7 +348,7 @@ impl Upstream {
     /// Variant for tests whose canned payloads must point back at the fake
     /// upstream: the responses are built once the bound port is known.
     fn start_with(build: impl FnOnce(u16) -> Vec<UpstreamResponse>) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind upstream");
+        let listener = bind_fixture_port();
         listener
             .set_nonblocking(true)
             .expect("nonblocking upstream");
@@ -362,34 +484,45 @@ fn with_server_full<T>(
     run_tests: impl FnOnce(u16) -> T,
 ) -> (T, String) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let port = reserve_port();
-    let config = fixture_with_script(dir.path(), port, config_body, script);
-    serve_and_run(&config, port, env, run_tests)
+    serve_and_run(
+        |port| fixture_with_script(dir.path(), port, config_body, script),
+        env,
+        &[],
+        run_tests,
+    )
 }
 
-/// Serve one configuration and hand back the test result plus server stderr.
-fn serve_and_run<T>(
-    config: &Path,
-    port: u16,
-    env: &[(&str, &str)],
-    run_tests: impl FnOnce(u16) -> T,
-) -> (T, String) {
-    serve_and_run_with_args(config, port, env, &[], run_tests)
-}
-
-fn serve_and_run_with_args<T>(
-    config: &Path,
-    port: u16,
-    env: &[(&str, &str)],
-    args: &[&str],
-    run_tests: impl FnOnce(u16) -> T,
-) -> (T, String) {
-    let mut child = serve_with_args(config, env, args);
-    wait_ready(port, &mut child);
-    let value = run_tests(port);
-    child.kill().expect("kill server");
-    let output = child.wait_with_output().expect("collect output");
-    (value, String::from_utf8_lossy(&output.stderr).into_owned())
+/// A port handed to a served child is probed and released before the child
+/// binds it, so another listener can take it in between. Readiness must come
+/// from our own child, never from the thief's listener, and the fixture must be
+/// retried onto a port it owns.
+#[test]
+fn stolen_probed_port_is_retried_until_the_served_child_owns_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let squatted: RefCell<Vec<TcpListener>> = RefCell::new(Vec::new());
+    let first_attempt = RefCell::new(true);
+    let (response, stderr) = serve_and_run(
+        |port| {
+            if first_attempt.replace(false) {
+                // Deterministic stand-in for the concurrent test that wins the
+                // race. If something already took the port, the child loses it
+                // the same way, so the squat is best effort either way.
+                if let Ok(listener) = TcpListener::bind(("127.0.0.1", port)) {
+                    squatted.borrow_mut().push(listener);
+                }
+            }
+            fixture_with_script(dir.path(), port, good_config(), OK_SCRIPT)
+        },
+        &[],
+        &[],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(
+        response.status, 200,
+        "body: {} stderr: {stderr}",
+        response.body
+    );
+    assert_eq!(response.body, "ok", "stderr: {stderr}");
 }
 
 #[test]
@@ -638,11 +771,12 @@ fn verbose_adds_a_stable_detail_to_script_errors() {
     );
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let port = reserve_port();
-    let config = fixture_with_script(dir.path(), port, good_config(), script);
-    let (verbose, _) = serve_and_run_with_args(&config, port, &[], &["--verbose"], |port| {
-        request(port, "GET", "/demo/documents/manifest/group-a", &[])
-    });
+    let (verbose, _) = serve_and_run(
+        |port| fixture_with_script(dir.path(), port, good_config(), script),
+        &[],
+        &["--verbose"],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
     assert_eq!(verbose.status, 500, "body: {}", verbose.body);
     assert_eq!(
         json_string(&verbose.body, "detail").as_deref(),
@@ -664,16 +798,9 @@ ctx.http.get(ctx.env.UPSTREAM_URL);
 ctx.respond(200, {}, "should not respond");
 "#;
     let dir = tempfile::tempdir().expect("tempdir");
-    let port = reserve_port();
-    let config = fixture_with_script(
-        dir.path(),
-        port,
-        &with_upstream(good_config(), &["127.0.0.1"]),
-        script,
-    );
-    let (response, _) = serve_and_run_with_args(
-        &config,
-        port,
+    let config_body = with_upstream(good_config(), &["127.0.0.1"]);
+    let (response, _) = serve_and_run(
+        |port| fixture_with_script(dir.path(), port, &config_body, script),
         &[("UPSTREAM_URL", url.as_str())],
         &["--verbose"],
         |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
@@ -1137,12 +1264,13 @@ fn failing_route_leaves_other_routes_and_the_server_healthy() {
     )
     .expect("runaway script");
     std::fs::write(dir.path().join("scripts/ok.js"), OK_SCRIPT).expect("ok script");
-    let port = reserve_port();
     let config = dir.path().join("stuntdouble.toml");
-    std::fs::write(
-        &config,
-        format!(
-            r#"config_version = "1"
+    let (responses, stderr) = serve_and_run(
+        |port| {
+            std::fs::write(
+                &config,
+                format!(
+                    r#"config_version = "1"
 
 [server]
 bind = "127.0.0.1"
@@ -1163,16 +1291,21 @@ method = "GET"
 path = "/healthy"
 script = "scripts/ok.js"
 "#
-        ),
-    )
-    .expect("config");
-    let (responses, stderr) = serve_and_run(&config, port, &[], |port| {
-        (
-            request(port, "GET", "/runaway", &[]),
-            request(port, "GET", "/healthy", &[]),
-            request(port, "GET", "/runaway", &[]),
-        )
-    });
+                ),
+            )
+            .expect("config");
+            config.clone()
+        },
+        &[],
+        &[],
+        |port| {
+            (
+                request(port, "GET", "/runaway", &[]),
+                request(port, "GET", "/healthy", &[]),
+                request(port, "GET", "/runaway", &[]),
+            )
+        },
+    );
     let (first, healthy, second) = responses;
     assert_eq!(first.status, 500, "body: {} stderr: {stderr}", first.body);
     assert_eq!(error_class(&first.body).as_deref(), Some("script_error"));
@@ -1233,13 +1366,6 @@ ctx.respond(200, { "Content-Type": "application/json" }, JSON.stringify({
             123, 34, 104, 101, 108, 108, 111, 34, 58, 34, 119, 111, 114, 108, 100, 34, 125
         ])
     );
-}
-
-fn closed_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
-    let port = listener.local_addr().expect("local addr").port();
-    drop(listener);
-    port
 }
 
 fn error_class(body: &str) -> Option<String> {
@@ -2094,9 +2220,7 @@ fn demo_fixture(dir: &Path, port: u16) -> PathBuf {
 /// Serve a copy of the repository demo fixture with `env` set.
 fn with_demo<T>(env: &[(&str, &str)], run_tests: impl FnOnce(u16) -> T) -> (T, String) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let port = reserve_port();
-    let config = demo_fixture(dir.path(), port);
-    serve_and_run(&config, port, env, run_tests)
+    serve_and_run(|port| demo_fixture(dir.path(), port), env, &[], run_tests)
 }
 
 fn demo_manifest_request(port: u16, headers: &[(&str, &str)]) -> Response {
