@@ -174,6 +174,7 @@ fn serve_and_run<T>(
         match wait_ready(port, &mut child, &log) {
             Started::Ready => {
                 let value = run_tests(port);
+                wait_for_request_log(&log);
                 stop(&mut child);
                 return (value, std::fs::read_to_string(&log).unwrap_or_default());
             }
@@ -188,6 +189,23 @@ fn serve_and_run<T>(
         }
     }
     panic!("serve did not own a fresh port in {SERVE_ATTEMPTS} attempts: {last_failure}");
+}
+
+/// Streamed responses write their request log from a spawned relay task after
+/// the client already holds the body. Give that line a moment to land before
+/// the fixture process is stopped; assertions still fail if it never does.
+fn wait_for_request_log(log: &Path) {
+    let deadline = Instant::now() + Duration::from_millis(500);
+    loop {
+        let text = std::fs::read_to_string(log).unwrap_or_default();
+        if text.lines().any(|line| line.contains("\"request_id\"")) {
+            return;
+        }
+        if Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 fn stop(child: &mut Child) {
@@ -283,6 +301,30 @@ fn request_with_body(
         status,
         headers,
         body: body.to_string(),
+    }
+}
+
+/// Send one request and drop the connection after reading the response head
+/// plus one body byte, so the server observes a client that left mid-body.
+fn abort_after_response_head(port: u16) {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("read timeout");
+    let raw = "GET /demo/documents/manifest/group-a HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    stream.write_all(raw.as_bytes()).expect("write request");
+    stream.flush().expect("flush");
+    let mut bytes = Vec::new();
+    let mut buffer = [0_u8; 1024];
+    loop {
+        let read = stream.read(&mut buffer).expect("read response");
+        assert_ne!(read, 0, "server closed before the client could abort");
+        bytes.extend_from_slice(&buffer[..read]);
+        if let Some(head_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+            if bytes.len() > head_end + 4 {
+                return;
+            }
+        }
     }
 }
 
@@ -1868,6 +1910,40 @@ if (!produced) { ctx.respond(500, {}, "pipe did not produce a response"); }
     assert_eq!(call["error"], "upstream_stream_error");
     assert_eq!(call["kind"], "transport");
     assert!(call["duration_ms"].is_number(), "log: {line}");
+}
+
+#[test]
+fn ctx_http_pipe_client_disconnect_mid_body_is_logged() {
+    // Large enough that the relay cannot finish before the client aborts: the
+    // harness reads one body byte and closes the socket.
+    let body = vec![b'x'; 8 * 1024 * 1024];
+    let upstream = Upstream::start(vec![UpstreamResponse::new(200, &body)]);
+    let script = r#"
+var produced = ctx.http.pipe(ctx.env.UPSTREAM_URL);
+if (!produced) { ctx.respond(500, {}, "pipe did not produce a response"); }
+"#;
+    let url = upstream.url("/file.pdf");
+    let ((), stderr) = with_server_full(
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+        &[("UPSTREAM_URL", url.as_str())],
+        abort_after_response_head,
+    );
+    let line = stderr
+        .lines()
+        .find(|line| line.contains("\"request_id\""))
+        .unwrap_or_else(|| panic!("request log missing: {stderr}"));
+    let log: serde_json::Value = serde_json::from_str(line).expect("structured log json");
+    assert_eq!(log["status"], 200);
+    assert_eq!(log["error"], "client_disconnected", "log: {line}");
+    let call = &log["upstream_calls"][0];
+    assert_eq!(call["api"], "http.pipe");
+    assert_eq!(call["status"], 200);
+    let relayed = call["response_bytes"].as_u64().expect("relayed byte count");
+    assert!(
+        relayed < u64::try_from(body.len()).expect("body length"),
+        "the relay finished before the client aborted: {line}"
+    );
 }
 
 #[test]

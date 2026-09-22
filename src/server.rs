@@ -7,6 +7,7 @@ use crate::script::{self, RequestSnapshot, ResponseBody, ScriptResponse};
 use crate::upstream;
 use axum::body::{Body, Bytes};
 use axum::extract::State;
+use axum::http::header::CONTENT_LENGTH;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
@@ -238,7 +239,16 @@ async fn handle(
             log(&payload);
             body
         }
-        MappedBody::Stream(pipe) => stream_body(pipe, payload, started),
+        MappedBody::Stream(pipe) => {
+            // hyper frames the streamed body with this length and drops the
+            // relay as soon as it is satisfied, so a late channel close must
+            // not be misread as a client disconnect.
+            let announced = headers
+                .get(CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok());
+            stream_body(pipe, payload, started, announced)
+        }
     };
     (status, headers, body).into_response()
 }
@@ -352,12 +362,17 @@ fn elapsed_ms(started: Instant) -> f64 {
 /// Relay a piped body to the client and write the request log when it ends.
 /// The status line is already on the wire, so a mid-stream failure is recorded
 /// in the log without changing the client-visible status.
-fn stream_body(pipe: upstream::PipeBody, payload: Value, started: Instant) -> Body {
+fn stream_body(
+    pipe: upstream::PipeBody,
+    payload: Value,
+    started: Instant,
+    announced: Option<u64>,
+) -> Body {
     let upstream::PipeBody { stream, call } = pipe;
     let (sender, receiver) =
         tokio::sync::mpsc::channel::<Result<Bytes, io::Error>>(STREAM_CHANNEL_CAPACITY);
     tokio::spawn(async move {
-        relay_stream(stream, call, sender, payload, started).await;
+        relay_stream(stream, call, sender, payload, started, announced).await;
     });
     Body::from_stream(ReceiverStream::new(receiver))
 }
@@ -368,6 +383,7 @@ async fn relay_stream(
     sender: tokio::sync::mpsc::Sender<Result<Bytes, io::Error>>,
     mut payload: Value,
     started: Instant,
+    announced: Option<u64>,
 ) {
     let mut bytes = 0_u64;
     let mut outcome = upstream::StreamOutcome::Complete;
@@ -376,11 +392,12 @@ async fn relay_stream(
         tokio::select! {
             item = stream.recv() => match item {
                 Some(Ok(chunk)) => {
-                    bytes = bytes.saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+                    let chunk_bytes = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
                     if sender.send(Ok(Bytes::from(chunk))).await.is_err() {
-                        outcome = upstream::StreamOutcome::ClientDisconnected;
+                        outcome = upstream::StreamOutcome::from_channel_close(bytes, announced);
                         break;
                     }
+                    bytes = bytes.saturating_add(chunk_bytes);
                 }
                 Some(Err(error)) => {
                     outcome = upstream::StreamOutcome::UpstreamError;
@@ -390,7 +407,7 @@ async fn relay_stream(
                 None => break,
             },
             () = sender.closed() => {
-                outcome = upstream::StreamOutcome::ClientDisconnected;
+                outcome = upstream::StreamOutcome::from_channel_close(bytes, announced);
                 break;
             }
         }

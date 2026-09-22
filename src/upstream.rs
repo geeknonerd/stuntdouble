@@ -120,6 +120,21 @@ pub enum StreamOutcome {
 }
 
 impl StreamOutcome {
+    /// Classify a relay channel that closed before the upstream stream ended.
+    ///
+    /// hyper drops the response body as soon as the announced
+    /// `Content-Length` is satisfied, so a matching byte count is a completed
+    /// delivery, not a client disconnect. Without an announced length only an
+    /// early client close can close the channel.
+    #[must_use]
+    pub fn from_channel_close(bytes: u64, announced: Option<u64>) -> Self {
+        if announced == Some(bytes) {
+            Self::Complete
+        } else {
+            Self::ClientDisconnected
+        }
+    }
+
     /// Request-log error class when the stream did not complete normally.
     #[must_use]
     pub fn error_class(self) -> Option<&'static str> {
@@ -824,4 +839,33 @@ pub fn response_json(response: Response) -> Json {
         "text": String::from_utf8_lossy(&response.body),
         "body_base64": BASE64.encode(&response.body),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StreamOutcome;
+
+    #[test]
+    fn channel_close_after_the_announced_length_completes() {
+        assert_eq!(
+            StreamOutcome::from_channel_close(13, Some(13)),
+            StreamOutcome::Complete
+        );
+    }
+
+    #[test]
+    fn channel_close_before_the_announced_length_is_a_disconnect() {
+        assert_eq!(
+            StreamOutcome::from_channel_close(5, Some(13)),
+            StreamOutcome::ClientDisconnected
+        );
+    }
+
+    #[test]
+    fn channel_close_without_an_announced_length_is_a_disconnect() {
+        assert_eq!(
+            StreamOutcome::from_channel_close(13, None),
+            StreamOutcome::ClientDisconnected
+        );
+    }
 }
