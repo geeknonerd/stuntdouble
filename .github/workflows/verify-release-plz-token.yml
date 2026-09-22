@@ -1,0 +1,83 @@
+name: Verify release-plz token
+
+on:
+  push:
+    branches: [chore/verify-release-plz-token]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify RELEASE_PLZ_TOKEN
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Verify token capabilities
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          HEAD_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "RELEASE_PLZ_TOKEN is not configured" >&2
+            exit 1
+          fi
+
+          login="$(gh api user --jq '.login')"
+          echo "token_user=$login"
+          gh api "repos/$REPO" --jq '.full_name' >/dev/null
+          echo "repository_read=ok"
+
+          branch="token-check-$RUN_ID"
+          pr_url=""
+          cleanup() {
+            if [[ -n "${pr_url:-}" ]]; then
+              gh pr close "$pr_url" --repo "$REPO" --delete-branch >/dev/null 2>&1 || true
+            fi
+            if [[ -n "${branch:-}" ]]; then
+              gh api --method DELETE "repos/$REPO/git/refs/heads/$branch" >/dev/null 2>&1 || true
+            fi
+          }
+          trap cleanup EXIT
+
+          gh api --method POST "repos/$REPO/git/refs" \
+            -f "ref=refs/heads/$branch" -f "sha=$HEAD_SHA" >/dev/null
+          echo "contents_write=ok"
+
+          pr_url="$(gh pr create --repo "$REPO" --head "$branch" --base main \
+            --title "chore: verify release-plz token" \
+            --body "Temporary PR created by the RELEASE_PLZ_TOKEN verification workflow. It is closed automatically.")"
+          echo "pull_requests_write=ok"
+          echo "test_pr=$pr_url"
+
+          run_ids=""
+          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            run_ids="$(gh run list --repo "$REPO" --event pull_request --branch "$branch" \
+              --limit 10 --json databaseId --jq '.[].databaseId')"
+            if [[ -n "$run_ids" ]]; then
+              break
+            fi
+            echo "waiting for a pull_request workflow run (attempt $attempt)"
+            sleep 5
+          done
+
+          if [[ -z "$run_ids" ]]; then
+            echo "token created a PR but no pull_request workflow run was queued" >&2
+            exit 1
+          fi
+
+          echo "pull_request_runs=$(printf '%s\n' "$run_ids" | wc -l | tr -d ' ')"
+          while IFS= read -r run_id; do
+            [[ -n "$run_id" ]] || continue
+            gh run cancel "$run_id" --repo "$REPO" || true
+          done <<< "$run_ids"
+
+          gh pr close "$pr_url" --repo "$REPO" --delete-branch
+          pr_url=""
+          echo "cleanup=ok"
