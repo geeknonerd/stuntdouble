@@ -156,14 +156,23 @@ pub fn bind_address(config: &Config) -> io::Result<SocketAddr> {
     Ok(SocketAddr::new(ip, config.server.port))
 }
 
-pub async fn run(config: Config, addr: SocketAddr, verbose: bool) -> io::Result<()> {
+/// Run the HTTP server until `shutdown` resolves, then drain in-flight
+/// requests before returning.
+pub async fn run(
+    config: Config,
+    addr: SocketAddr,
+    verbose: bool,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> io::Result<()> {
     // Tradeoff: only log "listening" after socket binds successfully.
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
     eprintln!("stuntdouble listening on http://{bound}");
     let state = Arc::new(AppState::new(config, bound, verbose));
     let app = Router::new().fallback(any(handle)).with_state(state);
-    axum::serve(listener, app).await
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await
 }
 
 async fn handle(

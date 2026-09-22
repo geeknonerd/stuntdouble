@@ -41,6 +41,14 @@ _Avoid_: file root, document root, upload directory
 例外：把 body 直接交给客户端的流式能力无法把最终非 2xx 响应当作数据；它把该响应表现为可捕获错误，使脚本仍能掌握客户端可见的状态。
 _Avoid_: upstream error, backend error
 
+**Graceful shutdown**：
+`serve` 收到首次关闭信号后停止接受新连接、排空在途请求，再以正常完成状态退出的生命周期。
+_Avoid_: soft stop, graceful stop
+
+**Observed signal**：
+已被进程消费并据此开始关闭行为的关闭信号。只有第一次关闭信号被观测后，再次观测到的关闭信号才放弃排空并立即终止；标准信号不排队，第一次被观测前背靠背到达的同一信号可能合并成一次通知。
+_Avoid_: delivered signal（投递不等于已观测）
+
 **Request-local state**：
 在单个请求期间存放、请求结束即销毁的数据。
 _Avoid_: session, cache, shared state

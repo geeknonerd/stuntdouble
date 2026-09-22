@@ -56,6 +56,12 @@ stuntdouble serve --config stuntdouble.toml
 curl -i http://127.0.0.1:3000/hello/world
 ```
 
+## Stop the server
+
+Press Ctrl-C (SIGINT) or send SIGTERM on Unix. The first signal stops accepting new connections, drains in-flight requests, and exits `0`.
+
+If the shutdown takes too long, send the signal again: a second signal observed after the graceful shutdown has started abandons the drain and exits immediately with `130` (SIGINT/Ctrl-C) or `143` (SIGTERM). Standard signals are not queued, so two signals sent back-to-back before the first is observed may be coalesced; that case still drains normally and exits `0`. See the [CLI contract](../contracts/cli.md) for the full rules.
+
 ## Call an upstream API
 
 Upstream calls only reach hosts listed in `[upstream] allow_hosts`:

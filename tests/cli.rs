@@ -150,8 +150,8 @@ enum Started {
     Silent(String),
 }
 
-/// Serve `prepare(port)`'s config with `env`/`args` and run `run_tests`
-/// against it once the child owns the announced port.
+/// Start `serve` for `prepare(port)`'s config with `env`/`args`, returning the
+/// live child, its stderr log and the port it owns.
 ///
 /// Readiness cannot be a bare connect probe: `next_fixture_port()` releases the
 /// port before the child binds it, so anything else on the machine can take it
@@ -159,12 +159,11 @@ enum Started {
 /// in use" while the client talks to the wrong process. Only the child's own
 /// announcement proves readiness; a lost port is retried on a fresh one.
 /// `prepare` runs per attempt so the fixture lands on the port the child bound.
-fn serve_and_run<T>(
+fn start_serve(
     prepare: impl Fn(u16) -> PathBuf,
     env: &[(&str, &str)],
     args: &[&str],
-    run_tests: impl FnOnce(u16) -> T,
-) -> (T, String) {
+) -> (Child, PathBuf, u16) {
     let mut last_failure = String::new();
     for _ in 1..=SERVE_ATTEMPTS {
         let port = next_fixture_port();
@@ -172,12 +171,7 @@ fn serve_and_run<T>(
         let log = config.with_extension("serve.stderr");
         let mut child = serve_with_args(&config, env, args, &log);
         match wait_ready(port, &mut child, &log) {
-            Started::Ready => {
-                let value = run_tests(port);
-                wait_for_request_log(&log);
-                stop(&mut child);
-                return (value, std::fs::read_to_string(&log).unwrap_or_default());
-            }
+            Started::Ready => return (child, log, port),
             Started::Exited(message) => {
                 stop(&mut child);
                 last_failure = message;
@@ -189,6 +183,21 @@ fn serve_and_run<T>(
         }
     }
     panic!("serve did not own a fresh port in {SERVE_ATTEMPTS} attempts: {last_failure}");
+}
+
+/// Serve `prepare(port)`'s config and run `run_tests` against it once the child
+/// owns the announced port.
+fn serve_and_run<T>(
+    prepare: impl Fn(u16) -> PathBuf,
+    env: &[(&str, &str)],
+    args: &[&str],
+    run_tests: impl FnOnce(u16) -> T,
+) -> (T, String) {
+    let (mut child, log, port) = start_serve(prepare, env, args);
+    let value = run_tests(port);
+    wait_for_request_log(&log);
+    stop(&mut child);
+    (value, std::fs::read_to_string(&log).unwrap_or_default())
 }
 
 /// Streamed responses write their request log from a spawned relay task after
@@ -2689,5 +2698,255 @@ fn demo_manifest_route_does_not_forward_client_request_id() {
         !head.contains("x-request-id"),
         "client header leaked upstream: {}",
         requests[0]
+    );
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+enum SignalCase {
+    Interrupt,
+    Terminate,
+}
+
+#[cfg(unix)]
+impl SignalCase {
+    fn kill_arg(self) -> &'static str {
+        match self {
+            Self::Interrupt => "INT",
+            Self::Terminate => "TERM",
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Interrupt => "SIGINT",
+            Self::Terminate => "SIGTERM",
+        }
+    }
+
+    fn forced_exit_code(self) -> i32 {
+        match self {
+            Self::Interrupt => 130,
+            Self::Terminate => 143,
+        }
+    }
+}
+
+/// A served fixture whose route waits on a delayed upstream response.
+#[cfg(unix)]
+struct InFlightFixture {
+    upstream: Upstream,
+    child: Child,
+    log: PathBuf,
+    port: u16,
+    _dir: tempfile::TempDir,
+}
+
+#[cfg(unix)]
+fn start_in_flight_request(delay: Duration, body: &[u8]) -> InFlightFixture {
+    let upstream = Upstream::start(vec![UpstreamResponse::new(200, body).delay(delay)]);
+    let config_body = with_upstream(good_config(), &["127.0.0.1"]);
+    let script = format!(
+        r#"var r = ctx.http.get("{url}");
+ctx.respond(200, {{ "Content-Type": "text/plain; charset=utf-8" }}, r.text());
+"#,
+        url = upstream.url("/slow")
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (child, log, port) = start_serve(
+        |port| fixture_with_script(dir.path(), port, &config_body, &script),
+        &[],
+        &[],
+    );
+    InFlightFixture {
+        upstream,
+        child,
+        log,
+        port,
+        _dir: dir,
+    }
+}
+
+#[cfg(unix)]
+fn send_signal(child: &Child, signal: &str) {
+    let pid = child.id().to_string();
+    let status = Command::new("kill")
+        .args([format!("-{signal}"), pid.clone()])
+        .status()
+        .expect("run kill");
+    assert!(
+        status.success(),
+        "kill -{signal} {pid} failed with {status}"
+    );
+}
+
+#[cfg(unix)]
+fn wait_for_exit(child: &mut Child, timeout: Duration) -> std::process::ExitStatus {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            return status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("server did not exit within {timeout:?}");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_upstream_request(upstream: &Upstream) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while upstream.requests().is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "upstream did not receive a request in time"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_log(log: &Path, needle: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let text = std::fs::read_to_string(log).unwrap_or_default();
+        if text.contains(needle) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "log did not contain {needle:?}: {text}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(unix)]
+fn assert_first_signal_exits(signal: SignalCase) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (mut child, log, _) =
+        start_serve(|port| fixture(dir.path(), port, good_config()), &[], &[]);
+
+    send_signal(&child, signal.kill_arg());
+    let status = wait_for_exit(&mut child, Duration::from_secs(5));
+    let stderr = std::fs::read_to_string(&log).unwrap_or_default();
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "status: {status:?}, stderr: {stderr}"
+    );
+    let graceful = format!("{} received; starting graceful shutdown", signal.name());
+    assert!(stderr.contains(&graceful), "stderr: {stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn sigterm_triggers_graceful_shutdown_with_exit_code_zero() {
+    assert_first_signal_exits(SignalCase::Terminate);
+}
+
+#[cfg(unix)]
+#[test]
+fn sigint_triggers_graceful_shutdown_with_exit_code_zero() {
+    assert_first_signal_exits(SignalCase::Interrupt);
+}
+
+#[cfg(unix)]
+fn assert_drain_preserves_in_flight_request(signal: SignalCase) {
+    let mut fixture = start_in_flight_request(Duration::from_millis(500), b"drained");
+    let port = fixture.port;
+    let request_thread =
+        std::thread::spawn(move || request(port, "GET", "/demo/documents/manifest/group-a", &[]));
+    wait_for_upstream_request(&fixture.upstream);
+    send_signal(&fixture.child, signal.kill_arg());
+
+    let response = request_thread.join().expect("request thread");
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(response.body, "drained");
+    let status = wait_for_exit(&mut fixture.child, Duration::from_secs(5));
+    let stderr = std::fs::read_to_string(&fixture.log).unwrap_or_default();
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "status: {status:?}, stderr: {stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn sigterm_drains_in_flight_requests() {
+    assert_drain_preserves_in_flight_request(SignalCase::Terminate);
+}
+
+#[cfg(unix)]
+#[test]
+fn sigint_drains_in_flight_requests() {
+    assert_drain_preserves_in_flight_request(SignalCase::Interrupt);
+}
+
+#[cfg(unix)]
+fn assert_second_signal_forces_exit(signal: SignalCase) {
+    let mut fixture = start_in_flight_request(Duration::from_secs(30), b"late");
+    let mut client = TcpStream::connect(("127.0.0.1", fixture.port)).expect("connect");
+    let head = "GET /demo/documents/manifest/group-a HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    client.write_all(head.as_bytes()).expect("write request");
+    client.flush().expect("flush");
+    wait_for_upstream_request(&fixture.upstream);
+
+    send_signal(&fixture.child, signal.kill_arg());
+    let started = format!("{} received; starting graceful shutdown", signal.name());
+    wait_for_log(&fixture.log, &started);
+    assert!(
+        fixture.child.try_wait().expect("try_wait").is_none(),
+        "server exited before the second signal"
+    );
+
+    send_signal(&fixture.child, signal.kill_arg());
+    let status = wait_for_exit(&mut fixture.child, Duration::from_secs(5));
+    let stderr = std::fs::read_to_string(&fixture.log).unwrap_or_default();
+    assert_eq!(
+        status.code(),
+        Some(signal.forced_exit_code()),
+        "status: {status:?}, stderr: {stderr}"
+    );
+    let forced = format!("{} received again; terminating immediately", signal.name());
+    assert!(stderr.contains(&forced), "stderr: {stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn second_sigterm_terminates_immediately_with_exit_code_143() {
+    assert_second_signal_forces_exit(SignalCase::Terminate);
+}
+
+#[cfg(unix)]
+#[test]
+fn second_sigint_terminates_immediately_with_exit_code_130() {
+    assert_second_signal_forces_exit(SignalCase::Interrupt);
+}
+
+/// Back-to-back signals may be coalesced by the OS. Either the second signal is
+/// observed (exit 143) or the first signal drains normally (exit 0); neither
+/// path may hang.
+#[cfg(unix)]
+#[test]
+fn back_to_back_sigterm_signals_still_exit() {
+    let mut fixture = start_in_flight_request(Duration::from_secs(1), b"late");
+    let mut client = TcpStream::connect(("127.0.0.1", fixture.port)).expect("connect");
+    let head = "GET /demo/documents/manifest/group-a HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    client.write_all(head.as_bytes()).expect("write request");
+    client.flush().expect("flush");
+    wait_for_upstream_request(&fixture.upstream);
+
+    send_signal(&fixture.child, SignalCase::Terminate.kill_arg());
+    send_signal(&fixture.child, SignalCase::Terminate.kill_arg());
+    let status = wait_for_exit(&mut fixture.child, Duration::from_secs(5));
+    let stderr = std::fs::read_to_string(&fixture.log).unwrap_or_default();
+    assert!(
+        matches!(status.code(), Some(0 | 143)),
+        "status: {status:?}, stderr: {stderr}"
     );
 }

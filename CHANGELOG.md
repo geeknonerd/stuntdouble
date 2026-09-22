@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Tenth implementation slice (T10): `serve` now handles Ctrl-C (SIGINT) on all platforms and
+  SIGTERM on Unix. The first signal stops accepting new connections and drains in-flight requests
+  through `axum::serve(...).with_graceful_shutdown(...)` before exiting `0`; a second signal observed
+  after the first has started the shutdown abandons the drain and terminates immediately with exit
+  code `130` (SIGINT/Ctrl-C) or `143` (SIGTERM). Standard signals are not queued, so back-to-back
+  signals delivered before the first is observed may coalesce into that first signal's normal drain.
+  Signal handling lives at the CLI boundary: `server::run` takes a shutdown future and only owns the
+  drain. Unix end-to-end tests cover both first signals, SIGINT/SIGTERM draining, the forced
+  second-signal path, and the coalesced-signal fallback. Migration: scripts that treated `130`/`143`
+  as the normal stop code should accept `0`; those codes now mean the operator forced an immediate
+  stop. The ADR 0011 T10 amendment records the exit-code and platform semantics.
 - Eighth implementation slice (T8): the first vertical slice's public contracts are frozen.
   `docs/contracts/config.md`, `docs/contracts/cli.md`, and `docs/contracts/ctx-api.md` now document the
   complete configuration schema, the actual CLI exit codes and output, and the implemented
@@ -86,7 +97,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Documentation now follows the three-tier language model recorded in ADR 0013: community and legal documents stay English, public documents (README, Pages landing page, `docs/guide/`, `docs/contracts/`, `demo/README.md`) ship English plus a `.zh-CN.md` translation, and development documents are Chinese. A new `docs-links` CI gate checks local Markdown links and translation pairs.
 - Dependency license and advisory checks now cover the shipped platforms (Linux x86_64, macOS arm64, Windows x86_64) instead of every target in the lockfile; `rustls-platform-verifier` carries Android/wasm-only root bundles whose data license is outside the project allowlist.
-- The CLI contract now documents that this slice's `serve` is terminated by SIGINT/SIGTERM rather than returning `0`; graceful shutdown is tracked in [#33](https://github.com/geeknonerd/stuntdouble/issues/33). The T8/T9 amendment to ADR 0012 records that `.d.ts` publication is a release-blocking T9 acceptance item.
+- The CLI contract now documents the final shutdown behavior: the first SIGINT/SIGTERM drains in-flight requests and returns `0`, while a second signal forces an immediate `130`/`143` exit. The T8/T9 amendment to ADR 0012 records that `.d.ts` publication is a release-blocking T9 acceptance item.
 - Contract documents are frozen for the v1 slice (T1–T8): `docs/contracts/config.md` includes the complete configuration and Route schema, `docs/contracts/cli.md` documents commands, flags, output, and exit codes, and `docs/contracts/ctx-api.md` marks the implemented `apiVersion` 1 subset and pending capabilities. `types/ctx-api-v1.d.ts` is the matching public type definition.
 
 - Open-source repository baseline: README, contribution guide, security policy, code of conduct, issue templates, and pull request template.
