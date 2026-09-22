@@ -25,7 +25,7 @@ Stunt Double 是一个用 Rust 实现的 Mock Server，面向需要对接真实�
 
 ## 当前状态
 
-**脚本执行、上游 HTTP、请求诊断与沙箱加固（T1–T7）已落地；v1 公开契约与 `ctx` API 类型定义已冻结（T8）。** `stuntdouble serve` 与 `stuntdouble validate` 读取 TOML 配置，按方法 + 路径匹配路由，并用内置 Boa 执行路由 JavaScript，宿主注入的 `ctx` 提供 `apiVersion` / `request` / `http.get` / `http.pipe` / `respond` / `log` / `env`。两类上游调用都只能访问 `[upstream] allow_hosts` 列出的 host：`ctx.http.get` 把上游 4xx/5xx 视为数据，未捕获的传输层失败映射为 502 `upstream_unreachable`；`ctx.http.pipe` 把上游 2xx 响应体绕开脚本堆直接流给客户端，转发 `Range` 并保留 206 `Content-Range`。未命中路由返回 404 `not_found`；脚本异常或超时返回 500 `script_error`，未调用 `ctx.respond` 返回 500 `script_no_response`，响应均带 `request_id`。脚本提供的响应 header 采用 fail-closed 校验：名称或值非法时返回 `script_error`，`ctx.http.pipe` 会在联系上游之前拒绝。脚本还运行在宿主管辖的资源边界内：配置的 `sandbox.script_timeout_ms` 应答时限、循环次数兜底，以及钉住的递归/VM 栈上限；引擎 panic 返回 500 `script_error`，不会拖垮服务。Boa 0.22 不暴露堆指标或 interrupt 钩子，进程内没有堆上限——威胁模型见 [SECURITY.md](SECURITY.md)，取舍见 [ADR 0003](plans/adr/0003-script-first-multi-runtime.md) 的 T3 修订。文档清单与 PDF 下载场景已提供可运行夹具 [demo/](demo/README.md)。每个请求还会向 stderr 写出一条结构化日志，包含上游调用链、脚本耗时、body 大小与白名单 header；`serve --verbose` 为 500/502 响应附加稳定的 `detail` 类别，便于本地诊断，且绝不包含堆栈、上游 body 或内部地址。T10 增加信号驱动的关闭：第一个 Ctrl-C/SIGINT 或 Unix SIGTERM 会排空在途请求后退出 `0`；shutdown 开始后观测到的第二个信号强制以 `130`/`143` 退出（标准信号不排队，背靠背发送可能合并）。T9 接通发布流水线：`release-plz` 创建版本 PR 与 tag，cargo-dist 构建 Linux x86_64、macOS arm64、Windows x86_64 归档并附上校验和、attestation 与 `apiVersion` 1 类型定义，Release 后置任务发布 CycloneDX SBOM 与 GHCR 镜像。本地静态文件、上传与文件响应待后续切片。见 [plans/adr/](plans/adr/)。
+**脚本执行、上游 HTTP、请求诊断与沙箱加固（T1–T7）已落地；v1 公开契约与 `ctx` API 类型定义已冻结（T8）。** `stuntdouble serve` 与 `stuntdouble validate` 读取 TOML 配置，按方法 + 路径匹配路由，并用内置 Boa 执行路由 JavaScript，宿主注入的 `ctx` 提供 `apiVersion` / `request` / `http.get` / `http.pipe` / `respond` / `log` / `env`。两类上游调用都只能访问 `[upstream] allow_hosts` 列出的 host：`ctx.http.get` 把上游 4xx/5xx 视为数据，未捕获的传输层失败映射为 502 `upstream_unreachable`；`ctx.http.pipe` 把上游 2xx 响应体绕开脚本堆直接流给客户端，转发 `Range` 并保留 206 `Content-Range`。未命中路由返回 404 `not_found`；脚本异常或超时返回 500 `script_error`，未调用 `ctx.respond` 返回 500 `script_no_response`，响应均带 `request_id`。脚本提供的响应 header 采用 fail-closed 校验：名称或值非法时返回 `script_error`，`ctx.http.pipe` 会在联系上游之前拒绝。脚本还运行在宿主管辖的资源边界内：配置的 `sandbox.script_timeout_ms` 应答时限、循环次数兜底，以及钉住的递归/VM 栈上限；引擎 panic 返回 500 `script_error`，不会拖垮服务。Boa 0.22 不暴露堆指标或 interrupt 钩子，进程内没有堆上限——威胁模型见 [SECURITY.md](SECURITY.md)，取舍见 [ADR 0003](plans/adr/0003-script-first-multi-runtime.md) 的 T3 修订。文档清单与 PDF 下载场景已提供可运行夹具 [demo/](demo/README.md)。每个请求还会向 stderr 写出一条结构化日志，包含上游调用链、脚本耗时、body 大小与白名单 header；`serve --verbose` 为 500/502 响应附加稳定的 `detail` 类别，便于本地诊断，且绝不包含堆栈、上游 body 或内部地址。T10 增加信号驱动的关闭：第一个 Ctrl-C/SIGINT 或 Unix SIGTERM 会排空在途请求后退出 `0`；shutdown 开始后观测到的第二个信号强制以 `130`/`143` 退出（标准信号不排队，背靠背发送可能合并）。T9 配置发布流水线：发布契约要求 `release-plz` 创建版本 PR 与 tag，cargo-dist 构建 Linux x86_64、macOS arm64、Windows x86_64 归档并附上校验和、attestation 与 `apiVersion` 1 类型定义，Release 后置任务附加 CycloneDX SBOM 与 GHCR 镜像 tag、digest。在首个 Release 通过 [docs/development.md](docs/development.md) 的验证清单前，这些是流水线的契约要求，不代表发布资产已经提供。本地静态文件、上传与文件响应待后续切片。见 [plans/adr/](plans/adr/)。
 
 ## 安装与验证
 
@@ -39,7 +39,7 @@ docker run --rm -p 8080:8080 \
   ghcr.io/geeknonerd/stuntdouble:vX.Y.Z
 ```
 
-每个 [GitHub Release](https://github.com/geeknonerd/stuntdouble/releases) 的构建流程都会附带 Linux x86_64、macOS arm64、Windows x86_64 归档、`SHA256SUMS`、CycloneDX SBOM、`ctx-api-v1.d.ts`、release notes 以及 GHCR 的 tag 与 digest。验证下载归档的构建来源：
+发布契约要求每个 [GitHub Release](https://github.com/geeknonerd/stuntdouble/releases) 包含 Linux x86_64、macOS arm64、Windows x86_64 归档、`SHA256SUMS`、CycloneDX SBOM、`ctx-api-v1.d.ts`、release notes 以及 GHCR 的 tag 与 digest；发布 workflow 会验证所有必需资产都已附带。验证下载归档的构建来源：
 
 ```bash
 gh attestation verify stuntdouble-x86_64-unknown-linux-gnu.tar.gz --repo geeknonerd/stuntdouble
@@ -56,7 +56,7 @@ gh attestation verify stuntdouble-x86_64-unknown-linux-gnu.tar.gz --repo geeknon
 - 上游 HTTP（`ctx.http.get` 与支持 Range 透传的流式 `ctx.http.pipe` 已实现，`ctx.http.request` 待后续切片）、静态文件读取、文件流、上传、本地文件 Range 响应。
 - 唯一静态文件根，并阻止路径穿越。
 - 静态配置 + 重启。热重载与 Admin API 推迟。
-- Linux x86_64、macOS arm64、Windows x86_64 二进制与容器镜像（T9 已接通发布自动化）。
+- Linux x86_64、macOS arm64、Windows x86_64 二进制与容器镜像（T9 已配置发布自动化）。
 - 结构化请求日志，包含 `request_id`、上游调用链、body 大小、白名单 header 与稳定错误分类。
 
 ## v1 不做

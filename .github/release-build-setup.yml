@@ -11,11 +11,20 @@
       echo "dry-run build; skipping the release-tag assertion"
       exit 0
     fi
-    if [[ ! "$RELEASE_TAG_INPUT" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+    if [[ ! "$RELEASE_TAG_INPUT" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
       echo "release tag '$RELEASE_TAG_INPUT' must match vMAJOR.MINOR.PATCH[-prerelease]" >&2
       exit 1
     fi
     if [[ "$REF_TYPE" != "tag" || "$REF_NAME" != "$RELEASE_TAG_INPUT" ]]; then
       echo "release '$RELEASE_TAG_INPUT' must be built from its tag (got $REF_TYPE '$REF_NAME')" >&2
+      exit 1
+    fi
+    if [[ "$(git rev-parse --is-shallow-repository)" == "true" ]]; then
+      git fetch --quiet --no-tags --unshallow origin main
+    else
+      git fetch --quiet --no-tags origin main
+    fi
+    if ! git merge-base --is-ancestor HEAD FETCH_HEAD; then
+      echo "release '$RELEASE_TAG_INPUT' is not reachable from origin/main" >&2
       exit 1
     fi

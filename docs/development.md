@@ -17,7 +17,7 @@
 每个 pull request 必须：
 
 - 使用 Conventional Commits 标题，因为 squash commit 会继承它
-- 通过 `fmt`、`clippy`、`test`、`docs`、`docs-links`、`deny`、`audit`、`msrv`、`codeql`、`pr-title`、`dco`
+- 通过 `fmt`、`clippy`、`test`、`docs`、`docs-links`、`deny`、`audit`、`msrv`、`pr-title`、`dco`
 - 解决全部 review 会话
 - 与 `main` 保持同步
 - 每个 commit 带 DCO 签名（`git commit -s`）
@@ -179,7 +179,7 @@ lychee --offline --no-progress --exclude-path target --exclude-path .git './**/*
 - `.github/workflows/release.yml`：由 `dist-workspace.toml` 生成；改配置后运行 `dist generate`，不要手工编辑该文件。
 - `.github/workflows/release-extras.yml`：cargo-dist 的 post-announce job，负责 SBOM、GHCR 镜像、digest，以及二进制、容器与必需 Release 资产的验证。
 - `.github/release-build-setup.yml`：cargo-dist 注入到每个构建 job 的步骤，拒绝非 tag 或其他 ref 的发布构建。
-- `.github/workflows/codeql.yml`：Rust 高级代码扫描，在 `main`、pull request 与每周计划任务上运行。
+- `.github/workflows/codeql.yml`：Rust 高级代码扫描，在 `main`、pull request 与每周计划任务上运行；它作为并行安全扫描，不加入分支保护的 required checks。
 - 仓库必须允许 GitHub Actions 创建 pull request（Settings → Actions → General → Workflow permissions）。
 - crates.io 发布默认关闭（`release-plz.toml` 的 `publish = false`）。启用时把 `publish` 改为 `true`，并在 `release-plz.yml` 的 release job 中提供 `CARGO_REGISTRY_TOKEN`。
 - 可选：配置细粒度 PAT `RELEASE_PLZ_TOKEN`（contents: write、pull-requests: write），让 release PR 触发的 CI 自动运行；未配置时 workflow 回退到 `GITHUB_TOKEN`，PR 仍会创建，但需要手动触发该分支的 CI。

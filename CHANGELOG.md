@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Ninth implementation slice (T9): release automation is active. `release-plz` owns version PRs,
+- Ninth implementation slice (T9): release automation is configured. `release-plz` owns version PRs,
   tags, and changelog updates (`publish = false`, `git_only = true`) and dispatches cargo-dist for
   each tag. cargo-dist builds Linux x86_64, macOS arm64, and Windows x86_64 `.tar.gz`/`.zip`
   archives with per-file checksums and `sha256.sum`, attaches `SHA256SUMS` and
@@ -38,7 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `apiVersion` 1 subset; incomplete capabilities (`ctx.request.bodyBytes`, `ctx.http.request`,
   `ctx.file.*`, `ctx.local`, and timers) are marked pending explicitly. `types/ctx-api-v1.d.ts` is the
   public editor type definition for the implemented subset; the release artifact contract requires
-  it, and T9 wires that pipeline. The manifest and PDF download demo scenarios remain validated by
+  it, and T9 configures that pipeline. The manifest and PDF download demo scenarios remain validated by
   end-to-end tests.
 - Sandbox hardening slice (T3): one script run now has an explicit resource envelope — the
   configured `sandbox.script_timeout_ms` deadline, a loop-iteration backstop, and pinned Boa
