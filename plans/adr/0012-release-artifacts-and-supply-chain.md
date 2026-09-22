@@ -35,7 +35,7 @@ Stunt Double 面向 CI 与本地开发，使用者需要可信的二进制与容
 - `cargo-dist`：多平台二进制、安装器、校验和与 GitHub Release 资产。
 - GitHub Actions：CI 与发布流程。
 - `cargo-deny` 与 `cargo-audit`：依赖与安全公告检查。
-- Dependabot：Cargo 与 GitHub Actions 更新。
+- Dependabot：Cargo、Docker 基础镜像与 GitHub Actions 更新。
 
 ## 启用时机
 
@@ -54,3 +54,13 @@ T8 与 T9 共同完成本 ADR 的发布目标，但职责分开：
 - T8 冻结并发布 `apiVersion` 1 的 `types/ctx-api-v1.d.ts` 源码定义，不激活发布流水线。
 - T9（#12）激活 release-plz、cargo-dist、容器、attestation 与 GitHub Release，并把每个受支持 `apiVersion` 的 `.d.ts` 作为必带资产。
 - T9 的验收必须包含 GitHub Release 附件验证；在验证完成前，文档只能声明“发布契约要求包含”，不得声明“已经随发布产物提供”。
+
+## T9 实施修订（2026-09-22）
+
+T9 的发布工作流已落地，执行时补充以下约束：
+
+- 发布构建只接受可从 `origin/main` 到达的严格 `vMAJOR.MINOR.PATCH[-prerelease]` tag；tag 与 `Cargo.toml` 版本的一致性由 cargo-dist 校验。
+- GHCR tag 不可覆盖。tag 已存在时复用 digest 并验证已有 attestation，不重新生成 provenance；无法确认 tag 是否存在时 fail closed。tag 不存在时才构建、推送并生成 attestation。
+- `release-extras` 失败或取消时，把已公开但不完整的 GitHub Release 回退为 draft。完整的 draft 编排仍待解决，跟踪于 #41。
+- CodeQL 作为并行安全扫描运行，不加入分支保护的 required checks；是否启用合并保护跟踪于 #45。
+- 其余后续硬化项：匿名 GHCR 拉取验证（#42）、资产清单单一来源（#43）、cargo-dist 权限与 installer 摘要（#44）。

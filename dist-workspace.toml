@@ -1,0 +1,43 @@
+[workspace]
+members = ["cargo:."]
+
+# Config for 'dist'
+[dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.33.0"
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+installers = []
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = [
+  "x86_64-unknown-linux-gnu",
+  "aarch64-apple-darwin",
+  "x86_64-pc-windows-msvc",
+]
+# Where to host releases
+hosting = "github"
+# Match the release contract's archive formats.
+unix-archive = ".tar.gz"
+windows-archive = ".zip"
+# Assert that a real release build runs from the release tag, never from main.
+github-build-setup = "../release-build-setup.yml"
+# release-plz creates the tag; the Release workflow is dispatched for exactly that tag.
+dispatch-releases = true
+# Sign release artifacts with GitHub artifact attestations.
+github-attestations = true
+# Generate the SBOM, publish the container image, and verify attestations after the GitHub Release exists.
+post-announce-jobs = ["./release-extras"]
+github-custom-job-permissions = { "release-extras" = { contents = "write", packages = "write", "id-token" = "write", "attestations" = "write" } }
+
+# Pin every Action used by the generated Release workflow.
+[dist.github-action-commits]
+"actions/checkout" = "3d3c42e5aac5ba805825da76410c181273ba90b1"       # v7.0.1
+"actions/upload-artifact" = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" # v7.0.1
+"actions/download-artifact" = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" # v8.0.1
+"actions/attest" = "1e69f48acb82d1966a394da916b4c1698aa569d6"          # v4.2.2
+
+# Publish the frozen apiVersion 1 type definitions alongside the binaries.
+[[dist.extra-artifacts]]
+artifacts = ["types/ctx-api-v1.d.ts"]
+build = ["true"]

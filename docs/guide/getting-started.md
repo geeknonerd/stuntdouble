@@ -16,6 +16,8 @@ cargo install --path .          # installs the stuntdouble binary
 cargo run -- serve --config stuntdouble.toml
 ```
 
+Release builds also target Linux x86_64, macOS arm64, and Windows x86_64 and publish a container image. The release contract requires archives, checksums, attestations, an SBOM, the `ctx` API type definition, and a GHCR tag plus digest for each release; download and verification commands are in the [README's Install and verify section](../../README.md#install-and-verify).
+
 ## Write a configuration
 
 Create `stuntdouble.toml` next to your scripts:

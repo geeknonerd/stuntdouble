@@ -13,6 +13,13 @@ updates:
           - "*"
         update-types:
           - patch
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: sunday
+      time: "04:00"
+    open-pull-requests-limit: 5
   - package-ecosystem: github-actions
     directory: /
     schedule:

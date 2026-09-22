@@ -18,6 +18,8 @@ cargo install --path .          # 安装 stuntdouble 二进制
 cargo run -- serve --config stuntdouble.toml
 ```
 
+发布构建还覆盖 Linux x86_64、macOS arm64、Windows x86_64，并发布容器镜像。发布契约要求每个 Release 包含归档、校验和、attestation、SBOM、`ctx` API 类型定义以及 GHCR tag 与 digest；下载与验证命令见 [README 的安装与验证段](../../README.zh-CN.md#安装与验证)。
+
 ## 写配置
 
 在脚本旁边创建 `stuntdouble.toml`：

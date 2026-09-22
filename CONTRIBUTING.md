@@ -46,7 +46,7 @@ We maintain 13 ADRs so far. Add additional ones when needed.
 
 ## Development workflow
 
-Use trunk-based development with short-lived branches and pull requests. `main` is always releasable. Squash merge is the only merge method; branches are deleted after merge. Every pull request must pass `fmt`, `clippy`, `test`, `docs`, `docs-links`, `deny`, `audit`, `msrv`, `pr-title`, and `dco`.
+Use trunk-based development with short-lived branches and pull requests. `main` is always releasable. Squash merge is the only merge method; branches are deleted after merge. Every pull request must pass `fmt`, `clippy`, `test`, `docs`, `docs-links`, `deny`, `audit`, `msrv`, `pr-title`, and `dco`. CodeQL runs in parallel as a security scan; it is not a required merge check.
 
 See [docs/development.md](docs/development.md) for the full workflow, versioning rules, and release process.
 

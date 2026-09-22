@@ -1,0 +1,9 @@
+.git
+.github
+target
+docs
+plans
+research
+tests
+*.cdx.json
+*.cdx.xml
