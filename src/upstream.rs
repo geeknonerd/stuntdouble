@@ -127,8 +127,8 @@ impl StreamOutcome {
     /// delivery, not a client disconnect. Without an announced length only an
     /// early client close can close the channel.
     #[must_use]
-    pub fn from_channel_close(bytes: u64, announced: Option<u64>) -> Self {
-        if announced == Some(bytes) {
+    pub fn from_channel_close(bytes: u64, announced_content_length: Option<u64>) -> Self {
+        if announced_content_length == Some(bytes) {
             Self::Complete
         } else {
             Self::ClientDisconnected

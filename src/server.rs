@@ -243,11 +243,11 @@ async fn handle(
             // hyper frames the streamed body with this length and drops the
             // relay as soon as it is satisfied, so a late channel close must
             // not be misread as a client disconnect.
-            let announced = headers
+            let announced_content_length = headers
                 .get(CONTENT_LENGTH)
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| value.parse::<u64>().ok());
-            stream_body(pipe, payload, started, announced)
+            stream_body(pipe, payload, started, announced_content_length)
         }
     };
     (status, headers, body).into_response()
@@ -366,13 +366,21 @@ fn stream_body(
     pipe: upstream::PipeBody,
     payload: Value,
     started: Instant,
-    announced: Option<u64>,
+    announced_content_length: Option<u64>,
 ) -> Body {
     let upstream::PipeBody { stream, call } = pipe;
     let (sender, receiver) =
         tokio::sync::mpsc::channel::<Result<Bytes, io::Error>>(STREAM_CHANNEL_CAPACITY);
     tokio::spawn(async move {
-        relay_stream(stream, call, sender, payload, started, announced).await;
+        relay_stream(
+            stream,
+            call,
+            sender,
+            payload,
+            started,
+            announced_content_length,
+        )
+        .await;
     });
     Body::from_stream(ReceiverStream::new(receiver))
 }
@@ -383,7 +391,7 @@ async fn relay_stream(
     sender: tokio::sync::mpsc::Sender<Result<Bytes, io::Error>>,
     mut payload: Value,
     started: Instant,
-    announced: Option<u64>,
+    announced_content_length: Option<u64>,
 ) {
     let mut bytes = 0_u64;
     let mut outcome = upstream::StreamOutcome::Complete;
@@ -394,7 +402,11 @@ async fn relay_stream(
                 Some(Ok(chunk)) => {
                     let chunk_bytes = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
                     if sender.send(Ok(Bytes::from(chunk))).await.is_err() {
-                        outcome = upstream::StreamOutcome::from_channel_close(bytes, announced);
+                        outcome =
+                            upstream::StreamOutcome::from_channel_close(
+                                bytes,
+                                announced_content_length,
+                            );
                         break;
                     }
                     bytes = bytes.saturating_add(chunk_bytes);
@@ -407,7 +419,8 @@ async fn relay_stream(
                 None => break,
             },
             () = sender.closed() => {
-                outcome = upstream::StreamOutcome::from_channel_close(bytes, announced);
+                outcome =
+                    upstream::StreamOutcome::from_channel_close(bytes, announced_content_length);
                 break;
             }
         }

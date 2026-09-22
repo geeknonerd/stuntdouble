@@ -192,19 +192,26 @@ fn serve_and_run<T>(
 }
 
 /// Streamed responses write their request log from a spawned relay task after
-/// the client already holds the body. Give that line a moment to land before
-/// the fixture process is stopped; assertions still fail if it never does.
+/// the client already holds the body, and multi-request fixtures finish with
+/// more than one line. Wait until the request-log line count stops growing
+/// before stopping the process; assertions still fail if a line never lands.
 fn wait_for_request_log(log: &Path) {
     let deadline = Instant::now() + Duration::from_millis(500);
+    let mut last_count = 0;
     loop {
         let text = std::fs::read_to_string(log).unwrap_or_default();
-        if text.lines().any(|line| line.contains("\"request_id\"")) {
+        let count = text
+            .lines()
+            .filter(|line| line.contains("\"request_id\""))
+            .count();
+        if count > 0 && count == last_count {
             return;
         }
+        last_count = count;
         if Instant::now() >= deadline {
             return;
         }
-        std::thread::sleep(Duration::from_millis(5));
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
