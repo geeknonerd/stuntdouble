@@ -1,7 +1,7 @@
 ---
 title: "Bridge blocking upstream reads into an async streaming response"
 date: 2026-09-21
-last_updated: 2026-09-21
+last_updated: 2026-09-22
 category: architecture-patterns
 module: upstream HTTP streaming bridge
 problem_type: architecture_pattern
@@ -243,9 +243,9 @@ try {
 | 不变量 | 测试／证据 |
 | --- | --- |
 | 脚本 status/headers、上游字节与上游 `Content-Length` 随流一起传递 | `ctx_http_pipe_streams_upstream_bytes_with_status_and_headers`（`tests/cli.rs:1198-1223`） |
-| 完成日志在 body 结束后写出，并记录精确 relay 字节数 | `ctx_http_pipe_streams_upstream_bytes_with_status_and_headers`（断言完成日志、`response_bytes`、空 error） |
+| 完成日志在 body 结束后写出，并记录精确 relay 字节数 | `ctx_http_pipe_streams_upstream_bytes_with_status_and_headers`（断言完成日志、`response_bytes`、空 error）；通道先关闭时的分类见下方「完成态与客户端断开的竞态（issue #37）」 |
 | 中途上游读取失败记为 `upstream_stream_error`，不改变已发出的状态 | `ctx_http_pipe_mid_stream_failure_is_logged_after_headers`（截断 `Content-Length`；断言 error/kind/duration 与 relay bytes；客户端长度只断言 `<=` 上游长度） |
-| 客户端中途断开的 `client_disconnected` 分类 | 由 `relay_stream` 的 `sender.closed()` 分支实现；当前没有独立端到端断言（T6 审查曾追问客户端中断覆盖），后续补测应覆盖该分支 |
+| 客户端中途断开的 `client_disconnected` 分类 | `ctx_http_pipe_client_disconnect_mid_body_is_logged`（8 MiB body，客户端读 1 字节后断开）端到端断言该分类；`StreamOutcome::from_channel_close` 的三个单测覆盖长度匹配、长度不足与无长度三种判定 |
 | 最终非 2xx 可作为 `upstream_http_error` 捕获，未捕获时为 500 `script_error` | `tests/cli.rs:1266-1301` |
 | 传输层失败可作为 `upstream_unreachable` 捕获 | `tests/cli.rs:1303-1323` |
 | 默认状态是上游 2xx 状态，不是硬编码 200 | `ctx_http_pipe_defaults_to_the_upstream_2xx_status`（`tests/cli.rs:1423-1435`） |
@@ -273,9 +273,20 @@ T6 在响应头确定后就把 stream 交给 axum，日志也在那时写出；�
 - 在 header 时写一条、流结束时再补一条会破坏「每请求一条结构化日志」的契约，并造成重复计数与 request_id 相关性混乱；应由同一个幂等的流终态 finalizer 完成。
 - header 之后的上游读失败也不能继续映射为 `upstream_unreachable`：header 已送出，无法再把客户端状态改成 502，日志需要独立的 `upstream_stream_error` 终态。
 
+### 完成态与客户端断开的竞态（issue #37）
+
+hyper 在满足 `Content-Length` 后会立即完成响应并 drop body stream，`relay_stream` 的 `sender.closed()` 可能先于上游 EOF 触发；修复前这条路径无条件记 `client_disconnected`，把完整交付误报成客户端断开。现在两条通道关闭路径统一调用 `StreamOutcome::from_channel_close(bytes, announced_content_length)`：已送入字节与声明的 `Content-Length` 匹配时记 `Complete`，否则记 `client_disconnected`；没有声明长度时只可能是客户端提前离开。
+
+E2E harness 在停服前等待请求日志行数稳定（`wait_for_request_log`），避免进程先退出导致完成日志缺失。回归证据：旧实现在 `--test-threads=32` 下 24 轮内第 5 轮复现原始断言失败，修复后同条件 24/24 通过。
+
 ### relayed 不等于 delivered
 
-`response_body_bytes` 统计 relay 已读取并尝试送入响应 body 的字节数，不承诺客户端逐字节收到。实测 hyper 在 body stream 报错时可能丢弃已缓冲 chunk，客户端收到的字节可能少于 relay 计数；实现先累加 chunk 再 `send`（`src/server.rs` 的 `relay_stream`），失败路径的回归测试因此断言客户端长度 `<=` 上游长度，同时精确断言 relay 读取到的字节数。`http.pipe` 的调用记录同样在流结束时写入 `response_bytes`。
+`response_body_bytes` 统计 relay 成功送入响应 body channel 的字节数，不承诺客户端逐字节收到。实测 hyper 在 body stream 报错时可能丢弃已缓冲 chunk，客户端收到的字节可能少于 relay 计数；实现先 `send` 后累加，发送失败的 chunk 不计入，失败路径的回归测试因此断言客户端长度 `<=` 上游长度，同时精确断言 relay 送入的字节数。`http.pipe` 的调用记录同样在流结束时写入 `response_bytes`。
+
+已知边界（v1 不追求连接层精确交付判定）：
+
+- body 在 channel 容量内（最多 4 × 64 KiB）已全部送入、但 hyper 尚未 poll／写出时客户端取消，仍会按 `Complete` 记录；精确区分需要一个能观察连接层写完成的 body adapter，超出当前冻结契约的范围。真实误报出现时再升级。
+- HEAD、204、304 这类 hyper 不发送 body 的响应可能被记为 `client_disconnected`；`ctx.http.pipe` 的业务用法默认是 2xx 带 body，暂不为该组合增加分支。
 
 T6 段落中的代码行号会随代码演进漂移；行为以公开契约与本节为准。
 
@@ -287,4 +298,4 @@ T6 段落中的代码行号会随代码演进漂移；行为以公开契约与�
 - `docs/solutions/conventions/script-owned-upstream-error-mapping.md` —— 路由级业务错误映射；本文有意把那张表留给它。
 - `tests/cli.rs` —— 针对传输、重定向、URL、状态、大小与 Range 不变量的端到端 fake-upstream 覆盖。
 - PR #19 —— T6 模式的实现与验证上下文（已合并）。T7 的完成日志修复见 PR #25（已合并，关闭 issue #10）。
-- 相关 issue：#9（T6 来源）、#10（T7 可观测性完成，已关闭）、#7（allowlist 与传输边界）、#8（路由级错误映射）、#3（父 spec；文件流与上传是后续复用范围）。
+- 相关 issue：#9（T6 来源）、#10（T7 可观测性完成，已关闭）、#7（allowlist 与传输边界）、#8（路由级错误映射）、#37（完成态误报与通道关闭分类）、#3（父 spec；文件流与上传是后续复用范围）。

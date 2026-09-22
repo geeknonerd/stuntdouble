@@ -103,8 +103,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A fully delivered `ctx.http.pipe` response is no longer logged as `client_disconnected` when hyper
   closes the relay as soon as the announced `Content-Length` is satisfied. The completion line keeps
-  `"error": ""` once every announced byte is delivered, and `client_disconnected` stays reserved for
-  a client that leaves before the body ends.
+  `"error": ""` once the relayed bytes reach that length, and `client_disconnected` stays reserved
+  for a client that leaves before the body ends.
 - Script-supplied response headers are validated when `ctx.respond` or `ctx.http.pipe` is called and
   again before the Response is constructed. Malformed header names or values now return 500
   `script_error` instead of being silently dropped; `ctx.http.pipe` fails before contacting the
