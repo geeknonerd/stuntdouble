@@ -31,14 +31,16 @@ Default config path is `stuntdouble.toml`. The configuration must contain a non-
 
 | Code | Meaning |
 | ---: | --- |
-| `0` | the server returned without an error; `validate`, `--help`, and `--version` also use `0` for success |
+| `0` | the server returned without an error, including after a completed graceful shutdown; `validate`, `--help`, and `--version` also use `0` for success |
 | `1` | runtime/server error, including a socket bind or listen failure |
 | `2` | configuration error (bad TOML, schema violation, unknown `config_version`, or non-IP `server.bind`) or CLI usage error (unknown flag or missing subcommand) — messages print to stderr |
 | `3` | internal error while constructing the async runtime |
 
 #### Shutdown signals
 
-The v1 slice does not install a graceful-shutdown signal handler. SIGINT or SIGTERM terminates the process by signal, so a shell commonly reports 130 or 143 rather than `0`. `0` is reserved for a normal server return. Graceful shutdown is tracked in [#33](https://github.com/geeknonerd/stuntdouble/issues/33).
+On Unix, `serve` handles SIGINT (Ctrl-C) and SIGTERM; on Windows it handles Ctrl-C. The first signal stops the server from accepting new connections and drains in-flight requests before returning exit code `0`.
+
+A second signal abandons the drain and terminates the process immediately: exit code `130` for SIGINT and `143` for SIGTERM. Use it only when an in-flight request must not finish.
 
 #### Binding semantics
 
@@ -90,7 +92,7 @@ Used by every command:
 
 | Code | Meaning |
 | ---: | --- |
-| `0` | success; `serve` uses it only for a normal return, not for signal termination |
+| `0` | success; `serve` uses it for a normal return, including a completed graceful shutdown |
 | `1` | runtime/server error (reported by `serve`) |
 | `2` | configuration error or CLI usage error |
 | `3` | internal error |

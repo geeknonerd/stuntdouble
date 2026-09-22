@@ -83,14 +83,92 @@ fn serve(path: &Path, verbose: bool) -> i32 {
             return 3;
         }
     };
-    // run() binds the socket and only then announces the listening address.
-    match runtime.block_on(server::run(config, addr, verbose)) {
+    // Signals are a process-level concern: install them here and hand the
+    // shutdown future to the library, which only drains the server.
+    match runtime.block_on(async {
+        let shutdown = shutdown_signals()?;
+        server::run(config, addr, verbose, shutdown).await
+    }) {
         Ok(()) => 0,
         Err(err) => {
             eprintln!("runtime error: {err}");
             1
         }
     }
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+enum ShutdownSignal {
+    Interrupt,
+    Terminate,
+}
+
+#[cfg(unix)]
+impl ShutdownSignal {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Interrupt => "SIGINT",
+            Self::Terminate => "SIGTERM",
+        }
+    }
+
+    fn forced_exit_code(self) -> i32 {
+        match self {
+            Self::Interrupt => 130,
+            Self::Terminate => 143,
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn recv_shutdown_signal(
+    interrupt: &mut tokio::signal::unix::Signal,
+    terminate: &mut tokio::signal::unix::Signal,
+) -> ShutdownSignal {
+    tokio::select! {
+        _ = interrupt.recv() => ShutdownSignal::Interrupt,
+        _ = terminate.recv() => ShutdownSignal::Terminate,
+    }
+}
+
+/// Resolve on the first SIGINT/SIGTERM. A second signal abandons the drain and
+/// exits with the shell's 128+signal code.
+#[cfg(unix)]
+fn shutdown_signals() -> std::io::Result<impl std::future::Future<Output = ()> + Send + 'static> {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    let mut terminate = signal(SignalKind::terminate())?;
+    Ok(async move {
+        let first = recv_shutdown_signal(&mut interrupt, &mut terminate).await;
+        eprintln!("{} received; starting graceful shutdown", first.name());
+        tokio::spawn(async move {
+            let second = recv_shutdown_signal(&mut interrupt, &mut terminate).await;
+            eprintln!("{} received again; terminating immediately", second.name());
+            std::process::exit(second.forced_exit_code());
+        });
+    })
+}
+
+/// Resolve on the first Ctrl-C. A second Ctrl-C terminates immediately.
+#[cfg(windows)]
+fn shutdown_signals() -> std::io::Result<impl std::future::Future<Output = ()> + Send + 'static> {
+    let mut ctrl_c = tokio::signal::windows::ctrl_c()?;
+    Ok(async move {
+        let _ = ctrl_c.recv().await;
+        eprintln!("Ctrl-C received; starting graceful shutdown");
+        tokio::spawn(async move {
+            let _ = ctrl_c.recv().await;
+            eprintln!("Ctrl-C received again; terminating immediately");
+            std::process::exit(130);
+        });
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn shutdown_signals() -> std::io::Result<impl std::future::Future<Output = ()> + Send + 'static> {
+    Ok(std::future::pending())
 }
 
 fn report(config: &config::Config) {
