@@ -2,7 +2,7 @@
 
 **English** \| [中文](./config.zh-CN.md)
 
-- **Status**: frozen for the v1 slice (T1–T8)
+- **Status**: frozen for the v1 slice; additive updates through T12
 - **Applies to**: configurations that declare `config_version = "1"`
 - **Stability**: within version `"1"`, fields may be added; breaking changes before 1.0 need a deprecation window
 
@@ -24,8 +24,9 @@ Every valid configuration is a TOML table. Unknown keys, unknown `config_version
 | `server` | yes | table | — | only `{bind, port}` is accepted |
 | `server.bind` | no | string | `"127.0.0.1"` | IP address literal; hostnames are rejected during validation |
 | `server.port` | no | integer | `3000` | integer in `[1, 65535]` |
-| `files` | yes | table | — | only `{root}` is accepted |
+| `files` | yes | table | — | only `{root, upload_max_bytes}` is accepted |
 | `files.root` | yes | string | — | existing directory, resolved relative to the configuration file |
+| `files.upload_max_bytes` | no | integer | `20971520` | positive integer (0 and negative values are rejected); maximum data bytes accepted in one multipart request |
 | `sandbox` | no | table | — | only `{script_timeout_ms}` is accepted |
 | `sandbox.script_timeout_ms` | no | integer | `10000` | positive integer (0 is rejected) |
 | `upstream` | no | table | — | only `{allow_hosts, timeout_ms}` is accepted |
@@ -56,7 +57,8 @@ bind = "127.0.0.1"        # IP literal
 port = 3000               # integer in [1, 65535]
 
 [files]
-root = "./files"          # existing directory
+root = "./files"              # existing directory
+upload_max_bytes = 20971520   # positive integer; default 20 MiB
 
 [sandbox]                 # optional table
 script_timeout_ms = 10000 # positive integer; default 10000
@@ -74,7 +76,7 @@ script = "scripts/x.js"   # .js/.mjs/.cjs; relative or absolute
 
 ## Route execution model
 
-Routes follow the single pipeline: `match → source → transform → response`. This slice implements Match plus the script Transform: a matched Route runs its JavaScript, and the script produces the Response through `ctx.respond` or `ctx.http.pipe`. Unmatched requests return 404 `not_found`; a script that throws, times out, or fails to load returns 500 `script_error`; a script that finishes without producing a Response returns 500 `script_no_response`. `ctx.http.get` treats upstream responses (including 4xx/5xx) as data; `ctx.http.pipe` streams a 2xx upstream Response to the client and raises a catchable `upstream_http_error` for a final non-2xx answer; an uncaught upstream transport failure returns 502 `upstream_unreachable`. Local static-file reads are implemented; uploads arrive in a later slice.
+Routes follow the single pipeline: `match → source → transform → response`. This slice implements Match plus the script Transform: a matched Route runs its JavaScript, and the script produces the Response through `ctx.respond` or `ctx.http.pipe`. Unmatched requests return 404 `not_found`; a script that throws, times out, or fails to load returns 500 `script_error`; a script that finishes without producing a Response returns 500 `script_no_response`. `ctx.http.get` treats upstream responses (including 4xx/5xx) as data; `ctx.http.pipe` streams a 2xx upstream Response to the client and raises a catchable `upstream_http_error` for a final non-2xx answer; an uncaught upstream transport failure returns 502 `upstream_unreachable`. Local static-file reads and multipart uploads are implemented. A matched `multipart/form-data` request is parsed before the script runs into a request-scoped temporary directory and exposed as `ctx.request.files`. Malformed multipart answers 400 `invalid_multipart`; a body whose file and form-field data exceeds `files.upload_max_bytes` answers 413 `upload_too_large`. The entire multipart body stream, including framing, is bounded by `files.upload_max_bytes` plus a 1 MiB framing allowance. The two multipart failures use the project JSON error envelope with a `request_id`; a non-multipart body over the existing 2 MiB bound keeps its bounded 413 response without a JSON error class.
 
 ### Matching semantics
 
@@ -92,7 +94,7 @@ Routes follow the single pipeline: `match → source → transform → response`
 - the expected shape and actual value
 - line and column when the TOML parser provides them
 
-Validation fails closed on unknown keys at every table level. It also rejects an unknown `config_version`, a non-IP `server.bind`, an empty `routes` array, non-positive timeout values, and a missing or non-directory `files.root`. `validate` never opens sockets and never reads Route scripts.
+Validation fails closed on unknown keys at every table level. It also rejects an unknown `config_version`, a non-IP `server.bind`, an empty `routes` array, non-positive timeout values, a non-positive `files.upload_max_bytes`, and a missing or non-directory `files.root`. `validate` never opens sockets and never reads Route scripts.
 
 Configuration errors exit with code `2`.
 

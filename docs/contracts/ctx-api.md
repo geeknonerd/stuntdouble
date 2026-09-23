@@ -2,7 +2,7 @@
 
 **English** \| [中文](./ctx-api.zh-CN.md)
 
-- **Status**: public and frozen for the v1 slice; this page documents the implemented subset (T1–T11)
+- **Status**: public and frozen for the v1 slice; this page documents the implemented subset (T1–T12)
 - **Applies to**: `apiVersion` 1
 - **Stability**: additive within an `apiVersion`; removals require a new `apiVersion`
 
@@ -22,6 +22,7 @@ Within one `apiVersion`:
 | Group | API | Status |
 | --- | --- | --- |
 | Request snapshot | `ctx.request.method` / `path` / `params` / `query` / `headers` / `bodyText` | implemented (T2) |
+| Request snapshot | `ctx.request.files` | implemented (T12) |
 | Request snapshot | `ctx.request.bodyBytes` | pending (not in this slice) |
 | Upstream HTTP | `ctx.http.get` | implemented (T4) |
 | Upstream HTTP | `ctx.http.get` `opts.retries` / `backoff` | pending |
@@ -37,8 +38,8 @@ Within one `apiVersion`:
 ## Implemented subset
 
 - `ctx.apiVersion` is `"1"`.
-- `ctx.request` is a read-only snapshot with `method`, `path`, `params`, `query`, `headers`, and `bodyText`. Header names are lowercased; `bodyText` is `null` when the request body is not valid UTF-8. Query names and values are percent-decoded. A repeated query or header name keeps the last value in the snapshot.
-- `ctx.respond(status, headers, body)` accepts a status in `[100, 599]`, headers as an object or `[name, value]` pairs, and a body that is a string, byte array, `Uint8Array`, `ArrayBuffer`, or a `ctx.file.stream` handle. The first call wins and returns `true`; later calls are ignored, return `false`, and produce a server-side warning. A byte array must contain integers in `[0, 255]`. Header names and values are validated when the call is made; malformed pairs raise a catchable `script_error` before a Response is recorded and are never silently dropped.
+- `ctx.request` is a read-only snapshot with `method`, `path`, `params`, `query`, `headers`, `bodyText`, and `files`. Header names are lowercased; `bodyText` is `null` when the request body is not valid UTF-8. A parsed multipart request also exposes `bodyText` as `null`, because the framing is consumed before the script runs. Query names and values are percent-decoded. A repeated query or header name keeps the last value in the snapshot.
+- `ctx.respond(status, headers, body)` accepts a status in `[100, 599]`, headers as an object or `[name, value]` pairs, and a body that is a string, byte array, `Uint8Array`, `ArrayBuffer`, or a `ctx.file.stream` / `ctx.request.files[].stream()` handle. The first call wins and returns `true`; later calls are ignored, return `false`, and produce a server-side warning. A byte array must contain integers in `[0, 255]`. Header names and values are validated when the call is made; malformed pairs raise a catchable `script_error` before a Response is recorded and are never silently dropped.
 - `ctx.http.get(url, opts)` performs an allowlisted upstream GET and returns `{status, headers, text(), bytes()}`.
   - `url` must be an absolute `http` or `https` URL whose host matches `upstream.allow_hosts` case-insensitively; the port is not part of the match, and IP literals and `localhost` require an explicit entry.
   - `opts` must be a plain object and accepts only `{ timeout_ms }`. Unknown string or symbol keys, inherited keys, non-object values, and explicit `null`, `NaN`, `Infinity`, non-integer, or non-positive `timeout_ms` values are script errors (fail-closed).
@@ -67,6 +68,11 @@ Within one `apiVersion`:
   - A valid single range (`bytes=N-M`, `bytes=N-`, or `bytes=-N`) answers `206` with a clamped end offset and the correct `Content-Length` and `Content-Range`. An unusable Range header — unsatisfiable, malformed, multi-range, or any range on an empty file — answers `416` with `Content-Range: bytes */<size>` and no body. A present `If-Range` disables Range handling and answers a full `200`.
   - `Content-Type` is never inferred; the script sets it. HEAD is not auto-mapped to a GET Route; only an explicitly declared HEAD Route matches. Buffered `ctx.respond` bodies keep the existing no-Range behavior.
   - Once the stream starts, a mid-body file read failure truncates the client body, because the status and headers are already on the wire, and the host records `file_stream_error` in the request log. File paths never reach the client or the logs. See the [CLI contract](cli.md) for the log fields.
+- `ctx.request.files` is a read-only array of uploaded files, in multipart order. Each entry has `field`, `filename`, `contentType` (`null` when absent), `size`, `text()`, `bytes()`, and `stream()`.
+  - `filename` keeps only the client-provided basename: both `/` and `\` path components are stripped. No temporary filesystem path is exposed.
+  - Non-multipart requests expose `[]`; non-file form fields are ignored, but their bytes still count toward `files.upload_max_bytes`.
+  - `text()` decodes strict UTF-8; `bytes()` returns a `Uint8Array`. Both are capped at 8 MiB and throw catchable `file_too_large` / `file_encoding_error` / `file_io_error` errors where applicable. `stream()` is uncapped, opaque, single-consumption, and valid only as the `body` argument of `ctx.respond` in the same request.
+  - An upload stream used as a Response body follows the same host-owned framing and single-range 200/206/416 rules as `ctx.file.stream`.
 - `ctx.env` is the process environment snapshot. No `.env` file is loaded.
 - `ctx.log.info` / `warn` / `error` write to server logs only and never to the client Response. Messages are not redacted or filtered: the script author must keep request/Response bodies, tokens, cookies, and other secrets out of them. The host itself never logs bodies automatically.
 - A script that throws, exceeds `sandbox.script_timeout_ms` (default 10000), or fails to load returns 500 `script_error`; a script that finishes without producing a Response returns 500 `script_no_response`; an uncaught upstream transport failure returns 502 `upstream_unreachable`. All three carry a `request_id`.
@@ -86,7 +92,8 @@ Scripts receive no raw `fetch`, `fs`, `os`, `subprocess`, or `socket`. All exter
 
 - script deadline (`sandbox.script_timeout_ms`) that answers the client with 500 `script_error`
 - network allowlist
-- static file root confinement for `ctx.file` (upload size limits land with T12)
+- static file root confinement for `ctx.file`
+- request-scoped multipart temporary storage with `files.upload_max_bytes`, streaming accounting, 8 MiB buffered upload reads, and guard-based cleanup
 - stack traces never returned to clients
 
 Boa 0.22 exposes no heap metric, heap limit, or interrupt hook, so no heap cap is enforced; a script abandoned at the deadline is stopped only by a host-side loop-iteration backstop. The T3 amendment to [ADR 0003](../../plans/adr/0003-script-first-multi-runtime.md) records that tradeoff, the remaining resource bounds, and the process-isolation upgrade path.

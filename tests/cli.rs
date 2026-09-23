@@ -281,24 +281,259 @@ fn request_with_body(
     headers: &[(&str, &str)],
     body: &str,
 ) -> Response {
+    request_bytes(port, method, path, headers, body.as_bytes())
+}
+
+fn request_bytes(
+    port: u16,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> Response {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .expect("read timeout");
-    let mut raw = String::new();
+    let mut head = String::new();
     let _ = write!(
-        raw,
+        head,
         "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: {}\r\n",
         body.len()
     );
     for (name, value) in headers {
-        let _ = write!(raw, "{name}: {value}\r\n");
+        let _ = write!(head, "{name}: {value}\r\n");
     }
-    raw.push_str("\r\n");
-    raw.push_str(body);
-    stream.write_all(raw.as_bytes()).expect("write request");
+    head.push_str("\r\n");
+    stream.write_all(head.as_bytes()).expect("write head");
+    stream.write_all(body).expect("write body");
     stream.flush().expect("flush");
     read_response(&mut stream)
+}
+
+/// One part in a test-built multipart body. `filename` distinguishes a file
+/// field from a non-file form field.
+struct MultipartPart<'a> {
+    name: &'a str,
+    filename: Option<&'a str>,
+    content_type: Option<&'a str>,
+    data: &'a [u8],
+}
+
+impl<'a> MultipartPart<'a> {
+    fn field(name: &'a str, data: &'a [u8]) -> Self {
+        Self {
+            name,
+            filename: None,
+            content_type: None,
+            data,
+        }
+    }
+
+    fn file(name: &'a str, filename: &'a str, content_type: &'a str, data: &'a [u8]) -> Self {
+        Self {
+            name,
+            filename: Some(filename),
+            content_type: Some(content_type),
+            data,
+        }
+    }
+}
+
+fn multipart_body(boundary: &str, parts: &[MultipartPart<'_>]) -> Vec<u8> {
+    let mut body = Vec::new();
+    for part in parts {
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        let mut disposition = format!("Content-Disposition: form-data; name=\"{}\"", part.name);
+        if let Some(filename) = part.filename {
+            let _ = write!(disposition, "; filename=\"{filename}\"");
+        }
+        body.extend_from_slice(disposition.as_bytes());
+        body.extend_from_slice(b"\r\n");
+        if let Some(content_type) = part.content_type {
+            body.extend_from_slice(format!("Content-Type: {content_type}\r\n").as_bytes());
+        }
+        body.extend_from_slice(b"\r\n");
+        body.extend_from_slice(part.data);
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    body
+}
+
+fn request_multipart(
+    port: u16,
+    path: &str,
+    boundary: &str,
+    parts: &[MultipartPart<'_>],
+) -> Response {
+    let body = multipart_body(boundary, parts);
+    let content_type = format!("multipart/form-data; boundary={boundary}");
+    request_bytes(
+        port,
+        "POST",
+        path,
+        &[("Content-Type", content_type.as_str())],
+        &body,
+    )
+}
+
+fn request_multipart_with_headers(
+    port: u16,
+    path: &str,
+    boundary: &str,
+    parts: &[MultipartPart<'_>],
+    headers: &[(&str, &str)],
+) -> Response {
+    let body = multipart_body(boundary, parts);
+    let content_type = format!("multipart/form-data; boundary={boundary}");
+    let mut all_headers = vec![("Content-Type", content_type.as_str())];
+    all_headers.extend_from_slice(headers);
+    request_bytes(port, "POST", path, &all_headers, &body)
+}
+
+fn abort_multipart_after_response_head(port: u16, path: &str, boundary: &str, body: &[u8]) {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("read timeout");
+    let head = format!(
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Type: multipart/form-data; boundary={boundary}\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).expect("write head");
+    stream.write_all(body).expect("write body");
+    stream.flush().expect("flush");
+    let mut bytes = Vec::new();
+    let mut buffer = [0_u8; 1024];
+    loop {
+        let read = stream.read(&mut buffer).expect("read response");
+        assert_ne!(read, 0, "server closed before the client could abort");
+        bytes.extend_from_slice(&buffer[..read]);
+        if let Some(head_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+            if bytes.len() > head_end + 4 {
+                return;
+            }
+        }
+    }
+}
+
+fn request_chunked_bytes(
+    port: u16,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    chunks: &[&[u8]],
+) -> Response {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("read timeout");
+    let mut head = String::new();
+    let _ = write!(
+        head,
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n"
+    );
+    for (name, value) in headers {
+        let _ = write!(head, "{name}: {value}\r\n");
+    }
+    head.push_str("\r\n");
+    let _ = stream.write_all(head.as_bytes());
+    for chunk in chunks {
+        if chunk.is_empty() {
+            continue;
+        }
+        let prefix = format!("{:x}\r\n", chunk.len());
+        let _ = stream.write_all(prefix.as_bytes());
+        let _ = stream.write_all(chunk);
+        let _ = stream.write_all(b"\r\n");
+    }
+    let _ = stream.write_all(b"0\r\n\r\n");
+    let _ = stream.flush();
+    read_response(&mut stream)
+}
+
+fn request_multipart_chunked(
+    port: u16,
+    path: &str,
+    boundary: &str,
+    parts: &[MultipartPart<'_>],
+) -> Response {
+    let body = multipart_body(boundary, parts);
+    let split = body.len() / 2;
+    let content_type = format!("multipart/form-data; boundary={boundary}");
+    request_chunked_bytes(
+        port,
+        "POST",
+        path,
+        &[("Content-Type", content_type.as_str())],
+        &[&body[..split], &body[split..]],
+    )
+}
+
+/// Send only the request head with a declared `Content-Length`, so a
+/// Content-Length pre-check can answer without waiting for the body.
+fn request_with_declared_length(
+    port: u16,
+    path: &str,
+    content_type: &str,
+    declared: u64,
+) -> Response {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("read timeout");
+    let head = format!(
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Type: {content_type}\r\nContent-Length: {declared}\r\n\r\n"
+    );
+    stream.write_all(head.as_bytes()).expect("write head");
+    stream.flush().expect("flush");
+    read_response(&mut stream)
+}
+
+/// Per-test temp root for server-created upload directories.
+fn upload_temp_root(dir: &Path) -> PathBuf {
+    let root = dir.join("uploads-tmp");
+    std::fs::create_dir_all(&root).expect("upload temp root");
+    root
+}
+
+fn temp_entries(root: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(root)
+        .expect("read upload temp root")
+        .map(|entry| entry.expect("temp entry").path())
+        .collect()
+}
+
+fn wait_for_temp_entries(root: &Path) -> Vec<PathBuf> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let entries = temp_entries(root);
+        if !entries.is_empty() {
+            return entries;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "upload temp directory never appeared under {}",
+            root.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn wait_for_empty_temp(root: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let entries = temp_entries(root);
+        if entries.is_empty() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "upload temp entries were not removed: {entries:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// Read one full HTTP/1.1 response from `stream`.
@@ -758,6 +993,50 @@ fn validate_requires_existing_static_file_root() {
         stderr.contains("files.root: expected existing directory"),
         "stderr: {stderr}"
     );
+}
+
+#[test]
+fn validate_accepts_files_upload_max_bytes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let configured = good_config().replace(
+        "[files]\nroot = \"./files\"",
+        "[files]\nroot = \"./files\"\nupload_max_bytes = 1024",
+    );
+    let config = fixture(dir.path(), 3000, &configured);
+    let (code, stdout, stderr) = run(&["validate", "--config", config.to_str().unwrap()]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("valid configuration"), "stdout: {stdout}");
+}
+
+#[test]
+fn validate_rejects_invalid_files_upload_max_bytes() {
+    for value in ["0", "-1", "1.5", "\"1024\""] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let configured = good_config().replace(
+            "[files]\nroot = \"./files\"",
+            &format!("[files]\nroot = \"./files\"\nupload_max_bytes = {value}"),
+        );
+        let config = fixture(dir.path(), 3000, &configured);
+        let (code, _, stderr) = run(&["validate", "--config", config.to_str().unwrap()]);
+        assert_eq!(code, 2, "value {value} stderr: {stderr}");
+        assert!(
+            stderr.contains("files.upload_max_bytes"),
+            "value {value} stderr: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn validate_rejects_unknown_files_keys() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let configured = good_config().replace(
+        "[files]\nroot = \"./files\"",
+        "[files]\nroot = \"./files\"\nbogus = true",
+    );
+    let config = fixture(dir.path(), 3000, &configured);
+    let (code, _, stderr) = run(&["validate", "--config", config.to_str().unwrap()]);
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert!(stderr.contains("files.bogus"), "stderr: {stderr}");
 }
 
 #[test]
@@ -1428,6 +1707,764 @@ fn serve_fixture_dir<T>(dir: &Path, script: &str, run_tests: impl FnOnce(u16) ->
         &[],
         run_tests,
     )
+}
+
+fn upload_config(upload_max_bytes: u64) -> String {
+    good_config()
+        .replace("method = \"GET\"", "method = \"POST\"")
+        .replace(
+            "[files]\nroot = \"./files\"",
+            &format!("[files]\nroot = \"./files\"\nupload_max_bytes = {upload_max_bytes}"),
+        )
+}
+
+fn serve_upload_fixture<T>(
+    dir: &Path,
+    config: &str,
+    script: &str,
+    env: &[(&str, &str)],
+    run_tests: impl FnOnce(u16) -> T,
+) -> (T, String) {
+    serve_and_run(
+        |port| fixture_with_script(dir, port, config, script),
+        env,
+        &[],
+        run_tests,
+    )
+}
+
+#[test]
+fn multipart_upload_exposes_file_metadata_and_contents() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = r#"
+var file = ctx.request.files[0];
+ctx.respond(200, { "Content-Type": "application/json" }, JSON.stringify({
+  count: ctx.request.files.length,
+  field: file.field,
+  filename: file.filename,
+  contentType: file.contentType,
+  size: file.size,
+  bodyText: ctx.request.bodyText,
+  filesFrozen: Object.isFrozen(ctx.request.files),
+  fileFrozen: Object.isFrozen(file),
+  text: file.text(),
+  textAgain: file.text(),
+  bytes: Array.prototype.slice.call(file.bytes())
+}));
+"#;
+    let (response, _) = serve_upload_fixture(
+        dir.path(),
+        &upload_config(1024 * 1024),
+        script,
+        &[],
+        |port| {
+            request_multipart(
+                port,
+                "/demo/documents/manifest/group-a",
+                "sd-upload-boundary",
+                &[
+                    MultipartPart::file(
+                        "document",
+                        "../uploads/report.txt",
+                        "text/plain",
+                        b"hello upload",
+                    ),
+                    MultipartPart::field("note", b"ignored"),
+                ],
+            )
+        },
+    );
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(json["count"], 1);
+    assert_eq!(json["field"], "document");
+    assert_eq!(json["filename"], "report.txt");
+    assert_eq!(json["contentType"], "text/plain");
+    assert_eq!(json["size"], 12);
+    assert_eq!(json["bodyText"], serde_json::Value::Null);
+    assert_eq!(json["filesFrozen"], true);
+    assert_eq!(json["fileFrozen"], true);
+    assert_eq!(json["text"], "hello upload");
+    assert_eq!(json["textAgain"], "hello upload");
+    assert_eq!(
+        json["bytes"],
+        serde_json::json!([104, 101, 108, 108, 111, 32, 117, 112, 108, 111, 97, 100])
+    );
+}
+
+#[test]
+fn multipart_limit_accepts_the_cap_and_rejects_precheck_chunked_and_form_fields() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = r#"
+var file = ctx.request.files[0];
+ctx.respond(200, { "Content-Type": "application/json" }, JSON.stringify({
+  size: file.size,
+  text: file.text()
+}));
+"#;
+    let limit = 64_u64;
+    let (responses, stderr) =
+        serve_upload_fixture(dir.path(), &upload_config(limit), script, &[], |port| {
+            let path = "/demo/documents/manifest/group-a";
+            let at_cap = request_multipart(
+                port,
+                path,
+                "sd-at-cap",
+                &[MultipartPart::file(
+                    "document",
+                    "at-cap.bin",
+                    "application/octet-stream",
+                    &[b'a'; 64],
+                )],
+            );
+            let over_limit = request_multipart(
+                port,
+                path,
+                "sd-over-limit",
+                &[MultipartPart::file(
+                    "document",
+                    "over-limit.bin",
+                    "application/octet-stream",
+                    &[b'a'; 65],
+                )],
+            );
+            let chunked = request_multipart_chunked(
+                port,
+                path,
+                "sd-chunked",
+                &[MultipartPart::file(
+                    "document",
+                    "chunked.bin",
+                    "application/octet-stream",
+                    &[b'a'; 65],
+                )],
+            );
+            let form_field = request_multipart(
+                port,
+                path,
+                "sd-form-field",
+                &[MultipartPart::field("note", &[b'a'; 65])],
+            );
+            let precheck = request_with_declared_length(
+                port,
+                path,
+                "multipart/form-data; boundary=sd-precheck",
+                limit + 1024 * 1024 + 1,
+            );
+            [at_cap, over_limit, chunked, form_field, precheck]
+        });
+    assert_eq!(responses[0].status, 200, "body: {}", responses[0].body);
+    let json: serde_json::Value = serde_json::from_str(&responses[0].body).expect("json body");
+    assert_eq!(json["size"], 64);
+    assert_eq!(json["text"].as_str().map(str::len), Some(64));
+    for response in &responses[1..] {
+        assert_eq!(response.status, 413, "body: {}", response.body);
+        assert_eq!(
+            error_class(&response.body).as_deref(),
+            Some("upload_too_large"),
+            "body: {}",
+            response.body
+        );
+    }
+    let logs: Vec<serde_json::Value> = stderr
+        .lines()
+        .filter(|line| line.contains("\"request_id\""))
+        .map(|line| serde_json::from_str(line).expect("structured log json"))
+        .collect();
+    assert_eq!(logs.len(), 5, "stderr: {stderr}");
+    assert_eq!(logs[0]["upload"]["files"], 1);
+    assert_eq!(logs[0]["upload"]["total_bytes"], 64);
+    assert_eq!(logs[0]["upload"]["error"], serde_json::Value::Null);
+    for log in &logs[1..] {
+        assert_eq!(log["upload"]["error"], "upload_too_large", "log: {log}");
+    }
+}
+
+#[test]
+fn malformed_multipart_maps_to_400_before_the_script_runs() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = r#"
+ctx.log.info("script-ran");
+ctx.respond(200, {}, "unreachable");
+"#;
+    let config = upload_config(1024 * 1024);
+    let (responses, stderr) = serve_and_run(
+        |port| fixture_with_script(dir.path(), port, &config, script),
+        &[],
+        &["--verbose"],
+        |port| {
+            let path = "/demo/documents/manifest/group-a";
+            [
+                request_bytes(
+                    port,
+                    "POST",
+                    path,
+                    &[("Content-Type", "multipart/form-data; boundary=sd-malformed")],
+                    b"not a multipart body",
+                ),
+                request_bytes(
+                    port,
+                    "POST",
+                    path,
+                    &[("Content-Type", "multipart/form-data")],
+                    b"missing boundary",
+                ),
+            ]
+        },
+    );
+    for response in &responses {
+        assert_eq!(response.status, 400, "body: {}", response.body);
+        assert_eq!(
+            error_class(&response.body).as_deref(),
+            Some("invalid_multipart"),
+            "body: {}",
+            response.body
+        );
+        assert!(
+            json_string(&response.body, "request_id").is_some(),
+            "body: {}",
+            response.body
+        );
+    }
+    assert!(!stderr.contains("script-ran"), "stderr: {stderr}");
+    assert!(!stderr.contains("not a multipart body"), "stderr: {stderr}");
+    assert!(
+        responses[0].body.contains("multipart body is malformed"),
+        "body: {}",
+        responses[0].body
+    );
+    let logs: Vec<serde_json::Value> = stderr
+        .lines()
+        .filter(|line| line.contains("\"request_id\""))
+        .map(|line| serde_json::from_str(line).expect("structured log json"))
+        .collect();
+    assert_eq!(logs.len(), 2, "stderr: {stderr}");
+    for log in logs {
+        assert_eq!(log["status"], 400);
+        assert_eq!(log["error"], "invalid_multipart");
+        assert_eq!(log["upload"]["error"], "invalid_multipart");
+    }
+}
+
+#[test]
+fn upload_text_bytes_are_strict_utf8_and_capped_at_eight_mib() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = r#"
+var file = ctx.request.files[0];
+function attempt(fn) {
+  try { return fn(); } catch (error) { return error.code; }
+}
+var out = { text: attempt(function () { return file.text(); }) };
+out.bytes = file.size <= 16
+  ? attempt(function () { return Array.prototype.slice.call(file.bytes()); })
+  : "skipped";
+ctx.respond(200, { "Content-Type": "application/json" }, JSON.stringify(out));
+"#;
+    let cap = 8 * 1024 * 1024;
+    let (responses, _) = serve_upload_fixture(
+        dir.path(),
+        &upload_config(9 * 1024 * 1024),
+        script,
+        &[],
+        |port| {
+            let path = "/demo/documents/manifest/group-a";
+            let invalid = request_multipart(
+                port,
+                path,
+                "sd-encoding",
+                &[MultipartPart::file(
+                    "document",
+                    "latin1.bin",
+                    "application/octet-stream",
+                    &[0x66, 0x6f, 0x80],
+                )],
+            );
+            let over_cap = request_multipart(
+                port,
+                path,
+                "sd-over-cap",
+                &[MultipartPart::file(
+                    "document",
+                    "over-cap.bin",
+                    "application/octet-stream",
+                    &vec![b'a'; cap + 1],
+                )],
+            );
+            [invalid, over_cap]
+        },
+    );
+    assert_eq!(responses[0].status, 200, "body: {}", responses[0].body);
+    let json: serde_json::Value = serde_json::from_str(&responses[0].body).expect("json body");
+    assert_eq!(json["text"], "file_encoding_error");
+    assert_eq!(json["bytes"], serde_json::json!([102, 111, 128]));
+    assert_eq!(responses[1].status, 200, "body: {}", responses[1].body);
+    let json: serde_json::Value = serde_json::from_str(&responses[1].body).expect("json body");
+    assert_eq!(json["text"], "file_too_large");
+    assert_eq!(json["bytes"], "skipped");
+}
+
+#[test]
+fn upload_filename_strips_unix_and_windows_path_components() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = r#"
+ctx.respond(200, { "Content-Type": "application/json" }, JSON.stringify(
+  ctx.request.files.map(function (file) { return file.filename; })
+));
+"#;
+    let (response, _) = serve_upload_fixture(
+        dir.path(),
+        &upload_config(1024 * 1024),
+        script,
+        &[],
+        |port| {
+            request_multipart(
+                port,
+                "/demo/documents/manifest/group-a",
+                "sd-filename-boundary",
+                &[
+                    MultipartPart::file("unix", "dir/sub/report.txt", "text/plain", b"a"),
+                    MultipartPart::file("windows", "C:\\uploads\\report.txt", "text/plain", b"b"),
+                ],
+            )
+        },
+    );
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(response.body, r#"["report.txt","report.txt"]"#);
+}
+
+#[test]
+fn non_multipart_body_limit_stays_bounded() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = r#"
+ctx.respond(200, {}, "unreachable");
+"#;
+    let (response, _) = serve_upload_fixture(
+        dir.path(),
+        &upload_config(1024 * 1024),
+        script,
+        &[],
+        |port| {
+            let body = vec![b'a'; 2 * 1024 * 1024 + 1];
+            request_bytes(
+                port,
+                "POST",
+                "/demo/documents/manifest/group-a",
+                &[("Content-Type", "text/plain")],
+                &body,
+            )
+        },
+    );
+    assert_eq!(response.status, 413, "body: {}", response.body);
+    assert!(
+        response.body_bytes.is_empty(),
+        "body: {:?}",
+        response.body_bytes
+    );
+}
+
+#[test]
+fn chunked_multipart_framing_is_bounded() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = r#"
+ctx.respond(200, {}, "unreachable");
+"#;
+    let (response, stderr) =
+        serve_upload_fixture(dir.path(), &upload_config(64), script, &[], |port| {
+            let oversized_name = "n".repeat(1024 * 1024 + 64);
+            request_multipart_chunked(
+                port,
+                "/demo/documents/manifest/group-a",
+                "sd-framing",
+                &[MultipartPart::field(&oversized_name, b"x")],
+            )
+        });
+    assert_eq!(response.status, 413, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("upload_too_large"),
+        "body: {}",
+        response.body
+    );
+    assert!(stderr.contains("\"upload_too_large\""), "stderr: {stderr}");
+}
+
+#[test]
+fn upload_stream_reuses_file_range_and_framing_rules() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = r#"
+var file = ctx.request.files[0];
+var mode = ctx.request.query.mode;
+if (mode === "bad-status") {
+  try { ctx.respond(201, {}, file.stream()); }
+  catch (error) { ctx.respond(200, {}, error.code); }
+} else if (mode === "bad-header") {
+  try { ctx.respond(200, { "Content-Length": "1" }, file.stream()); }
+  catch (error) { ctx.respond(200, {}, error.code); }
+} else {
+  ctx.respond(200, {}, file.stream());
+}
+"#;
+    let (responses, _) = serve_upload_fixture(
+        dir.path(),
+        &upload_config(1024 * 1024),
+        script,
+        &[],
+        |port| {
+            let path = "/demo/documents/manifest/group-a";
+            let parts = [MultipartPart::file(
+                "document",
+                "digits.bin",
+                "application/octet-stream",
+                b"0123456789",
+            )];
+            let full = request_multipart(port, path, "sd-full", &parts);
+            let partial = request_multipart_with_headers(
+                port,
+                path,
+                "sd-range",
+                &parts,
+                &[("Range", "bytes=0-3")],
+            );
+            let unsatisfiable = request_multipart_with_headers(
+                port,
+                path,
+                "sd-range-bad",
+                &parts,
+                &[("Range", "bytes=99-")],
+            );
+            let bad_status = request_multipart(
+                port,
+                &format!("{path}?mode=bad-status"),
+                "sd-bad-status",
+                &parts,
+            );
+            let bad_header = request_multipart(
+                port,
+                &format!("{path}?mode=bad-header"),
+                "sd-bad-header",
+                &parts,
+            );
+            [full, partial, unsatisfiable, bad_status, bad_header]
+        },
+    );
+    assert_eq!(responses[0].status, 200, "body: {}", responses[0].body);
+    assert_eq!(responses[0].body, "0123456789");
+    assert_eq!(responses[0].header("content-length"), Some("10"));
+    assert_eq!(responses[0].header("accept-ranges"), Some("bytes"));
+
+    assert_eq!(responses[1].status, 206, "body: {}", responses[1].body);
+    assert_eq!(responses[1].body, "0123");
+    assert_eq!(responses[1].header("content-range"), Some("bytes 0-3/10"));
+    assert_eq!(responses[1].header("content-length"), Some("4"));
+
+    assert_eq!(responses[2].status, 416, "body: {}", responses[2].body);
+    assert!(responses[2].body_bytes.is_empty());
+    assert_eq!(responses[2].header("content-range"), Some("bytes */10"));
+    assert_eq!(responses[2].header("content-length"), Some("0"));
+
+    assert_eq!(responses[3].status, 200, "body: {}", responses[3].body);
+    assert_eq!(responses[3].body, "script_error");
+    assert_eq!(responses[4].status, 200, "body: {}", responses[4].body);
+    assert_eq!(responses[4].body, "script_error");
+}
+
+#[test]
+fn upload_calls_and_summary_are_logged_without_names_or_paths() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let temp_root = upload_temp_root(dir.path());
+    let temp_env = temp_root.to_string_lossy().into_owned();
+    let script = r#"
+ctx.request.files[0].text();
+ctx.respond(200, { "Content-Type": "text/plain" }, ctx.request.files[0].stream());
+"#;
+    let (response, stderr) = serve_upload_fixture(
+        dir.path(),
+        &upload_config(1024 * 1024),
+        script,
+        &[
+            ("TMPDIR", temp_env.as_str()),
+            ("TMP", temp_env.as_str()),
+            ("TEMP", temp_env.as_str()),
+        ],
+        |port| {
+            request_multipart(
+                port,
+                "/demo/documents/manifest/group-a",
+                "sd-log",
+                &[MultipartPart::file(
+                    "document",
+                    "client-secret-name.txt",
+                    "text/plain",
+                    b"four",
+                )],
+            )
+        },
+    );
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(response.body, "four");
+    let logs: Vec<serde_json::Value> = stderr
+        .lines()
+        .filter(|line| line.contains("\"request_id\""))
+        .map(|line| serde_json::from_str(line).expect("structured log json"))
+        .collect();
+    assert_eq!(logs.len(), 1, "stderr: {stderr}");
+    let log = &logs[0];
+    assert_eq!(log["upload"]["files"], 1);
+    assert_eq!(log["upload"]["total_bytes"], 4);
+    assert_eq!(log["upload"]["error"], serde_json::Value::Null);
+    let calls = log["file_calls"].as_array().expect("file_calls array");
+    assert_eq!(calls.len(), 2, "file_calls: {calls:?}");
+    assert_eq!(calls[0]["api"], "upload.text");
+    assert_eq!(calls[0]["bytes"], 4);
+    assert_eq!(calls[0]["error"], serde_json::Value::Null);
+    assert_eq!(calls[1]["api"], "upload.stream");
+    assert_eq!(calls[1]["bytes"], 4);
+    assert_eq!(calls[1]["error"], serde_json::Value::Null);
+    assert!(
+        !stderr.contains("client-secret-name.txt"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains(&temp_root.display().to_string()),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn upload_client_filename_is_never_used_on_disk() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let temp_root = upload_temp_root(dir.path());
+    let temp_env = temp_root.to_string_lossy().into_owned();
+    let script = r"
+ctx.respond(200, {}, ctx.request.files[0].stream());
+";
+    let ((), stderr) = serve_upload_fixture(
+        dir.path(),
+        &upload_config(2 * 1024 * 1024),
+        script,
+        &[
+            ("TMPDIR", temp_env.as_str()),
+            ("TMP", temp_env.as_str()),
+            ("TEMP", temp_env.as_str()),
+        ],
+        |port| {
+            let data = vec![b'x'; 1024 * 1024];
+            let body = multipart_body(
+                "sd-name",
+                &[MultipartPart::file(
+                    "document",
+                    "forbidden-client-name.bin",
+                    "application/octet-stream",
+                    &data,
+                )],
+            );
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            let client = std::thread::spawn(move || {
+                let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .expect("read timeout");
+                let head = format!(
+                    "POST /demo/documents/manifest/group-a HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Type: multipart/form-data; boundary=sd-name\r\nContent-Length: {}\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(head.as_bytes()).expect("write head");
+                stream.write_all(&body).expect("write body");
+                stream.flush().expect("flush");
+                let mut bytes = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                loop {
+                    let read = stream.read(&mut buffer).expect("read response");
+                    assert_ne!(read, 0, "server closed before the response body started");
+                    bytes.extend_from_slice(&buffer[..read]);
+                    if let Some(head_end) =
+                        bytes.windows(4).position(|window| window == b"\r\n\r\n")
+                    {
+                        if bytes.len() > head_end + 4 {
+                            break;
+                        }
+                    }
+                }
+                ready_tx.send(()).expect("signal response body");
+                // Keep the response open so the server-side relay blocks and
+                // the request-scoped directory stays observable.
+                std::thread::sleep(Duration::from_secs(2));
+            });
+            ready_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("response body did not start");
+            let dirs = wait_for_temp_entries(&temp_root);
+            assert_eq!(dirs.len(), 1, "upload dirs: {dirs:?}");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+
+                let mode = std::fs::metadata(&dirs[0])
+                    .expect("upload dir metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777;
+                assert_eq!(mode, 0o700, "upload directory mode: {mode:o}");
+            }
+            let files = temp_entries(&dirs[0]);
+            assert!(!files.is_empty(), "no files under {}", dirs[0].display());
+            for file in files {
+                let name = file
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("temp filename");
+                assert!(
+                    name.bytes().all(|byte| byte.is_ascii_digit()),
+                    "temporary files must use opaque numbered names, got {name:?}"
+                );
+                assert_ne!(name, "forbidden-client-name.bin");
+            }
+            client.join().expect("client thread");
+            wait_for_empty_temp(&temp_root);
+        },
+    );
+    assert!(
+        !stderr.contains("forbidden-client-name.bin"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains(&temp_root.display().to_string()),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn upload_temp_directories_are_removed_on_every_exit_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let temp_root = upload_temp_root(dir.path());
+    let temp_env = temp_root.to_string_lossy().into_owned();
+    let config = with_sandbox(&upload_config(1024 * 1024), 150);
+    let script = r#"
+var mode = ctx.request.query.mode;
+if (mode === "error") { throw new Error("boom"); }
+if (mode === "timeout") { while (true) {} }
+var file = ctx.request.files[0];
+if (mode === "stream") { ctx.respond(200, {}, file.stream()); }
+else { ctx.respond(200, {}, file.text()); }
+"#;
+    let (responses, _) = serve_upload_fixture(
+        dir.path(),
+        &config,
+        script,
+        &[
+            ("TMPDIR", temp_env.as_str()),
+            ("TMP", temp_env.as_str()),
+            ("TEMP", temp_env.as_str()),
+        ],
+        |port| {
+            let path = "/demo/documents/manifest/group-a";
+            let small = [MultipartPart::file(
+                "document",
+                "small.bin",
+                "text/plain",
+                b"abc",
+            )];
+            let buffered = request_multipart(port, path, "sd-clean-buffered", &small);
+            wait_for_empty_temp(&temp_root);
+
+            let script_error = request_multipart(
+                port,
+                &format!("{path}?mode=error"),
+                "sd-clean-error",
+                &small,
+            );
+            wait_for_empty_temp(&temp_root);
+
+            let streamed = request_multipart(
+                port,
+                &format!("{path}?mode=stream"),
+                "sd-clean-stream",
+                &small,
+            );
+            wait_for_empty_temp(&temp_root);
+
+            let malformed = request_bytes(
+                port,
+                "POST",
+                path,
+                &[("Content-Type", "multipart/form-data; boundary=sd-malformed")],
+                b"not multipart",
+            );
+            wait_for_empty_temp(&temp_root);
+
+            let big = vec![b'x'; 1024 * 1024];
+            let body = multipart_body(
+                "sd-disconnect",
+                &[MultipartPart::file(
+                    "document",
+                    "big.bin",
+                    "application/octet-stream",
+                    &big,
+                )],
+            );
+            abort_multipart_after_response_head(
+                port,
+                &format!("{path}?mode=stream"),
+                "sd-disconnect",
+                &body,
+            );
+            wait_for_empty_temp(&temp_root);
+
+            let timeout = request_multipart(
+                port,
+                &format!("{path}?mode=timeout"),
+                "sd-clean-timeout",
+                &small,
+            );
+            wait_for_empty_temp(&temp_root);
+
+            [buffered, script_error, streamed, malformed, timeout]
+        },
+    );
+    assert_eq!(responses[0].status, 200, "body: {}", responses[0].body);
+    assert_eq!(responses[0].body, "abc");
+    assert_eq!(responses[1].status, 500, "body: {}", responses[1].body);
+    assert_eq!(
+        error_class(&responses[1].body).as_deref(),
+        Some("script_error")
+    );
+    assert_eq!(responses[2].status, 200, "body: {}", responses[2].body);
+    assert_eq!(responses[2].body, "abc");
+    assert_eq!(responses[3].status, 400, "body: {}", responses[3].body);
+    assert_eq!(
+        error_class(&responses[3].body).as_deref(),
+        Some("invalid_multipart")
+    );
+    assert_eq!(responses[4].status, 500, "body: {}", responses[4].body);
+    assert_eq!(
+        error_class(&responses[4].body).as_deref(),
+        Some("script_error")
+    );
+}
+
+#[test]
+fn non_multipart_requests_expose_an_empty_files_array() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = r#"
+ctx.respond(200, { "Content-Type": "text/plain" }, String(ctx.request.files.length) + ":" + JSON.stringify(ctx.request.files));
+"#;
+    let (response, _) = serve_upload_fixture(
+        dir.path(),
+        &upload_config(1024 * 1024),
+        script,
+        &[],
+        |port| {
+            request_with_body(
+                port,
+                "POST",
+                "/demo/documents/manifest/group-a",
+                &[("Content-Type", "text/plain")],
+                "plain body",
+            )
+        },
+    );
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(response.body, "0:[]");
 }
 
 #[test]

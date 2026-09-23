@@ -4,7 +4,7 @@
 
 > 本页是英文版 [ctx-api.md](./ctx-api.md) 的译本；如有出入，以英文版为准。
 
-- **状态**：v1 切片已公开并冻结；本页描述已实现子集（T1–T11）
+- **状态**：v1 切片已公开并冻结；本页描述已实现子集（T1–T12）
 - **适用**：`apiVersion` 1
 - **稳定性**：同一 `apiVersion` 内只做增量；移除需要新的 `apiVersion`
 
@@ -24,6 +24,7 @@
 | 分组 | API | 状态 |
 | --- | --- | --- |
 | 请求快照 | `ctx.request.method` / `path` / `params` / `query` / `headers` / `bodyText` | 已实现（T2） |
+| 请求快照 | `ctx.request.files` | 已实现（T12） |
 | 请求快照 | `ctx.request.bodyBytes` | pending（不在本切片） |
 | 上游 HTTP | `ctx.http.get` | 已实现（T4） |
 | 上游 HTTP | `ctx.http.get` 的 `opts.retries` / `backoff` | pending |
@@ -39,8 +40,8 @@
 ## 已实现的子集
 
 - `ctx.apiVersion` 为 `"1"`。
-- `ctx.request` 是只读快照，含 `method`、`path`、`params`、`query`、`headers` 与 `bodyText`。Header 名小写化；请求 body 不是合法 UTF-8 时 `bodyText` 为 `null`。Query 名与值都会做百分号解码，Header 名小写化。重复的 query 或 Header 名在快照中保留最后一个值。
-- `ctx.respond(status, headers, body)` 接受 `[100, 599]` 范围内的状态码、对象或 `[name, value]` 对形式的 headers，以及字符串、字节数组、`Uint8Array`、`ArrayBuffer` 或 `ctx.file.stream` handle 类型的 body。第一次调用生效并返回 `true`；后续调用被忽略、返回 `false`，并在服务端产生警告。字节数组的每个值必须是 `[0, 255]` 范围内的整数。Header 名与值在调用时校验；畸形 pair 抛出可捕获的 `script_error`，不会记录 Response，也绝不静默丢弃。
+- `ctx.request` 是只读快照，含 `method`、`path`、`params`、`query`、`headers`、`bodyText` 与 `files`。Header 名小写化；请求 body 不是合法 UTF-8 时 `bodyText` 为 `null`。已解析的 multipart 请求同样把 `bodyText` 暴露为 `null`，因为 framing 在脚本运行前已被消费。Query 名与值都会做百分号解码，Header 名小写化。重复的 query 或 Header 名在快照中保留最后一个值。
+- `ctx.respond(status, headers, body)` 接受 `[100, 599]` 范围内的状态码、对象或 `[name, value]` 对形式的 headers，以及字符串、字节数组、`Uint8Array`、`ArrayBuffer` 或 `ctx.file.stream` / `ctx.request.files[].stream()` handle 类型的 body。第一次调用生效并返回 `true`；后续调用被忽略、返回 `false`，并在服务端产生警告。字节数组的每个值必须是 `[0, 255]` 范围内的整数。Header 名与值在调用时校验；畸形 pair 抛出可捕获的 `script_error`，不会记录 Response，也绝不静默丢弃。
 - `ctx.http.get(url, opts)` 执行 allowlist 约束的上游 GET，返回 `{status, headers, text(), bytes()}`。
   - `url` 必须是绝对的 `http` 或 `https` URL，其 host 大小写不敏感地匹配 `upstream.allow_hosts`；端口不参与匹配，IP 字面量与 `localhost` 需要显式条目。
   - `opts` 必须是普通对象，且只接受 `{ timeout_ms }`。未知字符串或 symbol 键、继承键、非对象值，以及显式 `null`、`NaN`、`Infinity`、非整数或非正数的 `timeout_ms` 都是脚本错误（fail-closed）。
@@ -69,6 +70,11 @@
   - 合法的单 range（`bytes=N-M`、`bytes=N-` 或 `bytes=-N`）答 `206`，end 偏移截断到文件末尾，并带正确的 `Content-Length` 与 `Content-Range`。不可用的 Range header——不可满足、畸形、多 range，或空文件上的任意 range——答 `416`，带 `Content-Range: bytes */<size>` 且无 body。存在 `If-Range` 时禁用 Range 处理，答完整 `200`。
   - 绝不推断 `Content-Type`，由脚本设置。HEAD 不会自动映射到 GET Route；只有显式声明的 HEAD Route 才会命中。缓冲的 `ctx.respond` body 保持原有的无 Range 行为。
   - 流一旦开始，body 中途的文件读取失败只能截断客户端 body，因为状态与 headers 已经在网络上发出；宿主会在请求日志中把该失败记为 `file_stream_error`。文件路径绝不进入客户端或日志。日志字段见 [CLI 契约](./cli.zh-CN.md)。
+- `ctx.request.files` 是按 multipart 顺序排列的只读上传文件数组。每项含 `field`、`filename`、`contentType`（缺失时为 `null`）、`size`、`text()`、`bytes()` 与 `stream()`。
+  - `filename` 只保留客户端提供的 basename：`/` 与 `\` 路径组件都会被剥离。绝不暴露临时文件系统路径。
+  - 非 multipart 请求暴露 `[]`；非文件表单字段会被忽略，但其字节仍计入 `files.upload_max_bytes`。
+  - `text()` 以严格 UTF-8 解码；`bytes()` 返回 `Uint8Array`。两者上限均为 8 MiB，并在适用时抛出可捕获的 `file_too_large` / `file_encoding_error` / `file_io_error` 错误。`stream()` 不限大小、不透明、只能消费一次，且仅可作为同一请求内 `ctx.respond` 的 `body` 参数。
+  - 上传 stream 用作 Response body 时，遵循与 `ctx.file.stream` 相同的宿主 framing 与单 range 200/206/416 规则。
 - `ctx.env` 是进程环境变量快照。不加载 `.env` 文件。
 - `ctx.log.info` / `warn` / `error` 只写入服务端日志，绝不进客户端 Response。消息不会被脱敏或过滤：脚本作者必须确保消息中不含请求／响应 body、Token、Cookie 或其他机密。宿主自身不会自动记录 body。
 - 脚本抛错、超过 `sandbox.script_timeout_ms`（默认 10000）或加载失败时返回 500 `script_error`；脚本结束却没有产生 Response 时返回 500 `script_no_response`；未捕获的上游传输层失败返回 502 `upstream_unreachable`。三者都带 `request_id`。
@@ -88,7 +94,8 @@
 
 - 脚本应答时限（`sandbox.script_timeout_ms`），到点向客户端返回 500 `script_error`
 - 网络 allowlist
-- `ctx.file` 的静态文件根限制（上传大小上限随 T12 落地）
+- `ctx.file` 的静态文件根限制
+- 请求级 multipart 临时存储：`files.upload_max_bytes`、流式计数、8 MiB 缓冲上传读取与 guard 清理
 - 堆栈绝不返回给客户端
 
 Boa 0.22 不暴露堆指标、堆上限或 interrupt 钩子，因此没有堆上限被执行；被超时放弃的脚本只能由宿主的循环次数兜底终止。该取舍、其余资源边界与子进程隔离升级路径记录在 [ADR 0003](../../plans/adr/0003-script-first-multi-runtime.md) 的 T3 修订中。

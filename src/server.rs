@@ -7,7 +7,7 @@ use crate::matcher::match_route;
 use crate::script::{self, RequestSnapshot, ResponseBody, ScriptResponse};
 use crate::upstream;
 use axum::body::{Body, Bytes};
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
@@ -33,6 +33,17 @@ struct Routed {
     upstream_calls: Vec<Value>,
     file_calls: files::CallLog,
     script_duration_ms: Option<f64>,
+    request_body_bytes: Option<u64>,
+    upload: Value,
+}
+
+/// Stable log-only shape for the per-request upload summary.
+fn upload_log(files: usize, total_bytes: u64, error: Option<&str>) -> Value {
+    json!({
+        "files": files,
+        "total_bytes": total_bytes,
+        "error": error,
+    })
 }
 
 pub struct AppState {
@@ -64,18 +75,15 @@ impl AppState {
         format!("{nanos:016x}{seq:08x}")
     }
 
-    /// Match one request and run its route script, if any.
-    async fn route_request(
-        &self,
-        method: &Method,
-        method_label: &str,
-        path: &str,
-        uri: &Uri,
-        headers: &HeaderMap,
-        body: &Bytes,
-    ) -> Routed {
-        match match_route(&self.config.routes, method_label, path) {
-            None => Routed {
+    /// Match one request, prepare its body, then run the matched script.
+    async fn route_request(&self, request: Request) -> Routed {
+        let method = request.method().clone();
+        let uri = request.uri().clone();
+        let headers = request.headers().clone();
+        let method_label = method.as_str().to_ascii_uppercase();
+        let path = uri.path().to_string();
+        let Some(found) = match_route(&self.config.routes, &method_label, &path) else {
+            return Routed {
                 route_label: String::new(),
                 params: HashMap::new(),
                 handled: Handled::NotFound,
@@ -83,69 +91,213 @@ impl AppState {
                 upstream_calls: Vec::new(),
                 file_calls: files::CallLog::default(),
                 script_duration_ms: None,
+                request_body_bytes: None,
+                upload: upload_log(0, 0, None),
+            };
+        };
+        let route_index = found.route_index;
+        let route = &self.config.routes[route_index];
+        let label = route.name.clone().unwrap_or_else(|| route.path.clone());
+        let params = found.params;
+
+        match self
+            .prepare_request(request, &method, &uri, &headers, &params)
+            .await
+        {
+            Ok(prepared) => self.run_script(route_index, label, params, prepared).await,
+            Err(PrepareError::Upload {
+                failure,
+                request_body_bytes,
+            }) => Routed {
+                route_label: label,
+                params,
+                handled: Handled::UploadFailed(failure),
+                script_logs: Vec::new(),
+                upstream_calls: Vec::new(),
+                file_calls: files::CallLog::default(),
+                script_duration_ms: None,
+                request_body_bytes,
+                upload: upload_log(failure.files(), failure.total_bytes(), Some(failure.code())),
             },
-            Some(found) => {
-                let route = &self.config.routes[found.route_index];
-                let label = route.name.clone().unwrap_or_else(|| route.path.clone());
-                let snapshot = RequestSnapshot::new(
-                    method,
-                    path,
-                    found.params.clone(),
-                    uri.query().unwrap_or(""),
-                    headers,
-                    body,
-                );
-                let script_started = Instant::now();
-                let outcome = match std::fs::read_to_string(&route.script) {
-                    Ok(source) => {
-                        let timeout = Duration::from_millis(self.config.sandbox.script_timeout_ms);
-                        script::execute(
-                            source,
-                            snapshot,
-                            timeout,
-                            self.config.upstream.clone(),
-                            self.config.files.clone(),
-                        )
-                        .await
-                    }
-                    // The path was validated at load time; losing the file now
-                    // is a runtime failure, not a silent 404.
-                    Err(error) => script::Outcome::failed(script::Error::Failed(format!(
-                        "cannot read script {}: {error}",
-                        route.script.display()
-                    ))),
-                };
-                let script_duration_ms = Some(elapsed_ms(script_started));
-                let script::Outcome {
-                    response,
-                    logs,
-                    error,
-                    upstream_calls,
-                    file_calls,
-                } = outcome;
-                let handled = match (response, error) {
-                    (Some(response), _) => Handled::Responded(response),
-                    (None, Some(error)) => Handled::Failed(error),
-                    (None, None) => Handled::Failed(script::Error::NoResponse),
-                };
-                Routed {
-                    route_label: label,
-                    params: found.params,
-                    handled,
-                    script_logs: logs,
-                    upstream_calls,
-                    file_calls,
-                    script_duration_ms,
+            Err(PrepareError::BodyTooLarge { request_body_bytes }) => Routed {
+                route_label: label,
+                params,
+                handled: Handled::BodyTooLarge,
+                script_logs: Vec::new(),
+                upstream_calls: Vec::new(),
+                file_calls: files::CallLog::default(),
+                script_duration_ms: None,
+                request_body_bytes,
+                upload: upload_log(0, 0, None),
+            },
+        }
+    }
+
+    /// Buffer a non-multipart body or parse multipart uploads before the
+    /// script sees the request.
+    async fn prepare_request(
+        &self,
+        request: Request,
+        method: &Method,
+        uri: &Uri,
+        headers: &HeaderMap,
+        params: &HashMap<String, String>,
+    ) -> Result<PreparedRequest, PrepareError> {
+        let path = uri.path();
+        let query = uri.query().unwrap_or("");
+        let content_length = files::content_length(headers);
+        if files::is_multipart(headers) {
+            let max_bytes = self.config.files.upload_max_bytes;
+            if content_length
+                .is_some_and(|len| len > max_bytes.saturating_add(MULTIPART_FRAMING_ALLOWANCE))
+            {
+                return Err(PrepareError::Upload {
+                    failure: files::ParseFailure::too_large(0, 0),
+                    request_body_bytes: content_length,
+                });
+            }
+            match files::parse_multipart(request, max_bytes).await {
+                Ok(store) => {
+                    let metas = store.metas();
+                    let file_count = metas.len();
+                    let total_bytes = store.total_bytes;
+                    let snapshot = RequestSnapshot::new(
+                        method,
+                        path,
+                        params.clone(),
+                        query,
+                        headers,
+                        None,
+                        metas,
+                    );
+                    Ok(PreparedRequest {
+                        snapshot,
+                        uploads: Some(store),
+                        upload: upload_log(file_count, total_bytes, None),
+                        request_body_bytes: content_length.or(Some(total_bytes)),
+                    })
                 }
+                Err(failure) => Err(PrepareError::Upload {
+                    failure,
+                    request_body_bytes: content_length.or(Some(failure.total_bytes())),
+                }),
+            }
+        } else {
+            match axum::body::to_bytes(request.into_body(), NON_MULTIPART_BODY_LIMIT).await {
+                Ok(bytes) => {
+                    let snapshot = RequestSnapshot::new(
+                        method,
+                        path,
+                        params.clone(),
+                        query,
+                        headers,
+                        Some(&bytes),
+                        Vec::new(),
+                    );
+                    Ok(PreparedRequest {
+                        snapshot,
+                        uploads: None,
+                        upload: upload_log(0, 0, None),
+                        request_body_bytes: u64::try_from(bytes.len()).ok(),
+                    })
+                }
+                Err(_) => Err(PrepareError::BodyTooLarge {
+                    request_body_bytes: content_length,
+                }),
             }
         }
     }
+
+    /// Run one route script against a prepared request.
+    async fn run_script(
+        &self,
+        route_index: usize,
+        route_label: String,
+        params: HashMap<String, String>,
+        prepared: PreparedRequest,
+    ) -> Routed {
+        let route = &self.config.routes[route_index];
+        let PreparedRequest {
+            snapshot,
+            uploads,
+            upload,
+            request_body_bytes,
+        } = prepared;
+        let script_started = Instant::now();
+        let outcome = match std::fs::read_to_string(&route.script) {
+            Ok(source) => {
+                let timeout = Duration::from_millis(self.config.sandbox.script_timeout_ms);
+                script::execute(
+                    source,
+                    snapshot,
+                    timeout,
+                    self.config.upstream.clone(),
+                    self.config.files.clone(),
+                    uploads,
+                )
+                .await
+            }
+            // The path was validated at load time; losing the file now is a
+            // runtime failure, not a silent 404.
+            Err(error) => script::Outcome::failed(script::Error::Failed(format!(
+                "cannot read script {}: {error}",
+                route.script.display()
+            ))),
+        };
+        let script_duration_ms = Some(elapsed_ms(script_started));
+        let script::Outcome {
+            response,
+            logs,
+            error,
+            upstream_calls,
+            file_calls,
+        } = outcome;
+        let handled = match (response, error) {
+            (Some(response), _) => Handled::Responded(response),
+            (None, Some(error)) => Handled::Failed(error),
+            (None, None) => Handled::Failed(script::Error::NoResponse),
+        };
+        Routed {
+            route_label,
+            params,
+            handled,
+            script_logs: logs,
+            upstream_calls,
+            file_calls,
+            script_duration_ms,
+            request_body_bytes,
+            upload,
+        }
+    }
+}
+
+/// One matched request after body preparation, before script execution.
+struct PreparedRequest {
+    snapshot: RequestSnapshot,
+    uploads: Option<Arc<files::UploadStore>>,
+    upload: Value,
+    request_body_bytes: Option<u64>,
+}
+
+/// Pre-script preparation failure, mapped by `route_request` onto `Handled`.
+enum PrepareError {
+    Upload {
+        failure: files::ParseFailure,
+        request_body_bytes: Option<u64>,
+    },
+    BodyTooLarge {
+        request_body_bytes: Option<u64>,
+    },
 }
 
 /// Outcome of one matched route, before it is mapped onto HTTP.
 enum Handled {
     /// No route matched method + path.
     NotFound,
+    /// The request body exceeded the non-multipart extractor limit.
+    BodyTooLarge,
+    /// Multipart parsing failed before the script could run.
+    UploadFailed(files::ParseFailure),
     /// The script did not produce a response.
     Failed(script::Error),
     /// The script called `ctx.respond`.
@@ -180,22 +332,32 @@ pub async fn run(
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
     eprintln!("stuntdouble listening on http://{bound}");
+    // The multipart body stream, including framing, is bounded by the upload
+    // budget plus a fixed framing allowance. Non-multipart bodies keep their
+    // own 2 MiB bound in `route_request`.
+    let upload_body_limit = usize::try_from(
+        config
+            .files
+            .upload_max_bytes
+            .saturating_add(MULTIPART_FRAMING_ALLOWANCE),
+    )
+    .unwrap_or(usize::MAX);
     let state = Arc::new(AppState::new(config, bound, verbose));
-    let app = Router::new().fallback(any(handle)).with_state(state);
+    let app = Router::new()
+        .fallback(any(handle))
+        .layer(DefaultBodyLimit::max(upload_body_limit))
+        .with_state(state);
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
         .await
 }
 
-async fn handle(
-    State(state): State<Arc<AppState>>,
-    method: Method,
-    uri: Uri,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
+async fn handle(State(state): State<Arc<AppState>>, request: Request) -> Response {
     let started = Instant::now();
     let request_id = state.request_id();
+    let method = request.method().clone();
+    let uri = request.uri().clone();
+    let headers = request.headers().clone();
     let method_label = method.as_str().to_ascii_uppercase();
     let path = uri.path().to_string();
     // Client-supplied id is recorded but never adopted or forwarded upstream.
@@ -204,7 +366,6 @@ async fn handle(
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
     let request_header_log = loggable_headers(&headers, &REQUEST_LOG_HEADERS);
-    let request_body_bytes = body.len();
 
     let Routed {
         route_label,
@@ -214,9 +375,9 @@ async fn handle(
         upstream_calls,
         file_calls,
         script_duration_ms,
-    } = state
-        .route_request(&method, &method_label, &path, &uri, &headers, &body)
-        .await;
+        request_body_bytes,
+        upload,
+    } = state.route_request(request).await;
 
     let mapped = map_handled(handled, &headers, &request_id, state.verbose);
 
@@ -236,6 +397,7 @@ async fn handle(
         "response_headers": response_header_log,
         "upstream_calls": upstream_calls,
         "file_calls": files::calls_json(&file_calls),
+        "upload": upload,
         "params": params,
         "client_request_id": client_request_id,
         "host": &state.host,
@@ -300,6 +462,16 @@ fn map_handled(
     verbose: bool,
 ) -> Mapped {
     match handled {
+        Handled::BodyTooLarge => Mapped {
+            // Keep the pre-T12 framework behavior for non-multipart bodies:
+            // bounded with a 413 and no response body.
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            error_class: "request_body_too_large",
+            headers: HeaderMap::new(),
+            body_bytes: Some(0),
+            body: MappedBody::Ready(Body::empty()),
+        },
+        Handled::UploadFailed(failure) => upload_failed_mapped(failure, request_id, verbose),
         Handled::NotFound => {
             let body = error_body(request_id, "not_found", None);
             Mapped {
@@ -349,6 +521,24 @@ fn map_handled(
     }
 }
 
+/// Map a pre-script upload failure onto the project JSON envelope.
+fn upload_failed_mapped(failure: files::ParseFailure, request_id: &str, verbose: bool) -> Mapped {
+    let body = error_body(
+        request_id,
+        failure.code(),
+        verbose.then(|| failure.detail()),
+    );
+    let status =
+        StatusCode::from_u16(failure.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    Mapped {
+        status,
+        error_class: failure.code(),
+        headers: HeaderMap::new(),
+        body_bytes: u64::try_from(body.len()).ok(),
+        body: MappedBody::Ready(Body::from(body)),
+    }
+}
+
 /// Map a script failure onto its client-visible status, body, and log class.
 fn failed_mapped(error: &script::Error, request_id: &str, verbose: bool) -> Mapped {
     let class = error.class();
@@ -375,6 +565,12 @@ const REQUEST_LOG_HEADERS: [&str; 5] = [
 
 /// Response headers copied into the per-request log.
 const RESPONSE_LOG_HEADERS: [&str; 3] = ["content-type", "content-length", "content-range"];
+
+/// Axum's default extractor limit, kept for non-multipart request bodies.
+const NON_MULTIPART_BODY_LIMIT: usize = 2 * 1024 * 1024;
+
+/// Multipart framing allowance used only by the Content-Length pre-check.
+const MULTIPART_FRAMING_ALLOWANCE: u64 = 1024 * 1024;
 
 /// Bounded frames between the stream relay and the HTTP response body.
 const STREAM_CHANNEL_CAPACITY: usize = 4;
@@ -644,6 +840,9 @@ async fn relay_file_stream(
         offset,
         len,
         call,
+        // Keep an uploaded body's temporary-directory guard alive for the
+        // whole relay; dropping it early would fail cleanup on Windows.
+        guard: _upload_guard,
         ..
     } = body;
     let mut file = tokio::fs::File::from_std(file);

@@ -17,14 +17,12 @@ serde_json = "1"
 toml = "1"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
-axum = "0.8"
+axum = { version = "0.8", features = ["multipart"] }
 boa_engine = { version = "0.22", default-features = false }
 url = "2"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 ureq = { version = "3.4", default-features = false, features = ["rustls-no-provider", "platform-verifier"] }
 base64 = "0.23"
-
-[dev-dependencies]
 tempfile = "3"
 
 [lints.rust]

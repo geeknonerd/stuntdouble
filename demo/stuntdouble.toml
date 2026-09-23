@@ -14,6 +14,7 @@ port = 3000
 
 [files]
 root = "./files"
+upload_max_bytes = 20971520
 
 [upstream]
 allow_hosts = ["metadata.example.com", "files.example.com"]
