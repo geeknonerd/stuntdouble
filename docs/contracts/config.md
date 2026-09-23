@@ -2,7 +2,7 @@
 
 **English** \| [中文](./config.zh-CN.md)
 
-- **Status**: frozen for the v1 slice; additive updates through T12
+- **Status**: frozen for the v1 slice; additive updates within version "1"
 - **Applies to**: configurations that declare `config_version = "1"`
 - **Stability**: within version `"1"`, fields may be added; breaking changes before 1.0 need a deprecation window
 
@@ -21,9 +21,10 @@ Every valid configuration is a TOML table. Unknown keys, unknown `config_version
 | Key | Required | Type | Default | Validation |
 | --- | --- | --- | --- | --- |
 | `config_version` | yes | string | — | exactly `"1"`; any other value exits with code `2` |
-| `server` | yes | table | — | only `{bind, port}` is accepted |
+| `server` | yes | table | — | only `{bind, port, request_timeout_ms}` is accepted |
 | `server.bind` | no | string | `"127.0.0.1"` | IP address literal; hostnames are rejected during validation |
 | `server.port` | no | integer | `3000` | integer in `[1, 65535]` |
+| `server.request_timeout_ms` | no | integer | `30000` | positive integer (0 is rejected); deadline for reading one request head and body |
 | `files` | yes | table | — | only `{root, upload_max_bytes}` is accepted |
 | `files.root` | yes | string | — | existing directory, resolved relative to the configuration file |
 | `files.upload_max_bytes` | no | integer | `20971520` | positive integer (0 and negative values are rejected); maximum data bytes accepted in one multipart request |

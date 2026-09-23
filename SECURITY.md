@@ -24,6 +24,10 @@ Multipart parsing runs before the script only for a matched Route. File parts ar
 
 The temporary-directory guard removes upload storage on buffered responses, script errors, parse errors, timeouts, stream completion, and client disconnect. If the script deadline expires while the blocking worker is still running, the host deletes the contents immediately and keeps the guard as a retry if the platform still blocks deletion. Client filenames are never used as filesystem paths and never written to logs; only the basename reaches `ctx.request.files[].filename`. Temporary upload paths are never exposed or logged.
 
+## Request read deadlines
+
+`serve` reads one request head and body under `server.request_timeout_ms` (default 30 s, positive integer). A head that does not complete in that window closes the connection and records the log-only class `request_head_timeout`; a body or multipart parse that does not finish answers 408 `request_timeout` and drops the request-scoped upload directory, because the parse future owns the temporary-directory guard. The deadline is independent of `sandbox.script_timeout_ms`, which still bounds script execution only.
+
 ## Reporting a vulnerability
 
 Do not open a public issue for a security vulnerability. Use GitHub private vulnerability reporting for this repository:

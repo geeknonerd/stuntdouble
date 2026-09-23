@@ -4,7 +4,7 @@
 
 > 本页是英文版 [config.md](./config.md) 的译本；如有出入，以英文版为准。
 
-- **状态**：v1 切片已冻结；增量更新至 T12
+- **状态**：v1 切片已冻结；版本 "1" 内允许增量更新
 - **适用**：声明 `config_version = "1"` 的配置
 - **稳定性**：版本 `"1"` 内可以新增字段；1.0 之前的破坏性变更需带弃用窗口
 
@@ -23,9 +23,10 @@ v1 不接受 YAML 与 JSON。
 | 键 | 必填 | 类型 | 默认值 | 校验 |
 | --- | --- | --- | --- | --- |
 | `config_version` | 是 | string | — | 必须恰好是 `"1"`；其他值以退出码 `2` 结束 |
-| `server` | 是 | table | — | 只接受 `{bind, port}` |
+| `server` | 是 | table | — | 只接受 `{bind, port, request_timeout_ms}` |
 | `server.bind` | 否 | string | `"127.0.0.1"` | IP 地址字面量；hostname 在校验期被拒绝 |
 | `server.port` | 否 | integer | `3000` | `[1, 65535]` 范围内的整数 |
+| `server.request_timeout_ms` | 否 | integer | `30000` | 正整数（0 被拒绝）；读取一个请求头与请求体的期限 |
 | `files` | 是 | table | — | 只接受 `{root, upload_max_bytes}` |
 | `files.root` | 是 | string | — | 必须已存在的目录，相对配置文件解析 |
 | `files.upload_max_bytes` | 否 | integer | `20971520` | 正整数（0 与负数被拒绝）；单个 multipart 请求可接受的数据字节上限 |

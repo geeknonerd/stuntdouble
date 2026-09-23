@@ -34,7 +34,7 @@ T12（issue #53）为命中 `multipart/form-data` 的路由加入请求体解析
 
 (session history) T12 的首版实现正是第二种形状：multer 的 whole-stream limit 保持默认（不受限），只在 `field.chunk()` 累计 part 内容，并且仅对带 `Content-Length` 的请求做固定 1 MiB framing 预检。两轮 code review 都指向同一缺口——无 `Content-Length` 的 chunked 上传在数据预算生效前没有任何原始流上限。修复把整体闸门提升到 axum 的 `DefaultBodyLimit`（数据预算 + 1 MiB allowance），并让 Content-Length 预检与整闸共用同一条公式。评审也质疑过 1 MiB allowance 没有被 spec 明确授权、可能误拒 framing 特别大的合法请求；复核后的决定是保留固定 allowance，因为无界 framing 是明确的资源耗尽面，且该上限已进入配置、CLI 与安全契约并配有回归测试。
 
-当前分支 `feat/multipart-uploads` 落地了 multipart 上传、收紧后的校验与账目、以及 getting-started 文档。截至本文写作时（2026-09-23），该分支尚未推送、未创建 PR、未合并到 `main`；#53 与从 T12 拆出的读取期限 issue #56（`server: bound request body read time`）仍为 OPEN。因此本文记录的是 T12 分支上的设计结论，不能当作 `main` 上已经合并的既成状态。
+当前分支 `feat/multipart-uploads` 落地了 multipart 上传、收紧后的校验与账目、以及 getting-started 文档。截至本文写作时（2026-09-23），该分支尚未推送、未创建 PR、未合并到 `main`；#53 当时仍为 OPEN。从 T12 拆出的读取期限 issue #56（`server: bound request body read time`）随后由 `server.request_timeout_ms` 实现（分支 `fix/server-body-read-timeout`，截至本次刷新尚未合并），它叠加在本文的字节分层之上。因此本文记录的是 T12 分支上的设计结论，不能当作 `main` 上已经合并的既成状态。
 
 相邻学习 `docs/solutions/conventions/host-boundary-fail-closed-input-classification.md` 曾预测 T12 会碰到“缺失、畸形、超限不能被压平成同一种失败”的同类形状。本文只记录其中的大小上限分层：错误形状（400 与 413 的区分、Content-Length 缺失、multipart 结构畸形）仍由那篇 convention 负责。
 
@@ -144,7 +144,7 @@ T12 当前回归覆盖了以下边界，建议后续改动沿用同一组形状�
 2. **保留一个明确的安全上限。** 如果没有额外的 raw ceiling，超长 header/name 等 framing 可以绕过内容预算；如果直接把框架限制关闭，资源耗尽面更大。固定 allowance 使 multipart wire bytes 仍有硬边界，且这个边界可以写进契约和测试。
 3. **让超限责任归属一致。** multipart 的 Content-Length 预检和流式解析都映射到同一个稳定类别 `upload_too_large`（`src/server.rs:152-163`、`src/files.rs:421-430`），调用方不必根据 413 的来源猜测错误形状；数据预算仍然是日志和诊断中的主账目。
 4. **避免共享 Router 上限误伤其他请求类别。** 当前非 multipart 在应用层重新收紧到 2 MiB（`src/server.rs:189-210`、`src/server.rs:573-574`），因此不会因为 multipart 支持大文件而把旧路径一起放宽；反过来，也不能为了保持旧路径的 2 MiB 而让 multipart 的 20 MiB 配置失效。
-5. **为后续演进留下正确接缝。** issue #56 仍未解决解析期的读取期限问题；本方案只限制字节，不限制慢速客户端把时间拉长。未来增加读取期限时，应该叠加在这套“数据预算 / raw ceiling / 流式账目”之上，而不是把三种约束重新合并成一个数字。
+5. **为后续演进留下正确接缝。** 本方案只限制字节；读取期限按这条接缝单独补上（#56 的 `server.request_timeout_ms`），叠加在“数据预算 / raw ceiling / 流式账目”之上，而不是把这几种约束重新合并成一个数字。
 
 ## When to Apply
 
@@ -154,7 +154,7 @@ T12 当前回归覆盖了以下边界，建议后续改动沿用同一组形状�
 - 使用 Content-Length 做快速拒绝，但它可能缺失或不准确，需要流式账目继续作为权威判断时。
 - 新能力要保留旧请求类别的错误形状，不希望为了新增 JSON error envelope 而改变已有客户端行为时。
 
-以下情况需要额外评估：合法客户端确实可能产生超过 1 MiB 的 framing；请求体读取时间也必须受限（见 issue #56）；或者框架层限制已经能按路由/媒体类型独立配置，且不会与应用内匹配结果脱节。
+以下情况需要额外评估：合法客户端确实可能产生超过 1 MiB 的 framing；或者框架层限制已经能按路由/媒体类型独立配置，且不会与应用内匹配结果脱节。（请求体读取时间不再属于待评估项：它已由 #56 的 `server.request_timeout_ms` 限制。）
 
 ## Examples
 
@@ -197,7 +197,7 @@ upload_max_bytes = 20971520  # 20 MiB，只计 part content
 
 - GitHub issue #53：T12 的 multipart 上传 spec，当前仍为 OPEN。
 - GitHub issue #51：v1 文件能力的父 spec，锁定 `upload_max_bytes` 的数据预算语义与 framing overhead 的表述。
-- GitHub issue #56：`server: bound request body read time`，记录尚未解决的解析期读取期限；本文的字节分层不能替代它。
+- GitHub issue #56：`server: bound request body read time`，解析期读取期限（`server.request_timeout_ms`）；它与本文的字节分层是两个独立约束，不能互相替代。
 - 相邻 convention：`docs/solutions/conventions/host-boundary-fail-closed-input-classification.md`，其中已预测 T12 会检验“缺失、畸形、超限不可压平”的边界。
 - 配置契约：`docs/contracts/config.md:29`、`docs/contracts/config.md:79`。
 - `ctx` 契约：`docs/contracts/ctx-api.md:71-73`（非 multipart 暴露 `[]`，非文件字段仍计入 `files.upload_max_bytes`）。

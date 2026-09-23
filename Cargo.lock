@@ -1799,6 +1799,8 @@ dependencies = [
  "base64",
  "boa_engine",
  "clap",
+ "hyper",
+ "hyper-util",
  "rustls",
  "serde_json",
  "tempfile",

@@ -36,6 +36,8 @@ pub struct UpstreamConfig {
 pub struct ServerConfig {
     pub bind: String,
     pub port: u16,
+    /// Deadline for reading one request head and body, in milliseconds.
+    pub request_timeout_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -157,13 +159,21 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
             ServerConfig {
                 bind: default_bind(),
                 port: default_port(),
+                request_timeout_ms: default_request_timeout_ms(),
             }
         }
         Some(toml::Value::Table(t)) => {
-            reject_unknown(t, &["bind", "port"], "server", &mut v);
+            reject_unknown(t, &["bind", "port", "request_timeout_ms"], "server", &mut v);
             ServerConfig {
                 bind: opt_bind(t, "server.bind", &mut v).unwrap_or_else(default_bind),
                 port: opt_port(t, "server.port", &mut v).unwrap_or_else(default_port),
+                request_timeout_ms: opt_duration_ms(
+                    t,
+                    "request_timeout_ms",
+                    "server.request_timeout_ms",
+                    &mut v,
+                )
+                .unwrap_or_else(default_request_timeout_ms),
             }
         }
         Some(other) => {
@@ -171,6 +181,7 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
             ServerConfig {
                 bind: default_bind(),
                 port: default_port(),
+                request_timeout_ms: default_request_timeout_ms(),
             }
         }
     };
@@ -665,6 +676,11 @@ fn default_bind() -> String {
 
 fn default_port() -> u16 {
     3000
+}
+
+/// Generous by default: 30 s also bounds a 20 MiB upload to about 5.3 Mbit/s.
+fn default_request_timeout_ms() -> u64 {
+    30_000
 }
 
 fn default_script_timeout_ms() -> u64 {
