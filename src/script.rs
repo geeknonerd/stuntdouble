@@ -20,7 +20,8 @@ use boa_engine::native_function::NativeFunction;
 use boa_engine::{js_string, Context, JsError, JsNativeError, JsString, JsValue, Source};
 use serde_json::{json, Value as Json};
 
-use crate::config::UpstreamConfig;
+use crate::config::{FilesConfig, UpstreamConfig};
+use crate::files;
 use crate::matcher::percent_decode;
 use crate::upstream;
 
@@ -126,6 +127,9 @@ pub enum ResponseBody {
     /// Streamed by `ctx.http.pipe`: frames move from the upstream connection
     /// to the client without entering the JavaScript heap.
     Stream(upstream::PipeBody),
+    /// Streamed by `ctx.file.stream`: the opened file is relayed to the client
+    /// without entering the JavaScript heap; the host owns framing headers.
+    File(files::FileBody),
 }
 
 /// Response produced by `ctx.respond` or `ctx.http.pipe`.
@@ -207,6 +211,8 @@ pub struct Outcome {
     pub error: Option<Error>,
     /// Ordered upstream calls made by this script run.
     pub upstream_calls: Vec<Json>,
+    /// Shared file call chain, finalized as each Response is mapped.
+    pub file_calls: files::CallLog,
 }
 
 impl Outcome {
@@ -218,6 +224,7 @@ impl Outcome {
             logs: Vec::new(),
             error: Some(error),
             upstream_calls: Vec::new(),
+            file_calls: files::CallLog::default(),
         }
     }
 }
@@ -225,9 +232,10 @@ impl Outcome {
 // The prelude is the only writer of `__sd`; `ctx` is a frozen view over it.
 const PRELUDE: &str = r#"
 var __sd = { response: null, logs: [] };
-var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_upstream_marker) {
+var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_upstream_marker, __sd_file) {
   "use strict";
   var state = __sd;
+  var FILE_HANDLES = new WeakMap();
   function format(value) {
     if (typeof value === "string") { return value; }
     if (value === undefined) { return "undefined"; }
@@ -290,6 +298,10 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
   function checkBody(body) {
     if (body === undefined || body === null) { return ""; }
     if (typeof body === "string") { return body; }
+    if (typeof body === "object") {
+      var handle = FILE_HANDLES.get(body);
+      if (handle !== undefined) { return { file: handle }; }
+    }
     var bytes;
     if (body instanceof Uint8Array) {
       bytes = Array.prototype.slice.call(body);
@@ -405,6 +417,39 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
       bytes: function () { return decodeBase64(upstream.body_base64); }
     });
   }
+  function checkFilePath(path, label) {
+    if (typeof path !== "string") {
+      throw new TypeError(label + ": path must be a string");
+    }
+    return path;
+  }
+  function fileCall(op, path, label) {
+    return callBridge(__sd_file, { op: op, path: checkFilePath(path, label) }, label);
+  }
+  function fileReadText(path) {
+    return fileCall("readText", path, "ctx.file.readText").text;
+  }
+  function fileReadBytes(path) {
+    return decodeBase64(fileCall("readBytes", path, "ctx.file.readBytes").bytes_base64);
+  }
+  function fileStream(path) {
+    var result = fileCall("stream", path, "ctx.file.stream");
+    var handle = Object.freeze(Object.create(null));
+    FILE_HANDLES.set(handle, result.handle);
+    return handle;
+  }
+  var FILE_FRAMING_HEADERS = ["content-length", "content-range", "accept-ranges"];
+  function checkFileStreamResponse(status, headers) {
+    if (status !== 200) {
+      throw makeError("ctx.respond: a file stream body requires status 200", "script_error");
+    }
+    for (var i = 0; i < headers.length; i++) {
+      var name = String(headers[i][0]).toLowerCase();
+      if (FILE_FRAMING_HEADERS.indexOf(name) !== -1) {
+        throw makeError("ctx.respond: the host owns " + name + " for file streams", "script_error");
+      }
+    }
+  }
   function checkPipeOpts(opts) {
     var out = { status: null, headers: [] };
     var checked = checkPlainOpts(opts, "ctx.http.pipe", ["status", "headers"]);
@@ -440,6 +485,11 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
     request: freezeShallow(__SD_REQUEST__),
     env: Object.freeze(__SD_ENV__),
     http: Object.freeze({ get: httpGet, pipe: httpPipe }),
+    file: Object.freeze({
+      readText: fileReadText,
+      readBytes: fileReadBytes,
+      stream: fileStream
+    }),
     log: Object.freeze({
       info: function () { record("info", arguments); },
       warn: function () { record("warn", arguments); },
@@ -450,18 +500,26 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
         record("warn", ["ctx.respond ignored: a response was already produced"]);
         return false;
       }
+      var checkedStatus = checkStatus(status, "ctx.respond");
+      var checkedHeaders = checkHeaders(headers, "ctx.respond");
+      var checkedBody = checkBody(body);
+      if (typeof checkedBody === "object" && checkedBody !== null && checkedBody.file !== undefined) {
+        checkFileStreamResponse(checkedStatus, checkedHeaders);
+        FILE_HANDLES.delete(body);
+      }
       state.response = {
-        status: checkStatus(status, "ctx.respond"),
-        headers: checkHeaders(headers, "ctx.respond"),
-        body: checkBody(body)
+        status: checkedStatus,
+        headers: checkedHeaders,
+        body: checkedBody
       };
       return true;
     }
   });
-})(__sd_http_get, __sd_http_pipe, __sd_validate_headers, __SD_UPSTREAM_MARKER__);
+})(__sd_http_get, __sd_http_pipe, __sd_validate_headers, __SD_UPSTREAM_MARKER__, __sd_file);
 delete globalThis.__sd_http_get;
 delete globalThis.__sd_http_pipe;
 delete globalThis.__sd_validate_headers;
+delete globalThis.__sd_file;
 "#;
 
 /// Read the recorded response and log lines back out of the realm.
@@ -483,15 +541,18 @@ thread_local! {
     /// Per-request piped body captured by `__sd_http_pipe` and claimed by
     /// `parse_host_record` once the script finishes.
     static PIPE_STREAM: RefCell<Option<upstream::PipeBody>> = const { RefCell::new(None) };
+
+    /// Per-request file access installed before the route script runs.
+    static FILE_HOST: RefCell<Option<files::FileAccess>> = const { RefCell::new(None) };
 }
 
-/// Decode one host-bridge argument, run it against the request-scoped host,
-/// and encode the JSON result for the script. Both native callbacks share this
-/// wrapper so the fail-closed argument and error shapes cannot drift.
+/// Decode one host-bridge argument and encode the JSON result for the script.
+/// Every native callback shares this wrapper so the fail-closed argument and
+/// error shapes cannot drift.
 fn host_bridge(
     name: &str,
     args: &[JsValue],
-    call: impl FnOnce(&upstream::UpstreamAccess, &Json) -> Json,
+    call: impl FnOnce(&Json) -> Json,
 ) -> boa_engine::JsResult<JsValue> {
     let Some(raw) = args.first().and_then(JsValue::as_string) else {
         return Err(JsNativeError::typ()
@@ -501,21 +562,34 @@ fn host_bridge(
     let payload: Json = serde_json::from_str(&raw.to_std_string_escaped()).map_err(|error| {
         JsNativeError::typ().with_message(format!("{name}: invalid payload: {error}"))
     })?;
-    let result = HTTP_HOST.with(|cell| {
-        let borrowed = cell.borrow();
-        let Some(host) = borrowed.as_ref() else {
-            return json!({
-                "ok": false,
-                "code": "script_error",
-                "message": format!("{name} called outside a script request")
-            });
-        };
-        call(host, &payload)
-    });
+    let result = call(&payload);
     let rendered = serde_json::to_string(&result).map_err(|error| {
         JsNativeError::error().with_message(format!("{name}: cannot encode result: {error}"))
     })?;
     Ok(JsValue::from(JsString::from(rendered)))
+}
+
+/// Run one host closure against a request-scoped thread-local, answering a
+/// fail-closed script error when a bridge is called outside a request.
+fn host_call<T>(
+    name: &str,
+    cell: &'static std::thread::LocalKey<RefCell<Option<T>>>,
+    payload: &Json,
+    run: impl FnOnce(&T, &Json) -> Json,
+) -> Json {
+    cell.with(|slot| {
+        let borrowed = slot.borrow();
+        borrowed.as_ref().map_or_else(
+            || {
+                json!({
+                    "ok": false,
+                    "code": "script_error",
+                    "message": format!("{name} called outside a script request")
+                })
+            },
+            |host| run(host, payload),
+        )
+    })
 }
 
 /// Native bridge behind `ctx.http.get`; all policy checks live in `upstream`.
@@ -524,14 +598,20 @@ fn sd_http_get(
     args: &[JsValue],
     _context: &mut Context,
 ) -> boa_engine::JsResult<JsValue> {
-    host_bridge("__sd_http_get", args, |host, call| match host.get(call) {
-        Ok(response) => json!({ "ok": true, "response": upstream::response_json(response) }),
-        Err(error) => json!({
-            "ok": false,
-            "code": error.code(),
-            "kind": error.transport_kind(),
-            "message": error.message()
-        }),
+    host_bridge("__sd_http_get", args, |call| {
+        host_call("__sd_http_get", &HTTP_HOST, call, |host, call| {
+            match host.get(call) {
+                Ok(response) => {
+                    json!({ "ok": true, "response": upstream::response_json(response) })
+                }
+                Err(error) => json!({
+                    "ok": false,
+                    "code": error.code(),
+                    "kind": error.transport_kind(),
+                    "message": error.message()
+                }),
+            }
+        })
     })
 }
 
@@ -543,27 +623,45 @@ fn sd_http_pipe(
     args: &[JsValue],
     _context: &mut Context,
 ) -> boa_engine::JsResult<JsValue> {
-    host_bridge("__sd_http_pipe", args, |host, call| match host.pipe(call) {
-        Ok(response) => {
-            PIPE_STREAM.with(|cell| {
-                *cell.borrow_mut() = Some(response.body);
-            });
-            json!({
-                "ok": true,
-                "status": response.status,
-                "headers": response
-                    .headers
-                    .iter()
-                    .map(|(name, value)| json!([name, value]))
-                    .collect::<Vec<_>>(),
-            })
-        }
-        Err(error) => json!({
-            "ok": false,
-            "code": error.code(),
-            "kind": error.transport_kind(),
-            "message": error.message()
-        }),
+    host_bridge("__sd_http_pipe", args, |call| {
+        host_call(
+            "__sd_http_pipe",
+            &HTTP_HOST,
+            call,
+            |host, call| match host.pipe(call) {
+                Ok(response) => {
+                    PIPE_STREAM.with(|cell| {
+                        *cell.borrow_mut() = Some(response.body);
+                    });
+                    json!({
+                        "ok": true,
+                        "status": response.status,
+                        "headers": response
+                            .headers
+                            .iter()
+                            .map(|(name, value)| json!([name, value]))
+                            .collect::<Vec<_>>(),
+                    })
+                }
+                Err(error) => json!({
+                    "ok": false,
+                    "code": error.code(),
+                    "kind": error.transport_kind(),
+                    "message": error.message()
+                }),
+            },
+        )
+    })
+}
+
+/// Native bridge behind `ctx.file.*`; all confinement checks live in `files`.
+fn sd_file(
+    _this: &JsValue,
+    args: &[JsValue],
+    _context: &mut Context,
+) -> boa_engine::JsResult<JsValue> {
+    host_bridge("__sd_file", args, |call| {
+        host_call("__sd_file", &FILE_HOST, call, files::FileAccess::call)
     })
 }
 
@@ -650,14 +748,17 @@ fn evaluate(
     source: &str,
     request: &RequestSnapshot,
     upstream: &UpstreamConfig,
+    files_config: &FilesConfig,
     script_deadline: Instant,
     calls: upstream::CallLog,
+    file_calls: files::CallLog,
 ) -> Outcome {
     let client_range = request
         .headers
         .iter()
         .find(|(name, _)| name == "range")
         .map(|(_, value)| value.clone());
+    let file_access = files::FileAccess::new(&files_config.root, file_calls);
     HTTP_HOST.with(|cell| {
         *cell.borrow_mut() = Some(upstream::UpstreamAccess::new(
             upstream.allow_hosts.clone(),
@@ -666,6 +767,9 @@ fn evaluate(
             client_range,
             calls,
         ));
+    });
+    FILE_HOST.with(|cell| {
+        *cell.borrow_mut() = Some(file_access);
     });
     PIPE_STREAM.with(|cell| {
         *cell.borrow_mut() = None;
@@ -707,6 +811,13 @@ fn evaluate(
                 NativeFunction::from_fn_ptr(sd_validate_headers),
             )
             .map_err(|error| (None, error.to_string()))?;
+        context
+            .register_global_builtin_callable(
+                js_string!("__sd_file"),
+                1,
+                NativeFunction::from_fn_ptr(sd_file),
+            )
+            .map_err(|error| (None, error.to_string()))?;
         let evaluated = (|| -> Result<String, JsError> {
             context.eval(Source::from_bytes(&prelude))?;
             context.eval(Source::from_bytes(source))?;
@@ -726,6 +837,7 @@ fn evaluate(
         }
     });
     let stream = PIPE_STREAM.with(|cell| cell.borrow_mut().take());
+    let file_host = FILE_HOST.with(|cell| cell.borrow_mut().take());
     HTTP_HOST.with(|cell| {
         cell.borrow_mut().take();
     });
@@ -735,7 +847,7 @@ fn evaluate(
             Outcome::failed(Error::UpstreamUnreachable { message, kind })
         }
         Ok(Err((None, message))) => Outcome::failed(Error::Failed(message)),
-        Ok(Ok(dump)) => parse_host_record(&dump, stream),
+        Ok(Ok(dump)) => parse_host_record(&dump, stream, file_host),
     }
 }
 
@@ -786,18 +898,68 @@ fn upstream_unreachable_kind(
     })
 }
 
-/// Turn the extracted JSON record into an `Outcome`. A piped response carries
-/// only its status and headers through the realm; the body stream is handed
-/// back separately by the host bridge.
-fn parse_host_record(raw: &str, stream: Option<upstream::PipeBody>) -> Outcome {
+/// Turn the extracted JSON record into an `Outcome`. A streamed response
+/// carries only its status and headers through the realm; the body stream is
+/// handed back separately by the host bridge.
+fn parse_host_record(
+    raw: &str,
+    pipe_stream: Option<upstream::PipeBody>,
+    file_host: Option<files::FileAccess>,
+) -> Outcome {
     let host: Json = match serde_json::from_str(raw) {
         Ok(value) => value,
         Err(error) => {
             return Outcome::failed(Error::Failed(format!("cannot read script state: {error}")));
         }
     };
-    let logs = host
-        .get("logs")
+    let logs = parse_script_logs(&host);
+    let Some(response) = host.get("response").filter(|value| !value.is_null()) else {
+        return script_outcome(None, logs, Some(Error::NoResponse));
+    };
+    let Some(status) = response
+        .get("status")
+        .and_then(Json::as_u64)
+        .and_then(|value| u16::try_from(value).ok())
+    else {
+        return script_outcome(
+            None,
+            logs,
+            Some(Error::Failed("ctx.respond: status was not recorded".into())),
+        );
+    };
+    let headers = parse_script_headers(response);
+    let body = match parse_script_body(response, pipe_stream, file_host) {
+        Ok(body) => body,
+        Err(error) => return script_outcome(None, logs, Some(error)),
+    };
+    script_outcome(
+        Some(ScriptResponse {
+            status,
+            headers,
+            body,
+        }),
+        logs,
+        None,
+    )
+}
+
+/// Assemble one script run result; `execute` finalizes the shared call chains.
+fn script_outcome(
+    response: Option<ScriptResponse>,
+    logs: Vec<LogRecord>,
+    error: Option<Error>,
+) -> Outcome {
+    Outcome {
+        response,
+        logs,
+        error,
+        upstream_calls: Vec::new(),
+        file_calls: files::CallLog::default(),
+    }
+}
+
+fn parse_script_logs(host: &Json) -> Vec<LogRecord> {
+    host.get("logs")
         .and_then(Json::as_array)
         .map_or_else(Vec::new, |entries| {
             entries
@@ -809,28 +971,11 @@ fn parse_host_record(raw: &str, stream: Option<upstream::PipeBody>) -> Outcome {
                     })
                 })
                 .collect()
-        });
-    let Some(response) = host.get("response").filter(|value| !value.is_null()) else {
-        return Outcome {
-            response: None,
-            logs,
-            error: Some(Error::NoResponse),
-            upstream_calls: Vec::new(),
-        };
-    };
-    let Some(status) = response
-        .get("status")
-        .and_then(Json::as_u64)
-        .and_then(|value| u16::try_from(value).ok())
-    else {
-        return Outcome {
-            response: None,
-            logs,
-            error: Some(Error::Failed("ctx.respond: status was not recorded".into())),
-            upstream_calls: Vec::new(),
-        };
-    };
-    let headers = response
+        })
+}
+
+fn parse_script_headers(response: &Json) -> Vec<(String, String)> {
+    response
         .get("headers")
         .and_then(Json::as_array)
         .map_or_else(Vec::new, |rows| {
@@ -843,42 +988,52 @@ fn parse_host_record(raw: &str, stream: Option<upstream::PipeBody>) -> Outcome {
                     ))
                 })
                 .collect()
-        });
-    let body = if response.get("stream").and_then(Json::as_bool) == Some(true) {
-        let Some(stream) = stream else {
-            return Outcome {
-                response: None,
-                logs,
-                error: Some(Error::Failed(
-                    "ctx.http.pipe: streamed response was not recorded".into(),
-                )),
-                upstream_calls: Vec::new(),
-            };
+        })
+}
+
+/// Resolve the recorded body: buffered text/bytes, or the host-side stream
+/// handed back for `ctx.http.pipe` / `ctx.file.stream`.
+fn parse_script_body(
+    response: &Json,
+    pipe_stream: Option<upstream::PipeBody>,
+    file_host: Option<files::FileAccess>,
+) -> Result<ResponseBody, Error> {
+    if response.get("stream").and_then(Json::as_bool) == Some(true) {
+        let Some(stream) = pipe_stream else {
+            return Err(Error::Failed(
+                "ctx.http.pipe: streamed response was not recorded".into(),
+            ));
         };
-        ResponseBody::Stream(stream)
-    } else {
-        match response.get("body") {
-            Some(Json::String(text)) => ResponseBody::Text(text.clone()),
-            Some(Json::Array(bytes)) => ResponseBody::Bytes(
-                bytes
-                    .iter()
-                    .filter_map(Json::as_u64)
-                    .filter_map(|value| u8::try_from(value).ok())
-                    .collect(),
-            ),
-            _ => ResponseBody::Text(String::new()),
-        }
-    };
-    Outcome {
-        response: Some(ScriptResponse {
-            status,
-            headers,
-            body,
-        }),
-        logs,
-        error: None,
-        upstream_calls: Vec::new(),
+        return Ok(ResponseBody::Stream(stream));
     }
+    if let Some(handle) = response
+        .get("body")
+        .and_then(|body| body.get("file"))
+        .and_then(Json::as_u64)
+    {
+        let Some(host) = file_host else {
+            return Err(Error::Failed(
+                "ctx.file.stream: file access was not recorded".into(),
+            ));
+        };
+        let Some(file) = host.take_stream(handle) else {
+            return Err(Error::Failed(
+                "ctx.file.stream: handle was not recorded".into(),
+            ));
+        };
+        return Ok(ResponseBody::File(file));
+    }
+    Ok(match response.get("body") {
+        Some(Json::String(text)) => ResponseBody::Text(text.clone()),
+        Some(Json::Array(bytes)) => ResponseBody::Bytes(
+            bytes
+                .iter()
+                .filter_map(Json::as_u64)
+                .filter_map(|value| u8::try_from(value).ok())
+                .collect(),
+        ),
+        _ => ResponseBody::Text(String::new()),
+    })
 }
 
 /// Run one script for one request with a wall-clock deadline.
@@ -889,6 +1044,7 @@ pub async fn execute(
     request: RequestSnapshot,
     timeout: Duration,
     upstream: UpstreamConfig,
+    files_config: FilesConfig,
 ) -> Outcome {
     // tradeoff: `spawn_blocking` cannot be cancelled, so on timeout the host
     // answers immediately and the worker stops at `LOOP_ITERATION_LIMIT`.
@@ -897,8 +1053,18 @@ pub async fn execute(
         .unwrap_or_else(Instant::now);
     let calls: upstream::CallLog = Arc::new(Mutex::new(Vec::new()));
     let worker_calls = Arc::clone(&calls);
+    let file_calls: files::CallLog = Arc::new(Mutex::new(Vec::new()));
+    let worker_file_calls = Arc::clone(&file_calls);
     let worker = tokio::task::spawn_blocking(move || {
-        evaluate(&source, &request, &upstream, deadline, worker_calls)
+        evaluate(
+            &source,
+            &request,
+            &upstream,
+            &files_config,
+            deadline,
+            worker_calls,
+            worker_file_calls,
+        )
     });
     let mut outcome = match tokio::time::timeout(timeout, worker).await {
         Err(_) => Outcome::failed(Error::TimedOut),
@@ -906,6 +1072,7 @@ pub async fn execute(
         Ok(Ok(outcome)) => outcome,
     };
     outcome.upstream_calls = upstream::calls_json(&calls);
+    outcome.file_calls = file_calls;
     outcome
 }
 

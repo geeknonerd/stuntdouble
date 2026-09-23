@@ -17,6 +17,7 @@ struct Response {
     status: u16,
     headers: Vec<(String, String)>,
     body: String,
+    body_bytes: Vec<u8>,
 }
 
 impl Response {
@@ -297,11 +298,19 @@ fn request_with_body(
     raw.push_str(body);
     stream.write_all(raw.as_bytes()).expect("write request");
     stream.flush().expect("flush");
+    read_response(&mut stream)
+}
 
+/// Read one full HTTP/1.1 response from `stream`.
+fn read_response(stream: &mut TcpStream) -> Response {
     let mut bytes = Vec::new();
     stream.read_to_end(&mut bytes).expect("read response");
-    let text = String::from_utf8_lossy(&bytes).into_owned();
-    let (head, body) = text.split_once("\r\n\r\n").unwrap_or((text.as_str(), ""));
+    let head_end = bytes
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .unwrap_or(bytes.len());
+    let head = String::from_utf8_lossy(&bytes[..head_end]).into_owned();
+    let body_bytes = bytes.get(head_end + 4..).unwrap_or_default().to_vec();
     let mut lines = head.lines();
     let status_line = lines.next().expect("status line");
     let status = status_line
@@ -316,18 +325,38 @@ fn request_with_body(
     Response {
         status,
         headers,
-        body: body.to_string(),
+        body: String::from_utf8_lossy(&body_bytes).into_owned(),
+        body_bytes,
     }
 }
 
-/// Send one request and drop the connection after reading the response head
-/// plus one body byte, so the server observes a client that left mid-body.
-fn abort_after_response_head(port: u16) {
+/// Send one GET with a raw Range field value, so tests can carry header bytes
+/// that are not valid UTF-8.
+fn request_raw_range(port: u16, path: &str, range: &[u8]) -> Response {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .expect("read timeout");
-    let raw = "GET /demo/documents/manifest/group-a HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    let mut raw = Vec::new();
+    let _ = write!(
+        raw,
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nRange: "
+    );
+    raw.extend_from_slice(range);
+    raw.extend_from_slice(b"\r\n\r\n");
+    stream.write_all(&raw).expect("write request");
+    stream.flush().expect("flush");
+    read_response(&mut stream)
+}
+
+/// Send one request and drop the connection after reading the response head
+/// plus one body byte, so the server observes a client that left mid-body.
+fn abort_after_response_head(port: u16, path: &str) {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("read timeout");
+    let raw = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
     stream.write_all(raw.as_bytes()).expect("write request");
     stream.flush().expect("flush");
     let mut bytes = Vec::new();
@@ -1390,6 +1419,570 @@ ctx.respond(200, {}, "done");
     assert!(!response.body.contains("hello from the script"));
 }
 
+/// Serve the standard fixture Route with `files/*` fixtures that the caller
+/// wrote under `dir` beforehand; the config is rewritten per attempt port.
+fn serve_fixture_dir<T>(dir: &Path, script: &str, run_tests: impl FnOnce(u16) -> T) -> (T, String) {
+    serve_and_run(
+        |port| fixture_with_script(dir, port, good_config(), script),
+        &[],
+        &[],
+        run_tests,
+    )
+}
+
+#[test]
+fn ctx_file_read_text_reads_a_file_inside_the_root() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("files/data")).expect("files dir");
+    std::fs::write(dir.path().join("files/data/hello.txt"), "hello file").expect("fixture file");
+    let script = r#"
+var text = ctx.file.readText("data/hello.txt");
+ctx.respond(200, { "Content-Type": "text/plain; charset=utf-8" }, text);
+"#;
+    let (response, _) = serve_fixture_dir(dir.path(), script, |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(response.body, "hello file");
+}
+
+#[test]
+fn ctx_file_errors_are_catchable_with_stable_codes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("files")).expect("files dir");
+    std::fs::write(dir.path().join("files/latin1.bin"), [0x66, 0x6f, 0x80]).expect("fixture");
+    std::fs::create_dir_all(dir.path().join("files/adir")).expect("fixture dir");
+    let script = r#"
+function code(fn) {
+  try { fn(); return "no error"; } catch (error) { return error.code; }
+}
+ctx.respond(200, { "Content-Type": "application/json" }, JSON.stringify({
+  missing: code(function () { ctx.file.readText("nope.txt"); }),
+  traversal: code(function () { ctx.file.readText("../outside.txt"); }),
+  absolute: code(function () { ctx.file.readText("/etc/passwd"); }),
+  encoding: code(function () { ctx.file.readText("latin1.bin"); }),
+  directory: code(function () { ctx.file.readText("adir"); })
+}));
+"#;
+    let (response, _) = serve_fixture_dir(dir.path(), script, |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(json["missing"], "file_not_found");
+    assert_eq!(json["traversal"], "file_path_invalid");
+    assert_eq!(json["absolute"], "file_path_invalid");
+    assert_eq!(json["encoding"], "file_encoding_error");
+    assert_eq!(json["directory"], "file_io_error");
+}
+
+#[cfg(unix)]
+#[test]
+fn ctx_file_allows_in_root_symlinks_and_rejects_symlink_escapes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let outside = tempfile::tempdir().expect("outside dir");
+    std::fs::create_dir_all(dir.path().join("files")).expect("files dir");
+    std::fs::write(dir.path().join("files/inside.txt"), "inside").expect("inside file");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    std::os::unix::fs::symlink("inside.txt", dir.path().join("files/inside-link.txt"))
+        .expect("inside symlink");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        dir.path().join("files/escape-link.txt"),
+    )
+    .expect("escape symlink");
+    let script = r#"
+var out = {};
+try { out.allowed = ctx.file.readText("inside-link.txt"); } catch (error) { out.allowed = error.code; }
+try { out.escaped = ctx.file.readText("escape-link.txt"); } catch (error) { out.escaped = error.code; }
+ctx.respond(200, {}, JSON.stringify(out));
+"#;
+    let (response, _) = serve_fixture_dir(dir.path(), script, |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(json["allowed"], "inside");
+    assert_eq!(json["escaped"], "file_path_invalid");
+}
+
+#[test]
+fn ctx_file_reads_cap_at_eight_mib() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cap = 8 * 1024 * 1024;
+    std::fs::create_dir_all(dir.path().join("files")).expect("files dir");
+    std::fs::write(dir.path().join("files/at-cap.bin"), vec![b'a'; cap]).expect("at cap file");
+    std::fs::write(dir.path().join("files/over-cap.bin"), vec![b'a'; cap + 1]).expect("over file");
+    let script = r#"
+var out = {};
+out.atCap = ctx.file.readText("at-cap.bin").length;
+try { ctx.file.readText("over-cap.bin"); out.overCapText = "no error"; }
+catch (error) { out.overCapText = error.code; }
+try { ctx.file.readBytes("over-cap.bin"); out.overCapBytes = "no error"; }
+catch (error) { out.overCapBytes = error.code; }
+ctx.respond(200, {}, JSON.stringify(out));
+"#;
+    let (response, _) = serve_fixture_dir(dir.path(), script, |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(json["atCap"], cap);
+    assert_eq!(json["overCapText"], "file_too_large");
+    assert_eq!(json["overCapBytes"], "file_too_large");
+}
+
+#[test]
+fn ctx_file_read_bytes_returns_exact_bytes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("files")).expect("files dir");
+    std::fs::write(
+        dir.path().join("files/binary.bin"),
+        [0_u8, 1, 127, 128, 255],
+    )
+    .expect("binary file");
+    let script = r#"
+var bytes = ctx.file.readBytes("binary.bin");
+ctx.respond(200, {}, JSON.stringify({
+  kind: bytes.constructor.name,
+  values: Array.prototype.slice.call(bytes)
+}));
+"#;
+    let (response, _) = serve_fixture_dir(dir.path(), script, |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(json["kind"], "Uint8Array");
+    assert_eq!(json["values"], serde_json::json!([0, 1, 127, 128, 255]));
+}
+
+#[test]
+fn ctx_file_stream_serves_the_full_body_as_an_opaque_handle() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("files")).expect("files dir");
+    std::fs::write(
+        dir.path().join("files/binary.bin"),
+        [0_u8, 1, 127, 128, 255],
+    )
+    .expect("binary file");
+    let script = r#"
+var handle = ctx.file.stream("binary.bin");
+var shape = {
+  keys: Object.keys(handle).length,
+  symbols: Object.getOwnPropertySymbols(handle).length,
+  proto_null: Object.getPrototypeOf(handle) === null
+};
+if (shape.keys !== 0 || shape.symbols !== 0 || !shape.proto_null) {
+  ctx.respond(500, {}, JSON.stringify(shape));
+} else {
+  ctx.respond(200, { "Content-Type": "application/octet-stream" }, handle);
+}
+"#;
+    let (response, _) = serve_fixture_dir(dir.path(), script, |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(response.header("content-length"), Some("5"));
+    assert_eq!(response.header("accept-ranges"), Some("bytes"));
+    assert_eq!(
+        response.header("content-type"),
+        Some("application/octet-stream")
+    );
+    assert_eq!(response.body_bytes, [0, 1, 127, 128, 255]);
+}
+
+#[test]
+fn ctx_file_calls_are_logged_ordered_and_without_paths() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("files")).expect("files dir");
+    std::fs::write(dir.path().join("files/report.txt"), "four").expect("fixture file");
+    let script = r#"
+ctx.file.readText("report.txt");
+ctx.respond(200, { "Content-Type": "text/plain" }, ctx.file.stream("report.txt"));
+"#;
+    let (response, stderr) = serve_fixture_dir(dir.path(), script, |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(response.body, "four");
+    let line = stderr
+        .lines()
+        .find(|line| line.contains("\"request_id\""))
+        .unwrap_or_else(|| panic!("request log missing: {stderr}"));
+    let log: serde_json::Value = serde_json::from_str(line).expect("structured log json");
+    let calls = log["file_calls"].as_array().expect("file_calls array");
+    assert_eq!(calls.len(), 2, "file_calls: {calls:?}");
+    assert_eq!(calls[0]["api"], "file.readText");
+    assert_eq!(calls[0]["bytes"], 4);
+    assert_eq!(calls[0]["error"], serde_json::Value::Null);
+    assert_eq!(calls[1]["api"], "file.stream");
+    assert_eq!(calls[1]["bytes"], 4);
+    assert_eq!(calls[1]["error"], serde_json::Value::Null);
+    assert!(!stderr.contains("report.txt"), "stderr: {stderr}");
+    assert!(
+        !stderr.contains(&dir.path().display().to_string()),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn ctx_file_stream_answers_single_ranges_with_206() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("files")).expect("files dir");
+    std::fs::write(dir.path().join("files/digits.txt"), "0123456789").expect("fixture file");
+    let script = r#"
+ctx.respond(200, {}, ctx.file.stream("digits.txt"));
+"#;
+    let (responses, _) = serve_fixture_dir(dir.path(), script, |port| {
+        [
+            request(
+                port,
+                "GET",
+                "/demo/documents/manifest/group-a",
+                &[("Range", "bytes=0-3")],
+            ),
+            request(
+                port,
+                "GET",
+                "/demo/documents/manifest/group-a",
+                &[("Range", "bytes=4-")],
+            ),
+            request(
+                port,
+                "GET",
+                "/demo/documents/manifest/group-a",
+                &[("Range", "bytes=-3")],
+            ),
+            request(
+                port,
+                "GET",
+                "/demo/documents/manifest/group-a",
+                &[("Range", "bytes=8-99")],
+            ),
+        ]
+    });
+    let expected = [
+        ("bytes 0-3/10", "0123"),
+        ("bytes 4-9/10", "456789"),
+        ("bytes 7-9/10", "789"),
+        ("bytes 8-9/10", "89"),
+    ];
+    for (response, (content_range, body)) in responses.iter().zip(expected) {
+        assert_eq!(response.status, 206, "body: {}", response.body);
+        let len = body.len().to_string();
+        assert_eq!(response.header("content-range"), Some(content_range));
+        assert_eq!(response.header("content-length"), Some(len.as_str()));
+        assert_eq!(response.header("accept-ranges"), Some("bytes"));
+        assert_eq!(response.body, body);
+    }
+}
+
+#[test]
+fn ctx_file_stream_answers_416_for_unusable_ranges() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("files")).expect("files dir");
+    std::fs::write(dir.path().join("files/digits.txt"), "0123456789").expect("fixture file");
+    std::fs::write(dir.path().join("files/empty.txt"), "").expect("empty file");
+    let script = r"
+ctx.respond(200, {}, ctx.file.stream(ctx.request.query.file));
+";
+    let range_request = |port: u16, file: &str, range: &str| {
+        let path = format!("/demo/documents/manifest/group-a?file={file}");
+        request(port, "GET", &path, &[("Range", range)])
+    };
+    let (responses, stderr) = serve_fixture_dir(dir.path(), script, |port| {
+        let digits = "/demo/documents/manifest/group-a?file=digits.txt";
+        [
+            range_request(port, "digits.txt", "bytes=99-"),
+            range_request(port, "digits.txt", "bytes=x-y"),
+            range_request(port, "digits.txt", "bytes=0-1,3-4"),
+            range_request(port, "empty.txt", "bytes=0-1"),
+            request(
+                port,
+                "GET",
+                digits,
+                &[("Range", "bytes=0-1"), ("Range", "bytes=3-4")],
+            ),
+            request_raw_range(port, digits, b"bytes=\x80"),
+            range_request(port, "digits.txt", "bytes=0 - 3"),
+        ]
+    });
+    let expected = [
+        "bytes */10",
+        "bytes */10",
+        "bytes */10",
+        "bytes */0",
+        "bytes */10",
+        "bytes */10",
+        "bytes */10",
+    ];
+    for (response, content_range) in responses.iter().zip(expected) {
+        assert_eq!(response.status, 416, "body: {}", response.body);
+        assert_eq!(response.header("content-range"), Some(content_range));
+        assert_eq!(response.header("content-length"), Some("0"));
+        assert!(
+            response.body_bytes.is_empty(),
+            "body: {:?}",
+            response.body_bytes
+        );
+    }
+    let logs: Vec<serde_json::Value> = stderr
+        .lines()
+        .filter(|line| line.contains("\"request_id\""))
+        .map(|line| serde_json::from_str(line).expect("structured log json"))
+        .collect();
+    assert_eq!(logs.len(), 7, "stderr: {stderr}");
+    for log in logs {
+        assert_eq!(log["file_calls"][0]["api"], "file.stream");
+        assert_eq!(log["file_calls"][0]["bytes"], 0, "log: {log}");
+        assert_eq!(log["file_calls"][0]["error"], serde_json::Value::Null);
+    }
+}
+
+#[test]
+fn ctx_file_stream_ignores_range_when_if_range_is_present() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("files")).expect("files dir");
+    std::fs::write(dir.path().join("files/digits.txt"), "0123456789").expect("fixture file");
+    let script = r#"
+ctx.respond(200, {}, ctx.file.stream("digits.txt"));
+"#;
+    let (response, _) = serve_fixture_dir(dir.path(), script, |port| {
+        request(
+            port,
+            "GET",
+            "/demo/documents/manifest/group-a",
+            &[("Range", "bytes=0-3"), ("If-Range", "W/\"anything\"")],
+        )
+    });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(response.header("content-range"), None);
+    assert_eq!(response.header("content-length"), Some("10"));
+    assert_eq!(response.body, "0123456789");
+}
+
+#[test]
+fn ctx_respond_rejects_framing_headers_and_non_200_status_for_file_streams() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("files")).expect("files dir");
+    std::fs::write(dir.path().join("files/digits.txt"), "0123456789").expect("fixture file");
+    let script = r#"
+function attempt(status, headers) {
+  try {
+    ctx.respond(status, headers, ctx.file.stream("digits.txt"));
+    return "no error";
+  } catch (error) {
+    return error.code;
+  }
+}
+var out = {
+  contentLength: attempt(200, { "Content-Length": "4" }),
+  contentRange: attempt(200, { "Content-Range": "bytes 0-1/10" }),
+  acceptRanges: attempt(200, { "Accept-Ranges": "none" }),
+  non200: attempt(201, {})
+};
+ctx.respond(200, { "Content-Type": "application/json" }, JSON.stringify(out));
+"#;
+    let (response, _) = serve_fixture_dir(dir.path(), script, |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(json["contentLength"], "script_error");
+    assert_eq!(json["contentRange"], "script_error");
+    assert_eq!(json["acceptRanges"], "script_error");
+    assert_eq!(json["non200"], "script_error");
+}
+
+#[test]
+fn ctx_file_stream_client_disconnect_mid_body_is_logged() {
+    // Large enough that the relay cannot finish before the client aborts: the
+    // harness reads one body byte and closes the socket.
+    let size = 8 * 1024 * 1024;
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("files")).expect("files dir");
+    std::fs::write(dir.path().join("files/big.bin"), vec![b'x'; size]).expect("big file");
+    let script = r#"
+ctx.respond(200, {}, ctx.file.stream("big.bin"));
+"#;
+    let ((), stderr) = serve_fixture_dir(dir.path(), script, |port| {
+        abort_after_response_head(port, "/demo/documents/manifest/group-a");
+    });
+    let line = stderr
+        .lines()
+        .find(|line| line.contains("\"request_id\""))
+        .unwrap_or_else(|| panic!("request log missing: {stderr}"));
+    let log: serde_json::Value = serde_json::from_str(line).expect("structured log json");
+    assert_eq!(log["status"], 200);
+    assert_eq!(log["error"], "client_disconnected", "log: {line}");
+    let call = &log["file_calls"][0];
+    assert_eq!(call["api"], "file.stream");
+    assert_eq!(call["error"], "client_disconnected");
+    let relayed = call["bytes"].as_u64().expect("relayed byte count");
+    assert!(
+        relayed < u64::try_from(size).expect("body length"),
+        "the relay finished before the client aborted: {line}"
+    );
+}
+
+#[test]
+fn ctx_file_stream_truncation_after_headers_is_logged_as_file_stream_error() {
+    let size = 16 * 1024 * 1024;
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("files")).expect("files dir");
+    let file_path = dir.path().join("files/big.bin");
+    std::fs::write(&file_path, vec![b'x'; size]).expect("big file");
+    let script = r#"
+ctx.respond(200, {}, ctx.file.stream("big.bin"));
+"#;
+    let (received, stderr) = serve_fixture_dir(dir.path(), script, |port| {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("read timeout");
+        stream
+            .write_all(
+                b"GET /demo/documents/manifest/group-a HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+            )
+            .expect("write request");
+        let mut received = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let read = stream.read(&mut buffer).expect("read response head");
+            assert_ne!(read, 0, "server closed before the response head");
+            received.extend_from_slice(&buffer[..read]);
+            if received.windows(4).any(|window| window == b"\r\n\r\n") {
+                // Let the relay fill its bounded channel and the socket buffers
+                // while this client stalls, then shrink the backing file: the
+                // announced Content-Length can no longer be satisfied.
+                std::thread::sleep(Duration::from_millis(300));
+                std::fs::File::create(&file_path).expect("truncate file");
+                let _ = stream.read_to_end(&mut received);
+                break;
+            }
+        }
+        received
+    });
+    let line = stderr
+        .lines()
+        .find(|line| line.contains("\"request_id\""))
+        .unwrap_or_else(|| panic!("request log missing: {stderr}"));
+    let log: serde_json::Value = serde_json::from_str(line).expect("structured log json");
+    assert_eq!(log["status"], 200);
+    assert_eq!(log["error"], "file_stream_error", "log: {line}");
+    assert_eq!(log["file_calls"][0]["api"], "file.stream");
+    assert_eq!(log["file_calls"][0]["error"], "file_stream_error");
+    let relayed = log["file_calls"][0]["bytes"]
+        .as_u64()
+        .expect("relayed byte count");
+    assert!(
+        relayed < u64::try_from(size).expect("body length"),
+        "the relay delivered the whole file before truncation: {line}"
+    );
+    assert!(
+        received.len() < size,
+        "client received {} bytes of an announced {size}",
+        received.len()
+    );
+}
+
+#[test]
+fn uncaught_file_error_maps_to_script_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = r#"
+ctx.file.readText("nope.txt");
+ctx.respond(200, {}, "unreachable");
+"#;
+    let (response, _) = serve_fixture_dir(dir.path(), script, |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 500, "body: {}", response.body);
+    assert_eq!(error_class(&response.body).as_deref(), Some("script_error"));
+}
+
+#[test]
+fn ctx_file_root_removed_at_runtime_is_catchable() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("files")).expect("files dir");
+    std::fs::write(dir.path().join("files/hello.txt"), "hello").expect("fixture file");
+    let script = r#"
+var code = "read unexpectedly succeeded";
+try { ctx.file.readText("hello.txt"); } catch (error) { code = error.code; }
+ctx.respond(200, {}, code);
+"#;
+    let (response, _) = serve_fixture_dir(dir.path(), script, |port| {
+        std::fs::remove_dir_all(dir.path().join("files")).expect("remove files root");
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(response.body, "file_io_error");
+}
+
+#[cfg(unix)]
+#[test]
+fn ctx_file_rejects_non_regular_files_without_blocking() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("files")).expect("files dir");
+    let fifo = dir.path().join("files/pipe");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("run mkfifo");
+    assert!(status.success(), "mkfifo failed with {status}");
+    let script = r#"
+var code = "read unexpectedly succeeded";
+try { ctx.file.readText("pipe"); } catch (error) { code = error.code; }
+ctx.respond(200, {}, code);
+"#;
+    // Short deadline: without the pre-open check the FIFO open blocks until
+    // the script timeout, so the assertion fails fast instead of hanging.
+    let config = with_sandbox(good_config(), 500);
+    let (response, _) = serve_and_run(
+        |port| fixture_with_script(dir.path(), port, &config, script),
+        &[],
+        &[],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(response.body, "file_io_error");
+}
+
+#[test]
+fn ctx_file_never_resolves_url_style_or_platform_specific_names_outside_the_root() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("files")).expect("files dir");
+    let script = r#"
+function code(path) {
+  try { ctx.file.readText(path); return "read unexpectedly succeeded"; } catch (error) { return error.code; }
+}
+ctx.respond(200, {}, JSON.stringify({
+  url: code("file:///etc/passwd"),
+  drive: code("C:\\Windows\\win.ini"),
+  backslash: code("..\\..\\secret")
+}));
+"#;
+    let (response, _) = serve_fixture_dir(dir.path(), script, |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    // URL-shaped strings stay relative names inside the root, never system paths.
+    assert_eq!(json["url"], "file_not_found");
+    #[cfg(unix)]
+    {
+        // Backslashes are ordinary name bytes on Unix, so these stay in-root.
+        assert_eq!(json["drive"], "file_not_found");
+        assert_eq!(json["backslash"], "file_not_found");
+    }
+    #[cfg(windows)]
+    {
+        // On Windows the same strings are absolute and parent-directory escapes.
+        assert_eq!(json["drive"], "file_path_invalid");
+        assert_eq!(json["backslash"], "file_path_invalid");
+    }
+}
+
 #[test]
 fn ctx_http_get_returns_status_headers_text_and_bytes() {
     let upstream = Upstream::start(vec![UpstreamResponse::new(200, br#"{"hello":"world"}"#)
@@ -1943,7 +2536,7 @@ if (!produced) { ctx.respond(500, {}, "pipe did not produce a response"); }
         &with_upstream(good_config(), &["127.0.0.1"]),
         script,
         &[("UPSTREAM_URL", url.as_str())],
-        abort_after_response_head,
+        |port| abort_after_response_head(port, "/demo/documents/manifest/group-a"),
     );
     let line = stderr
         .lines()

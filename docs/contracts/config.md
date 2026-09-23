@@ -74,7 +74,7 @@ script = "scripts/x.js"   # .js/.mjs/.cjs; relative or absolute
 
 ## Route execution model
 
-Routes follow the single pipeline: `match → source → transform → response`. This slice implements Match plus the script Transform: a matched Route runs its JavaScript, and the script produces the Response through `ctx.respond` or `ctx.http.pipe`. Unmatched requests return 404 `not_found`; a script that throws, times out, or fails to load returns 500 `script_error`; a script that finishes without producing a Response returns 500 `script_no_response`. `ctx.http.get` treats upstream responses (including 4xx/5xx) as data; `ctx.http.pipe` streams a 2xx upstream Response to the client and raises a catchable `upstream_http_error` for a final non-2xx answer; an uncaught upstream transport failure returns 502 `upstream_unreachable`. Local static-file reads and uploads arrive in later slices.
+Routes follow the single pipeline: `match → source → transform → response`. This slice implements Match plus the script Transform: a matched Route runs its JavaScript, and the script produces the Response through `ctx.respond` or `ctx.http.pipe`. Unmatched requests return 404 `not_found`; a script that throws, times out, or fails to load returns 500 `script_error`; a script that finishes without producing a Response returns 500 `script_no_response`. `ctx.http.get` treats upstream responses (including 4xx/5xx) as data; `ctx.http.pipe` streams a 2xx upstream Response to the client and raises a catchable `upstream_http_error` for a final non-2xx answer; an uncaught upstream transport failure returns 502 `upstream_unreachable`. Local static-file reads are implemented; uploads arrive in a later slice.
 
 ### Matching semantics
 

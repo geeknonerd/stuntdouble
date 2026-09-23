@@ -2,12 +2,13 @@
 // Client error classes per docs/contracts/cli.md: not_found, script_error,
 // script_no_response. Stream failures are log-only classes.
 use crate::config::Config;
+use crate::files;
 use crate::matcher::match_route;
 use crate::script::{self, RequestSnapshot, ResponseBody, ScriptResponse};
 use crate::upstream;
 use axum::body::{Body, Bytes};
 use axum::extract::State;
-use axum::http::header::CONTENT_LENGTH;
+use axum::http::header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
@@ -20,6 +21,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_stream::wrappers::ReceiverStream;
 
 /// One matched (or unmatched) request, before it is mapped onto HTTP.
@@ -29,6 +31,7 @@ struct Routed {
     handled: Handled,
     script_logs: Vec<script::LogRecord>,
     upstream_calls: Vec<Value>,
+    file_calls: files::CallLog,
     script_duration_ms: Option<f64>,
 }
 
@@ -78,6 +81,7 @@ impl AppState {
                 handled: Handled::NotFound,
                 script_logs: Vec::new(),
                 upstream_calls: Vec::new(),
+                file_calls: files::CallLog::default(),
                 script_duration_ms: None,
             },
             Some(found) => {
@@ -95,8 +99,14 @@ impl AppState {
                 let outcome = match std::fs::read_to_string(&route.script) {
                     Ok(source) => {
                         let timeout = Duration::from_millis(self.config.sandbox.script_timeout_ms);
-                        script::execute(source, snapshot, timeout, self.config.upstream.clone())
-                            .await
+                        script::execute(
+                            source,
+                            snapshot,
+                            timeout,
+                            self.config.upstream.clone(),
+                            self.config.files.clone(),
+                        )
+                        .await
                     }
                     // The path was validated at load time; losing the file now
                     // is a runtime failure, not a silent 404.
@@ -111,6 +121,7 @@ impl AppState {
                     logs,
                     error,
                     upstream_calls,
+                    file_calls,
                 } = outcome;
                 let handled = match (response, error) {
                     (Some(response), _) => Handled::Responded(response),
@@ -123,6 +134,7 @@ impl AppState {
                     handled,
                     script_logs: logs,
                     upstream_calls,
+                    file_calls,
                     script_duration_ms,
                 }
             }
@@ -200,12 +212,13 @@ async fn handle(
         handled,
         script_logs,
         upstream_calls,
+        file_calls,
         script_duration_ms,
     } = state
         .route_request(&method, &method_label, &path, &uri, &headers, &body)
         .await;
 
-    let mapped = map_handled(handled, &request_id, state.verbose);
+    let mapped = map_handled(handled, &headers, &request_id, state.verbose);
 
     let response_header_log = loggable_headers(&mapped.headers, &RESPONSE_LOG_HEADERS);
     let mut payload = json!({
@@ -222,6 +235,7 @@ async fn handle(
         "request_headers": request_header_log,
         "response_headers": response_header_log,
         "upstream_calls": upstream_calls,
+        "file_calls": files::calls_json(&file_calls),
         "params": params,
         "client_request_id": client_request_id,
         "host": &state.host,
@@ -258,6 +272,7 @@ async fn handle(
                 .and_then(|value| value.parse::<u64>().ok());
             stream_body(pipe, payload, started, announced_content_length)
         }
+        MappedBody::File(file) => file_stream_body(file, payload, started),
     };
     (status, headers, body).into_response()
 }
@@ -266,6 +281,7 @@ async fn handle(
 enum MappedBody {
     Ready(Body),
     Stream(upstream::PipeBody),
+    File(files::FileBody),
 }
 
 /// One handled route mapped onto the HTTP response plus its log-only fields.
@@ -277,7 +293,12 @@ struct Mapped {
     body_bytes: Option<u64>,
 }
 
-fn map_handled(handled: Handled, request_id: &str, verbose: bool) -> Mapped {
+fn map_handled(
+    handled: Handled,
+    request_headers: &HeaderMap,
+    request_id: &str,
+    verbose: bool,
+) -> Mapped {
     match handled {
         Handled::NotFound => {
             let body = error_body(request_id, "not_found", None);
@@ -290,21 +311,41 @@ fn map_handled(handled: Handled, request_id: &str, verbose: bool) -> Mapped {
             }
         }
         Handled::Failed(error) => failed_mapped(&error, request_id, verbose),
-        Handled::Responded(response) => match response_headers(&response.headers) {
-            Ok(headers) => Mapped {
-                status: StatusCode::from_u16(response.status)
-                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-                error_class: "",
-                headers,
-                body_bytes: script_body_size(&response),
-                body: match response.body {
-                    ResponseBody::Text(text) => MappedBody::Ready(Body::from(text.into_bytes())),
-                    ResponseBody::Bytes(bytes) => MappedBody::Ready(Body::from(bytes)),
-                    ResponseBody::Stream(pipe) => MappedBody::Stream(pipe),
+        Handled::Responded(response) => {
+            let ScriptResponse {
+                status,
+                headers: pairs,
+                body,
+            } = response;
+            match response_headers(&pairs) {
+                Ok(headers) => match body {
+                    ResponseBody::Text(text) => {
+                        let bytes = u64::try_from(text.len()).ok();
+                        buffered_mapped(status, headers, Body::from(text.into_bytes()), bytes)
+                    }
+                    ResponseBody::Bytes(bytes) => {
+                        let len = u64::try_from(bytes.len()).ok();
+                        buffered_mapped(status, headers, Body::from(bytes), len)
+                    }
+                    ResponseBody::Stream(pipe) => Mapped {
+                        status: script_status(status),
+                        error_class: "",
+                        headers,
+                        body_bytes: None,
+                        body: MappedBody::Stream(pipe),
+                    },
+                    ResponseBody::File(file) => map_file_response(
+                        status,
+                        headers,
+                        file,
+                        request_headers,
+                        request_id,
+                        verbose,
+                    ),
                 },
-            },
-            Err(message) => failed_mapped(&script::Error::Failed(message), request_id, verbose),
-        },
+                Err(message) => failed_mapped(&script::Error::Failed(message), request_id, verbose),
+            }
+        }
     }
 }
 
@@ -338,6 +379,9 @@ const RESPONSE_LOG_HEADERS: [&str; 3] = ["content-type", "content-length", "cont
 /// Bounded frames between the stream relay and the HTTP response body.
 const STREAM_CHANNEL_CAPACITY: usize = 4;
 
+/// Read size for one relayed file frame.
+const STREAM_CHUNK_BYTES: usize = 64 * 1024;
+
 fn loggable_headers(headers: &HeaderMap, allowlist: &[&str]) -> Map<String, Value> {
     let mut logged = Map::new();
     for name in allowlist {
@@ -353,14 +397,145 @@ fn loggable_headers(headers: &HeaderMap, allowlist: &[&str]) -> Map<String, Valu
     logged
 }
 
-/// Buffered body length. A streamed body is counted by the relay that writes
-/// its completion log, so its payload starts from `null`.
-fn script_body_size(response: &ScriptResponse) -> Option<u64> {
-    match &response.body {
-        ResponseBody::Text(text) => u64::try_from(text.len()).ok(),
-        ResponseBody::Bytes(bytes) => u64::try_from(bytes.len()).ok(),
-        ResponseBody::Stream(_) => None,
+/// One buffered script Response. Streamed bodies are counted by the relay
+/// that writes their completion log, so their payload starts from `null`.
+fn buffered_mapped(status: u16, headers: HeaderMap, body: Body, body_bytes: Option<u64>) -> Mapped {
+    Mapped {
+        status: script_status(status),
+        error_class: "",
+        headers,
+        body_bytes,
+        body: MappedBody::Ready(body),
     }
+}
+
+fn script_status(status: u16) -> StatusCode {
+    StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// Map a streamed `ctx.file.stream` body onto HTTP. The host owns
+/// `Accept-Ranges`, `Content-Length`, and `Content-Range`; the script keeps
+/// the other headers. Single ranges answer 206, unusable ranges answer 416,
+/// and a present `If-Range` disables Range handling in this slice.
+fn map_file_response(
+    status: u16,
+    headers: HeaderMap,
+    file: files::FileBody,
+    request_headers: &HeaderMap,
+    request_id: &str,
+    verbose: bool,
+) -> Mapped {
+    // The script boundary already rejects a non-200 status or a framing
+    // header on a file stream; this second check keeps internal state changes
+    // from bypassing the fail-closed contract.
+    if status != 200 {
+        return failed_mapped(
+            &script::Error::Failed(
+                "ctx.respond: a file stream body requires status 200".to_string(),
+            ),
+            request_id,
+            verbose,
+        );
+    }
+    if let Some(name) = framing_header(&headers) {
+        return failed_mapped(
+            &script::Error::Failed(format!(
+                "ctx.respond: the host owns {name} for file streams"
+            )),
+            request_id,
+            verbose,
+        );
+    }
+    let mut headers = headers;
+    headers.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    let decision = match range_request(request_headers) {
+        RangeRequest::None => files::decide_range(file.size, None),
+        RangeRequest::Single(value) => files::decide_range(file.size, Some(value)),
+        // Repeated Range field lines and non-UTF-8 values can only mean a
+        // multi-range or a malformed range, and both answer 416.
+        RangeRequest::Unusable => files::RangeDecision::Unsatisfiable,
+    };
+    match decision {
+        files::RangeDecision::Full => {
+            set_content_length(&mut headers, file.size);
+            Mapped {
+                status: script_status(status),
+                error_class: "",
+                headers,
+                body_bytes: None,
+                body: MappedBody::File(file),
+            }
+        }
+        files::RangeDecision::Partial { start, len } => {
+            let end = start + len - 1;
+            if let Ok(value) = HeaderValue::from_str(&format!("bytes {start}-{end}/{}", file.size))
+            {
+                headers.insert(CONTENT_RANGE, value);
+            }
+            set_content_length(&mut headers, len);
+            let mut file = file;
+            file.offset = start;
+            file.len = len;
+            Mapped {
+                status: StatusCode::PARTIAL_CONTENT,
+                error_class: "",
+                headers,
+                body_bytes: None,
+                body: MappedBody::File(file),
+            }
+        }
+        files::RangeDecision::Unsatisfiable => {
+            if let Ok(value) = HeaderValue::from_str(&format!("bytes */{}", file.size)) {
+                headers.insert(CONTENT_RANGE, value);
+            }
+            set_content_length(&mut headers, 0);
+            Mapped {
+                status: StatusCode::RANGE_NOT_SATISFIABLE,
+                error_class: "",
+                headers,
+                body_bytes: Some(0),
+                body: MappedBody::Ready(Body::from(Vec::new())),
+            }
+        }
+    }
+}
+
+fn set_content_length(headers: &mut HeaderMap, len: u64) {
+    if let Ok(value) = HeaderValue::from_str(&len.to_string()) {
+        headers.insert(CONTENT_LENGTH, value);
+    }
+}
+
+/// `Range` request header state before single-range parsing. Repeated field
+/// lines are a comma-separated list per HTTP, and a non-UTF-8 value cannot be
+/// a valid range spec, so neither is eligible for 206.
+enum RangeRequest<'a> {
+    None,
+    Single(&'a str),
+    Unusable,
+}
+
+fn range_request(headers: &HeaderMap) -> RangeRequest<'_> {
+    if headers.contains_key("if-range") {
+        return RangeRequest::None;
+    }
+    let mut values = headers.get_all("range").iter();
+    let Some(first) = values.next() else {
+        return RangeRequest::None;
+    };
+    if values.next().is_some() {
+        return RangeRequest::Unusable;
+    }
+    match first.to_str() {
+        Ok(value) => RangeRequest::Single(value),
+        Err(_) => RangeRequest::Unusable,
+    }
+}
+
+fn framing_header(headers: &HeaderMap) -> Option<&HeaderName> {
+    [CONTENT_LENGTH, CONTENT_RANGE, ACCEPT_RANGES]
+        .iter()
+        .find(|name| headers.contains_key(*name))
 }
 
 fn elapsed_ms(started: Instant) -> f64 {
@@ -438,6 +613,84 @@ async fn relay_stream(
     payload["response_body_bytes"] = json!(bytes);
     payload["elapsed_ms"] = json!(elapsed_ms(started));
     payload["upstream_calls"] = json!(call.calls_json());
+    if let Some(class) = outcome.error_class() {
+        payload["error"] = json!(class);
+    }
+    log(&payload);
+    if let Some(error) = terminal_error {
+        let _ = sender.send(Err(error)).await;
+    }
+}
+
+/// Relay a streamed file body to the client and write the request log when it
+/// ends; the status line is already on the wire.
+fn file_stream_body(body: files::FileBody, payload: Value, started: Instant) -> Body {
+    let (sender, receiver) =
+        tokio::sync::mpsc::channel::<Result<Bytes, io::Error>>(STREAM_CHANNEL_CAPACITY);
+    tokio::spawn(async move {
+        relay_file_stream(body, sender, payload, started).await;
+    });
+    Body::from_stream(ReceiverStream::new(receiver))
+}
+
+async fn relay_file_stream(
+    body: files::FileBody,
+    sender: tokio::sync::mpsc::Sender<Result<Bytes, io::Error>>,
+    mut payload: Value,
+    started: Instant,
+) {
+    let files::FileBody {
+        file,
+        offset,
+        len,
+        call,
+        ..
+    } = body;
+    let mut file = tokio::fs::File::from_std(file);
+    let mut bytes = 0_u64;
+    let mut remaining = len;
+    let mut outcome = files::StreamOutcome::Complete;
+    let mut terminal_error = None;
+    if offset > 0 {
+        if let Err(error) = file.seek(std::io::SeekFrom::Start(offset)).await {
+            outcome = files::StreamOutcome::FileError;
+            terminal_error = Some(error);
+        }
+    }
+    let mut buffer = vec![0_u8; STREAM_CHUNK_BYTES];
+    while outcome == files::StreamOutcome::Complete && remaining > 0 {
+        let chunk_len =
+            usize::try_from(remaining.min(STREAM_CHUNK_BYTES as u64)).unwrap_or(STREAM_CHUNK_BYTES);
+        match file.read(&mut buffer[..chunk_len]).await {
+            // The file shrank after its size was captured, so the announced
+            // Content-Length can no longer be satisfied.
+            Ok(0) => {
+                outcome = files::StreamOutcome::FileError;
+                break;
+            }
+            Ok(read) => {
+                if sender
+                    .send(Ok(Bytes::copy_from_slice(&buffer[..read])))
+                    .await
+                    .is_err()
+                {
+                    outcome = files::StreamOutcome::from_channel_close(bytes, Some(len));
+                    break;
+                }
+                bytes = bytes.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+                remaining = remaining.saturating_sub(u64::try_from(read).unwrap_or(u64::MAX));
+            }
+            Err(error) => {
+                outcome = files::StreamOutcome::FileError;
+                terminal_error = Some(error);
+                break;
+            }
+        }
+    }
+    call.finish(outcome, bytes);
+    payload["response_body_bytes"] = json!(bytes);
+    payload["elapsed_ms"] = json!(elapsed_ms(started));
+    payload["file_calls"] = json!(call.calls_json());
     if let Some(class) = outcome.error_class() {
         payload["error"] = json!(class);
     }

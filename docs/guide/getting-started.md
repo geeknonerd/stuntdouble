@@ -39,7 +39,7 @@ path = "/hello/:name"
 script = "scripts/hello.js"
 ```
 
-`files.root` must exist even when no route reads files yet. The [configuration contract](../contracts/config.md) lists every key and its validation rules.
+`files.root` must exist; it is the only directory `ctx.file` can read. The [configuration contract](../contracts/config.md) lists every key and its validation rules.
 
 ## Write your first route
 
@@ -85,6 +85,23 @@ if (upstream.status >= 400) {
 
 4xx/5xx answers are data; only transport failures throw `upstream_unreachable`. For a large or binary body, use `ctx.http.pipe`, which streams the upstream body straight to the client and preserves `Range`/206 — see the [demo fixture](../../demo/README.md) and the [`ctx` API contract](../contracts/ctx-api.md).
 
+## Read and stream local files
+
+`ctx.file` reads only inside `files.root`. Absolute paths and any `..` component are rejected, symlinks must resolve inside the root, and buffered reads are capped at 8 MiB:
+
+```js
+const text = ctx.file.readText("metadata.json");
+ctx.respond(200, { "Content-Type": "application/json" }, text);
+```
+
+`readText` decodes strict UTF-8; `readBytes` returns a `Uint8Array`. Both throw catchable errors (`file_path_invalid`, `file_not_found`, `file_too_large`, `file_encoding_error`, `file_io_error`), and an uncaught one answers 500 `script_error`.
+
+To serve a file without loading it into the script heap, pass `ctx.file.stream(path)` as the `ctx.respond` body with status `200`. The host owns `Accept-Ranges`, `Content-Length`, and `Content-Range`: a valid single `Range` answers 206, an unusable one answers 416, and `If-Range` disables range handling. `Content-Type` is never inferred, so set it in the response headers.
+
+```js
+ctx.respond(200, { "Content-Type": "application/pdf" }, ctx.file.stream("documents/DOC-0001.pdf"));
+```
+
 ## When something fails
 
 | You see | Meaning |
@@ -103,7 +120,7 @@ Add `--verbose` to `serve` when diagnosing one of these failures:
 stuntdouble serve --config stuntdouble.toml --verbose
 ```
 
-The 500/502 JSON body then carries a stable `detail` string such as `upstream transport failure: timeout`; it never includes stack traces, script messages, upstream bodies, or internal addresses. Treat it as local diagnostic output and leave it off in shared environments. `serve` also writes one structured JSON log line per request to stderr, including the upstream call chain, body sizes, and allowlisted headers. A streamed response writes its line when the body ends; a mid-stream upstream failure appears as `upstream_stream_error`.
+The 500/502 JSON body then carries a stable `detail` string such as `upstream transport failure: timeout`; it never includes stack traces, script messages, upstream bodies, or internal addresses. Treat it as local diagnostic output and leave it off in shared environments. `serve` also writes one structured JSON log line per request to stderr, including the upstream call chain, body sizes, and allowlisted headers. A streamed response writes its line when the body ends; a mid-stream failure appears as `upstream_stream_error` or `file_stream_error`, and a client that leaves mid-body is recorded as `client_disconnected`.
 
 ## Next steps
 

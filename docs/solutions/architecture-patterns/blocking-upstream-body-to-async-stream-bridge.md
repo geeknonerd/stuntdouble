@@ -1,7 +1,7 @@
 ---
 title: "Bridge blocking upstream reads into an async streaming response"
 date: 2026-09-21
-last_updated: 2026-09-22
+last_updated: 2026-09-23
 category: architecture-patterns
 module: upstream HTTP streaming bridge
 problem_type: architecture_pattern
@@ -9,11 +9,11 @@ component: upstream
 severity: medium
 applies_when:
   - "Adding a host capability that moves bytes from a blocking upstream reader into an async response body"
-  - "Streaming local files or request uploads in later slices and reusing the pipe pattern"
+  - "Streaming local files (T11) or request uploads (T12) and reusing the pipe pattern"
   - "Changing channel capacity, chunk size, or client-disconnect handling for ctx.http.pipe"
   - "Deciding when response status and headers must be finalized relative to the first body frame"
-related_components: [script, server]
-tags: [streaming, backpressure, axum, tokio, spawn-blocking, ureq, ctx-http-pipe, range, observability]
+related_components: [script, server, files]
+tags: [streaming, backpressure, axum, tokio, spawn-blocking, ureq, ctx-http-pipe, ctx-file-stream, range, observability]
 ---
 
 # 把阻塞式上游读取桥接进异步流式响应
@@ -24,7 +24,7 @@ tags: [streaming, backpressure, axum, tokio, spawn-blocking, ureq, ctx-http-pipe
 
 脚本宿主是同步的。Boa 的 `Context` 在 `tokio::task::spawn_blocking` 内求值，因此 `ctx.http.get` 与 `ctx.http.pipe` 可以调用 `ureq` 的阻塞客户端而不占用 Tokio 的异步 worker；worker 本身不可取消，会在循环迭代上限处停止（不可取消 worker 与循环上限：`src/script.rs:585-587`、`src/script.rs:765-776`；同步宿主约束另见 `src/upstream.rs:4-8`）。`ctx.http.pipe` 增加了第二个生产者：上游响应头确定之后，body 由阻塞的 `ureq` reader 读取，最终必须送达异步的 axum `Body`。
 
-当前代码树还没有文件流实现；`ctx.file.stream` 仍标注为未实现（`docs/contracts/ctx-api.md:25-27`）。按本次会话的结论，这条 pipe 路径因此也是后续本地文件流、以及反向上传方向的参考接缝：由宿主持有有界 channel，而不是脚本堆。
+T11（issue #52）已落地本地文件流：`ctx.file.stream` 复用「由宿主持有有界 channel，而不是脚本堆」这条接缝，错误分类与 framing header 决策则独立定义（见下方「T11 扩展」）。上传方向（T12）仍是该接缝的下一个使用者。
 
 实现分三层：
 
@@ -128,7 +128,7 @@ T7 的 `server::stream_body` 先把 `PipeBody` 解构，经 relay channel 转发
 
 `HTTP_HOST` 与 `PIPE_STREAM` 是 thread-local，不是全局请求状态（`src/script.rs:437-445`）。它们在 `evaluate` 开始时初始化，stream 在求值结束后取走（`src/script.rs:559-574`、`src/script.rs:623-631`）。如果脚本抛错，stream 仍会被取走并由错误路径丢弃；`pump_body` 通过 `blocking_send` 观察到 receiver 消失并退出。预期的生命周期也覆盖客户端断开：当异步响应 body 丢弃 receiver 时，阻塞生产者下一次发送失败，阻塞任务随之结束（`src/upstream.rs:455-471`）。
 
-`script::execute` 的文档说明 `spawn_blocking` 无法取消，外层 deadline 只返回结果，而阻塞 worker 会在循环迭代上限处停止（`src/script.rs:765-771`）。因此流式设计不依赖中止生产者任务，而依赖 receiver 被丢弃。按本次会话的结论，当前测试集没有专门的「body 中途客户端断开」回归测试，因此这条生命周期应作为不变量保留，并在下次改动流式接缝时补一个聚焦测试。源码级契约在注释与发送失败分支里，但那不能替代端到端断开测试。
+`script::execute` 的文档说明 `spawn_blocking` 无法取消，外层 deadline 只返回结果，而阻塞 worker 会在循环迭代上限处停止（`src/script.rs:765-771`）。因此流式设计不依赖中止生产者任务，而依赖 receiver 被丢弃。T11 起两个流式路径都有专门的客户端断开回归测试：`ctx_http_pipe_client_disconnect_mid_body_is_logged` 与 `ctx_file_stream_client_disconnect_mid_body_is_logged`；两者都断言完成日志记为 `client_disconnected`，且 relay 未跑完全部字节。
 
 ## 为什么重要
 
@@ -143,7 +143,7 @@ T7 的 `server::stream_body` 先把 `PipeBody` 解构，经 relay channel 转发
 ## 何时适用
 
 - 新增或评审 `ctx.http.pipe` 行为时：状态选择、重定向处理、allowlist 行为、响应 header 与 Range 语义都穿过同一条「流前／流后」边界（`src/upstream.rs:166-211`；`docs/contracts/ctx-api.md:46-53`）。
-- 实现后续把阻塞源的字节流进 axum 响应的能力时。按本次会话的结论，`ctx.file.stream` 是同一套 `spawn_blocking` + 有界 `mpsc` + `Body::from_stream` 接缝的下一个天然使用者，但它的错误分类与响应头决策必须针对文件能力单独定义，不能直接照抄 HTTP 上游语义（`docs/contracts/ctx-api.md:25-27`）。
+- 把另一类字节源流进 axum 响应时。T11 的 `ctx.file.stream` 已按同一「有界 `mpsc` + `Body::from_stream`」接缝落地（读取端是 `tokio::fs::File`，而非 `spawn_blocking` + `ureq`），错误分类与响应头决策针对文件能力单独定义，没有照抄 HTTP 上游语义；上传（T12）是下一个使用者（`docs/contracts/ctx-api.md`）。
 - 实现反向上传方向时：沿用同样的有界 channel 与背压原则，但归属与失败映射要贴合上传契约。
 - 路由需要在响应前检查、变换或完整校验 body 时：使用 `ctx.http.get` 而不是 `pipe`，并考虑 8 MiB 上限（`docs/contracts/ctx-api.md:43-45`）。
 - 变更重定向策略、错误码、Range 转发或 `Content-Length`/`Content-Range` 处理时：在同一次改动里更新 ADR／契约、demo 脚本与端到端测试。上面缺失 `Location` 的细节就是「只断言客户端 502 不够」的具体例证。
@@ -290,6 +290,17 @@ E2E harness 在停服前等待请求日志行数稳定（`wait_for_request_log`�
 
 T6 段落中的代码行号会随代码演进漂移；行为以公开契约与本节为准。
 
+## T11 扩展：本地文件流（issue #52）
+
+T11 把同一接缝用于本地文件：`ctx.file.stream(path)` 打开 root 内的文件，`ctx.respond(200, headers, handle)` 把 `FileBody` 交给宿主，`server::relay_file_stream` 经有界 channel 写入 `Body::from_stream`，并在 body 结束、读失败或客户端断开时定稿 `file_calls`。
+
+- 复用：宿主持有有界 channel、`Body::from_stream`、完成时写唯一一条请求日志、客户端断开时丢弃 receiver 让发送端退出。
+- 偏离：读取端是 `tokio::fs::File`（异步接口包装阻塞读），不是 `spawn_blocking` + `ureq`；错误分类独立为 `file_stream_error` / `client_disconnected`，不复用 `upstream_stream_error`。
+- 响应 framing 由宿主拥有：`Accept-Ranges`、`Content-Length`、`Content-Range` 与 200/206/416 决策都在 `server::map_file_response`；脚本状态必须为 200，Range 解析留在树内且只支持单 range。
+- 打开时机独立：`src/files.rs` 在 `File::open` 之前先确认普通文件，FIFO 之类不会阻塞脚本；root 约束与剩余 TOCTOU 取舍见 `SECURITY.md`。
+
+回归证据：`ctx_file_stream_answers_single_ranges_with_206`、`ctx_file_stream_answers_416_for_unusable_ranges`、`ctx_file_stream_client_disconnect_mid_body_is_logged`、`ctx_file_stream_truncation_after_headers_is_logged_as_file_stream_error`。
+
 ## 相关
 
 - `plans/adr/0005-upstream-failure-semantics.md` —— T6 修订记录流式偏差与流前／流后的失败划分，T7 修订记录完成日志与日志专用错误类。
@@ -298,4 +309,4 @@ T6 段落中的代码行号会随代码演进漂移；行为以公开契约与�
 - `docs/solutions/conventions/script-owned-upstream-error-mapping.md` —— 路由级业务错误映射；本文有意把那张表留给它。
 - `tests/cli.rs` —— 针对传输、重定向、URL、状态、大小与 Range 不变量的端到端 fake-upstream 覆盖。
 - PR #19 —— T6 模式的实现与验证上下文（已合并）。T7 的完成日志修复见 PR #25（已合并，关闭 issue #10）。
-- 相关 issue：#9（T6 来源）、#10（T7 可观测性完成，已关闭）、#7（allowlist 与传输边界）、#8（路由级错误映射）、#37（完成态误报与通道关闭分类）、#3（父 spec；文件流与上传是后续复用范围）。
+- 相关 issue：#9（T6 来源）、#10（T7 可观测性完成，已关闭）、#7（allowlist 与传输边界）、#8（路由级错误映射）、#37（完成态误报与通道关闭分类）、#3（父 spec）、#52（T11 本地文件流已落地；上传 T12 待做）。

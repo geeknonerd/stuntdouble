@@ -1,7 +1,7 @@
 ---
 title: "Route scripts own upstream error mapping but must not absorb policy rejections"
 date: 2026-09-21
-last_updated: 2026-09-21
+last_updated: 2026-09-23
 category: conventions
 module: upstream HTTP error mapping
 problem_type: convention
@@ -40,9 +40,12 @@ T4 确定了 `ctx.http.get` 的引擎边界：最终的非重定向 HTTP 响应�
 | --- | --- | --- |
 | `ctx.http.pipe` 收到最终非 2xx 响应 | `upstream_http_error` | 流式 body 无法检查，因此客户端错误码由脚本掌握（ADR 0005 T6 修订） |
 | URL 无法解析，或 scheme 不是 http/https | `upstream_url_invalid` | 上游元数据有误，而非传输失败 |
-| 宿主无法跟随的重定向链（超过 3 跳或 `Location` 不可用） | `upstream_redirect_error` | 与 allowlist 拒绝区分开 |
+| 宿主无法跟随的重定向链（超过 3 跳，或 `Location` 存在但不可解析） | `upstream_redirect_error` | 与 allowlist 拒绝区分开 |
+| 3xx 响应缺少 `Location` header | `upstream_http_error` | 没有可跟随的目标时，宿主把该 3xx 当最终非 2xx 响应处理；契约与 ADR 的宽泛措辞未覆盖这一细分，见下方说明 |
 | DNS、连接、TLS 或超时失败 | `upstream_unreachable` | 也是 `ctx.http.get` 未捕获时的兜底 |
 | URL 或 host 被策略拒绝，例如 allowlist 未命中 | `script_error` | 配置故障，绝不伪装成网关失败 |
+
+契约（`docs/contracts/ctx-api.md`）与 ADR 0005 把“超过 3 跳或 `Location` 不可用”都写成 `upstream_redirect_error`；当前实现分得更窄：只有 `Location` 存在却不可解析时才抛 `upstream_redirect_error`，完全缺失 `Location` 的 3xx 会作为最终响应落到 `upstream_http_error`（[bridge learning](../architecture-patterns/blocking-upstream-body-to-async-stream-bridge.md) 记录了同一差异）。写路由脚本时按当前实现区分两者；契约/ADR 的措辞是否收窄属于独立的产品决策，本 learning 只记录差异本身。
 
 这张表只覆盖响应头之前的失败。响应头一旦发出，body 已经开始流向客户端，宿主不再抛可捕获错误：上游中途读失败在请求完成日志中记为 `upstream_stream_error`，客户端先断开记为 `client_disconnected`；脚本无法捕获它们，也无法改写已经发出的状态（ADR 0005 T7 修订、`docs/contracts/cli.md`）。因此路由脚本的错误表只需覆盖表内的可捕获类别，流结束后的分类属于运维日志面。
 

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(files)* add rooted `ctx.file` reads and streamed local file responses with single-range support ([#52](https://github.com/geeknonerd/stuntdouble/issues/52))
+
 ## [0.1.0-alpha.1](https://github.com/geeknonerd/stuntdouble/releases/tag/v0.1.0-alpha.1) - 2026-09-22
 
 ### Added

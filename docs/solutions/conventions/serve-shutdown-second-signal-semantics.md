@@ -1,7 +1,7 @@
 ---
 title: "A second shutdown signal is only guaranteed after the first one is observed"
 date: 2026-09-22
-last_updated: 2026-09-22
+last_updated: 2026-09-23
 category: conventions
 module: serve shutdown lifecycle
 problem_type: convention
@@ -19,13 +19,13 @@ tags: [shutdown, signals, sigint, sigterm, ctrl-c, exit-codes, end-to-end-tests,
 
 ## 背景
 
-T10（issue #33，分支 `feat/graceful-shutdown`）为 `serve` 增加信号驱动的 graceful shutdown。信号安装留在进程边界：`src/main.rs:86-90` 创建 shutdown future 后把它交给 `server::run`；`src/server.rs:159-176` 只把该 future 接到 `axum::serve(...).with_graceful_shutdown(shutdown)`，随后负责排空。Unix 同时预注册 SIGINT/SIGTERM 两个信号流，`recv_shutdown_signal` 用 `tokio::select!` 接收第一个通知，首次信号触发正常 drain，后台任务继续等待第二个，并在观测到后按 128+signal 立即退出（`src/main.rs:124-152`）。Windows 使用预注册的 `tokio::signal::windows::ctrl_c()` 流，第二次 Ctrl-C 退出 `130`（`src/main.rs:155-167`）。
+T10（issue #33，分支 `feat/graceful-shutdown`）为 `serve` 增加信号驱动的 graceful shutdown。信号安装留在进程边界：`src/main.rs:86-90` 创建 shutdown future 后把它交给 `server::run`；`src/server.rs:171-188` 只把该 future 接到 `axum::serve(...).with_graceful_shutdown(shutdown)`，随后负责排空。Unix 同时预注册 SIGINT/SIGTERM 两个信号流，`recv_shutdown_signal` 用 `tokio::select!` 接收第一个通知，首次信号触发正常 drain，后台任务继续等待第二个，并在观测到后按 128+signal 立即退出（`src/main.rs:124-152`）。Windows 使用预注册的 `tokio::signal::windows::ctrl_c()` 流，第二次 Ctrl-C 退出 `130`（`src/main.rs:155-167`）。
 
 公开契约是：第一个信号停止接受新连接、排空在途请求并以 `0` 返回；只有在第一次关闭信号被观测后再次观测到第二个信号，才保证放弃排空并立即退出，SIGINT/Ctrl-C 为 `130`，SIGTERM 为 `143`（`docs/contracts/cli.md:43-45`；`plans/adr/0011-contract-compatibility.md:45-46`）。
 
 初稿曾把后一半写成“第二个信号总是立即终止”。本次会话的人工复现使用 30 秒后才返回的上游响应并保持客户端连接：连续发送两次 SIGTERM 后，stderr 只有一次 `starting graceful shutdown`，1 秒后进程仍在 drain，没有出现强制退出。原因不是缺少第二个监听任务，而是标准（非实时）信号不排队：同一信号的前一次通知尚未被消费时，后续投递可能被合并成一个通知。早期测试在两个信号之间固定 `sleep(200 ms)`，让第一次信号先有机会被观测，因而掩盖了该竞态（人工复现与旧测试属于会话记录；最终契约见上述文档）。
 
-因此 T10 明确选择：契约只承诺“第一次 shutdown 已启动之后”的第二个信号；背靠背信号若被合并，就按第一次信号正常排空并退出 `0`。不要为了强迫计数引入 signal-hook 或实时信号。迁移影响记录在 `CHANGELOG.md:12-22`：把 `130`/`143` 当作普通停止码的脚本应接受正常关闭的 `0`，这两个码现在表示操作者强制中止排空。Windows 契约与 Ctrl-C 等同 SIGINT。仓库 CI 的 job 全部是 `ubuntu-latest`（`.github/workflows/ci.yml`）；Windows 分支曾用最小 Tokio crate 做过 `x86_64-pc-windows-gnu` 类型检查，但没有真实 crate 的自动化类型检查或行为覆盖，需要引入 Windows runner 后补充。
+因此 T10 明确选择：契约只承诺“第一次 shutdown 已启动之后”的第二个信号；背靠背信号若被合并，就按第一次信号正常排空并退出 `0`。不要为了强迫计数引入 signal-hook 或实时信号。迁移影响记录在 `CHANGELOG.md:76-86`：把 `130`/`143` 当作普通停止码的脚本应接受正常关闭的 `0`，这两个码现在表示操作者强制中止排空。Windows 契约与 Ctrl-C 等同 SIGINT。required CI 的 job 全部是 `ubuntu-latest`（`.github/workflows/ci.yml`），因此没有 Windows 行为覆盖；release 流水线在构建矩阵里声明 `x86_64-pc-windows-msvc` artifact，但不运行信号行为测试（`dist-workspace.toml:13-17`、`.github/workflows/release.yml`）。Windows 分支的类型检查与行为自动化仍需引入 Windows runner 后补充（会话记录曾用最小 Tokio crate 做过 `x86_64-pc-windows-gnu` 类型检查，当前树没有对应脚本可复核）。
 
 ## 指导
 
@@ -35,21 +35,21 @@ T10（issue #33，分支 `feat/graceful-shutdown`）为 `serve` 增加信号驱�
 | --- | --- |
 | 第一次 SIGINT/SIGTERM/Ctrl-C 被观测 | 停止接受新连接，排空在途请求，完成后退出 `0` |
 | 第一次信号被观测后，第二次信号也再次被观测 | 放弃排空，立即退出；SIGINT/Ctrl-C 为 `130`，SIGTERM 为 `143` |
-| 同一标准信号在第一次被观测前背靠背投递 | 可能合并；按第一次信号正常 drain 并退出 `0`，不保证 `130`/`143` |
+| 同一标准信号在第一次被观测前背靠背投递 | 可能合并；按第一次信号正常 drain 并退出 `0`，不保证出现 `130`（SIGINT）或 `143`（SIGTERM） |
 
 “已经启动 graceful shutdown”在测试中可以用当前 stderr 诊断作为内部闸门，但诊断文案本身不是公开契约（`docs/contracts/cli.md:47`）。文档和 runbook 应写“第一次已启动 shutdown 后，第二个信号才保证强制退出”，不要写成“第二次信号总会退出 `130`/`143`”。
 
 ### 2. 继续把进程信号留在 CLI 边界
 
-宿主信号、平台 Ctrl-C 和强制退出码属于 CLI；`server::run` 只接收一个 shutdown future 并负责连接排空（`src/main.rs:86-90`、`src/server.rs:159-176`）。这不是形式划分：它让服务库不依赖操作系统信号 API，也允许测试或其他调用方提供不同的关闭触发器。新增“第几个信号”的逻辑不应漏进路由、请求处理或脚本层。
+宿主信号、平台 Ctrl-C 和强制退出码属于 CLI；`server::run` 只接收一个 shutdown future 并负责连接排空（`src/main.rs:86-90`、`src/server.rs:171-188`）。这不是形式划分：它让服务库不依赖操作系统信号 API，也允许测试或其他调用方提供不同的关闭触发器。新增“第几个信号”的逻辑不应漏进路由、请求处理或脚本层。
 
 ### 3. 保证路径等待状态，退化路径单独测试
 
 测试强制退出时，先发送第一个信号，等待“shutdown 已启动”的可观测证据，确认进程仍在排空，再发送第二个信号并断言目标退出码。不要用固定 sleep 猜测第一次信号何时被处理。
 
-背靠背投递是独立的退化契约：连续发送两个信号后，在有限期限内接受 `0` 或 `143`。`0` 表示系统合并通知并完成正常 drain；`143` 表示第二次通知被观测并强制退出。两者都符合契约；进程必须在有限期限内以 `0` 或 `143` 退出，超时、其它退出码或信号终止都不符合契约。
+背靠背投递是独立的退化契约：连续发送两个 SIGTERM 后，在有限期限内接受 `0` 或 `143`（当前回归只覆盖 SIGTERM；两个 SIGINT/Ctrl-C 的对应码是 `0` 或 `130`）。`0` 表示系统合并通知并完成正常 drain；`143` 表示第二次通知被观测并强制退出。两者都符合契约；进程必须在有限期限内以 `0` 或 `143` 退出，超时、其它退出码或信号终止都不符合契约。
 
-当前测试工具已经体现了这两个层次：`wait_for_log` 轮询带超时，`assert_second_signal_forces_exit` 用 30 秒在途请求和保持的客户端连接建立排空场景，`back_to_back_sigterm_signals_still_exit` 则接受 `0 | 143`（`tests/cli.rs:2812-2825`、`tests/cli.rs:2891-2917`、`tests/cli.rs:2931-2952`）。
+当前测试工具已经体现了这两个层次：`wait_for_log` 轮询带超时，`assert_second_signal_forces_exit` 用 30 秒在途请求和保持的客户端连接建立排空场景，`back_to_back_sigterm_signals_still_exit` 则接受 `0 | 143`（`tests/cli.rs:3405-3418`、`tests/cli.rs:3484-3510`、`tests/cli.rs:3524-3545`）。
 
 ### 4. 不为不可兑现的保证增加复杂度
 
@@ -87,7 +87,7 @@ let status = wait_for_exit(&mut fixture.child, Duration::from_secs(5));
 assert_eq!(status.code(), Some(143));
 ```
 
-这段模式来自 `assert_second_signal_forces_exit`（`tests/cli.rs:2891-2927`）。日志只用于内部同步，不是公开输出契约；关键是第二次信号发送前，已有证据表明第一次已经进入 shutdown，且进程尚未退出。
+这段模式来自 `assert_second_signal_forces_exit`（`tests/cli.rs:3484-3510`）。日志只用于内部同步，不是公开输出契约；关键是第二次信号发送前，已有证据表明第一次已经进入 shutdown，且进程尚未退出。
 
 反模式是先把“背靠背”变成“有明显间隔”：
 
@@ -109,7 +109,7 @@ let status = wait_for_exit(&mut fixture.child, Duration::from_secs(5));
 assert!(matches!(status.code(), Some(0 | 143)));
 ```
 
-`0` 是第一次信号完成正常 drain，`143` 是第二次信号被观测后强制退出；测试只要求进程在期限内结束，避免把 OS 调度结果固化成错误断言（`tests/cli.rs:2931-2952`）。现有 Unix 回归还分别覆盖首次 SIGINT/SIGTERM 退出 `0`、SIGINT/SIGTERM 排空在途请求、第二次 SIGINT 退出 `130`、第二次 SIGTERM 退出 `143`（`tests/cli.rs:2828-2952`）。
+`0` 是第一次信号完成正常 drain，`143` 是第二次信号被观测后强制退出；测试只要求进程在期限内结束，避免把 OS 调度结果固化成错误断言（`tests/cli.rs:3524-3545`）。现有 Unix 回归还分别覆盖首次 SIGINT/SIGTERM 退出 `0`、SIGINT/SIGTERM 排空在途请求、第二次 SIGINT 退出 `130`、第二次 SIGTERM 退出 `143`（`tests/cli.rs:3420-3545`）。
 
 ## 相关
 
