@@ -7,7 +7,7 @@
 - 仓库根目录的 **`CONTEXT.md`** —— 项目词汇表。
 - **`plans/adr/`** —— 读与你要改动区域相关的 ADR。本仓库把 ADR 放在这里，而不是 `docs/adr/`。
 - **`plans/product-definition.md`** —— v1 范围、宿主 API 契约与不做清单。
-- **`plans/demo-document-catalog.md`** —— 生成 CSV 清单与二进制下载的公开演示场景；对应的可运行夹具在 `demo/`。
+- **`plans/demo-document-catalog.md`** —— 生成 CSV 清单与二进制下载的公开演示场景，以及离线的本地清单、本地下载与上传扩展；对应的可运行夹具在 `demo/`。
 - **`docs/contracts/`** —— 配置、`ctx` API 与 CLI 契约。
 - **`types/ctx-api-v1.d.ts`** —— 已实现的 `ctx` apiVersion 1 子集的源码类型定义。
 - **`docs/guide/`** —— 面向使用者的快速开始与任务说明（B 层，英文 + `.zh-CN.md` 译本）。
