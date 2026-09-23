@@ -19,7 +19,7 @@ tags: [shutdown, signals, sigint, sigterm, ctrl-c, exit-codes, end-to-end-tests,
 
 ## 背景
 
-T10（issue #33，分支 `feat/graceful-shutdown`）为 `serve` 增加信号驱动的 graceful shutdown。信号安装留在进程边界：`src/main.rs:86-90` 创建 shutdown future 后把它交给 `server::run`；`src/server.rs:171-188` 只把该 future 接到 `axum::serve(...).with_graceful_shutdown(shutdown)`，随后负责排空。Unix 同时预注册 SIGINT/SIGTERM 两个信号流，`recv_shutdown_signal` 用 `tokio::select!` 接收第一个通知，首次信号触发正常 drain，后台任务继续等待第二个，并在观测到后按 128+signal 立即退出（`src/main.rs:124-152`）。Windows 使用预注册的 `tokio::signal::windows::ctrl_c()` 流，第二次 Ctrl-C 退出 `130`（`src/main.rs:155-167`）。
+T10（issue #33，分支 `feat/graceful-shutdown`）为 `serve` 增加信号驱动的 graceful shutdown。信号安装留在进程边界：`src/main.rs:86-90` 创建 shutdown future 后把它交给 `server::run`；`src/server.rs` 的 390 行起的 `serve_connections` 把该 future 接在自己的连接循环上：首个信号后停止 accept，通知每个在途连接调用 `Connection::graceful_shutdown`，再等待所有连接任务结束（该循环在 #56 中从 `axum::serve` 换成 hyper 的 HTTP/1 builder）。Unix 同时预注册 SIGINT/SIGTERM 两个信号流，`recv_shutdown_signal` 用 `tokio::select!` 接收第一个通知，首次信号触发正常 drain，后台任务继续等待第二个，并在观测到后按 128+signal 立即退出（`src/main.rs:124-152`）。Windows 使用预注册的 `tokio::signal::windows::ctrl_c()` 流，第二次 Ctrl-C 退出 `130`（`src/main.rs:155-167`）。
 
 公开契约是：第一个信号停止接受新连接、排空在途请求并以 `0` 返回；只有在第一次关闭信号被观测后再次观测到第二个信号，才保证放弃排空并立即退出，SIGINT/Ctrl-C 为 `130`，SIGTERM 为 `143`（`docs/contracts/cli.md:43-45`；`plans/adr/0011-contract-compatibility.md:45-46`）。
 
@@ -41,7 +41,7 @@ T10（issue #33，分支 `feat/graceful-shutdown`）为 `serve` 增加信号驱�
 
 ### 2. 继续把进程信号留在 CLI 边界
 
-宿主信号、平台 Ctrl-C 和强制退出码属于 CLI；`server::run` 只接收一个 shutdown future 并负责连接排空（`src/main.rs:86-90`、`src/server.rs:171-188`）。这不是形式划分：它让服务库不依赖操作系统信号 API，也允许测试或其他调用方提供不同的关闭触发器。新增“第几个信号”的逻辑不应漏进路由、请求处理或脚本层。
+宿主信号、平台 Ctrl-C 和强制退出码属于 CLI；`server::run` 只接收一个 shutdown future 并负责连接排空（`src/main.rs:86-90`、`src/server.rs` 的 390 行起）。这不是形式划分：它让服务库不依赖操作系统信号 API，也允许测试或其他调用方提供不同的关闭触发器。新增“第几个信号”的逻辑不应漏进路由、请求处理或脚本层。
 
 ### 3. 保证路径等待状态，退化路径单独测试
 
