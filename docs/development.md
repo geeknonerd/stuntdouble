@@ -65,14 +65,14 @@ docs: describe the release process
 7. `release-extras` post-announce job 在 Release 创建后生成 CycloneDX SBOM、附加 `SHA256SUMS`、构建并推送 `ghcr.io/geeknonerd/stuntdouble:<tag>`、附加镜像 digest，并用 `gh attestation verify` 验证已发布的 Linux 二进制与容器 attestation。GHCR tag 已存在时复用 digest，不覆盖、不重新生成 provenance，只验证已有 attestation；存在性检查无法确认时 fail closed。
 8. 用“发布验证”中的命令复核 Release；全部资产存在后再公告。
 
-`v0.1.0-alpha.1` 这个旧 tag 对 release-plz 不可见，因此 `0.2.0` 是一次性的桥接版本：版本号与 CHANGELOG 段由人工在同一个 PR 里写好，合并后第 2 步为 `Cargo.toml` 的版本建 tag 并触发产物流水线；此后 tag 形如 `v0.2.0` 能被正常识别，第 3 步恢复由 release-plz 打开版本 PR。
+`v0.1.0-alpha.1` 这个旧 tag 对 release-plz 不可见，因此 `0.2.0` 是一次性的桥接版本：版本号与 CHANGELOG 段由人工在同一个 PR 里写好，合并后第 2 步建出 tag `v0.2.0` 并触发产物流水线（已完成）。此后 tag 形如 `v0.2.0` 能被正常识别，第 3 步恢复由 release-plz 打开版本 PR。
 
-`release-extras` 失败或取消时，会把已公开但不完整的 Release 回退为 draft；修复后优先重跑该 job，若需要更换已有产物则发布新的 patch 或预发布版本。发布失败不得复用或覆盖已有 tag；只有 crates.io 发布损坏时才用 `cargo yank`，绝不删除已发布的版本。
+`release-extras` 失败或取消时，会把已公开但不完整的 Release 回退为 draft；修复后优先重跑该 job，若需要更换已有产物则发布新的 patch 版本（本项目不使用 prerelease 版本，见「版本号」）。发布失败不得复用或覆盖已有 tag；只有 crates.io 发布损坏时才用 `cargo yank`，绝不删除已发布的版本。
 
 ### 发布验证
 
 ```bash
-tag=v0.1.0-alpha.1
+tag=v0.2.0
 gh release view "$tag" --repo geeknonerd/stuntdouble
 gh release download "$tag" --repo geeknonerd/stuntdouble --pattern '*x86_64-unknown-linux-gnu.tar.gz'
 gh attestation verify stuntdouble-x86_64-unknown-linux-gnu.tar.gz --repo geeknonerd/stuntdouble
