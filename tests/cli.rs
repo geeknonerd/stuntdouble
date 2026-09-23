@@ -4811,6 +4811,39 @@ fn slow_multipart_body_answers_408_and_cleans_up() {
     wait_for_empty_temp(&temp_root);
 }
 
+/// A client that never finishes its request head must be disconnected at the
+/// configured deadline instead of holding a connection slot open.
+#[test]
+fn slow_request_head_is_closed_at_the_deadline() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = with_request_timeout(good_config(), 300);
+    let ((), log) = serve_upload_fixture(dir.path(), &config, OK_SCRIPT, &[], |port| {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("read timeout");
+        stream
+            .write_all(b"GET /demo/documents/manifest/group-a HTTP/1.1\r\nHost: 127.0.0.1\r\n")
+            .expect("write partial head");
+        stream.flush().expect("flush");
+        // A half-read head has no HTTP answer: the server must close instead.
+        let mut buffer = [0_u8; 64];
+        let read = stream
+            .read(&mut buffer)
+            .expect("read until the server closes");
+        assert_eq!(
+            read,
+            0,
+            "expected a close, got: {:?}",
+            String::from_utf8_lossy(&buffer[..read])
+        );
+    });
+    assert!(
+        log.contains("request_head_timeout"),
+        "log missing the head timeout class: {log}"
+    );
+}
+
 #[cfg(unix)]
 #[derive(Clone, Copy)]
 enum SignalCase {

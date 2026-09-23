@@ -24,6 +24,7 @@ Every valid configuration is a TOML table. Unknown keys, unknown `config_version
 | `server` | yes | table | — | only `{bind, port}` is accepted |
 | `server.bind` | no | string | `"127.0.0.1"` | IP address literal; hostnames are rejected during validation |
 | `server.port` | no | integer | `3000` | integer in `[1, 65535]` |
+| `server.request_timeout_ms` | no | integer | `30000` | positive integer (0 is rejected); deadline for reading one request head and body |
 | `files` | yes | table | — | only `{root, upload_max_bytes}` is accepted |
 | `files.root` | yes | string | — | existing directory, resolved relative to the configuration file |
 | `files.upload_max_bytes` | no | integer | `20971520` | positive integer (0 and negative values are rejected); maximum data bytes accepted in one multipart request |

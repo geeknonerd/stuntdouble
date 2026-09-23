@@ -26,6 +26,7 @@ v1 不接受 YAML 与 JSON。
 | `server` | 是 | table | — | 只接受 `{bind, port}` |
 | `server.bind` | 否 | string | `"127.0.0.1"` | IP 地址字面量；hostname 在校验期被拒绝 |
 | `server.port` | 否 | integer | `3000` | `[1, 65535]` 范围内的整数 |
+| `server.request_timeout_ms` | 否 | integer | `30000` | 正整数（0 被拒绝）；读取一个请求头与请求体的期限 |
 | `files` | 是 | table | — | 只接受 `{root, upload_max_bytes}` |
 | `files.root` | 是 | string | — | 必须已存在的目录，相对配置文件解析 |
 | `files.upload_max_bytes` | 否 | integer | `20971520` | 正整数（0 与负数被拒绝）；单个 multipart 请求可接受的数据字节上限 |

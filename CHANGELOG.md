@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(files)* add rooted `ctx.file` reads and streamed local file responses with single-range support ([#52](https://github.com/geeknonerd/stuntdouble/issues/52))
 - *(files)* add multipart uploads with request-scoped temporary storage and `ctx.request.files` ([#53](https://github.com/geeknonerd/stuntdouble/issues/53))
 - *(demo)* add offline local manifest, local download, and upload routes to the document fixture ([#54](https://github.com/geeknonerd/stuntdouble/issues/54))
+- *(server)* bound request head and body reads with `server.request_timeout_ms` ([#56](https://github.com/geeknonerd/stuntdouble/issues/56))
 
 ## [0.1.0-alpha.1](https://github.com/geeknonerd/stuntdouble/releases/tag/v0.1.0-alpha.1) - 2026-09-22
 

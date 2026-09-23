@@ -13,6 +13,9 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use axum::Router;
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use hyper_util::server::conn::auto::Builder as ConnectionBuilder;
+use hyper_util::service::TowerToHyperService;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::io;
@@ -366,14 +369,79 @@ pub async fn run(
             .saturating_add(MULTIPART_FRAMING_ALLOWANCE),
     )
     .unwrap_or(usize::MAX);
+    let head_deadline = Duration::from_millis(config.server.request_timeout_ms);
     let state = Arc::new(AppState::new(config, bound, verbose));
     let app = Router::new()
         .fallback(any(handle))
         .layer(DefaultBodyLimit::max(upload_body_limit))
         .with_state(state);
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await
+    serve_connections(listener, app, head_deadline, shutdown).await
+}
+
+/// Serve accepted connections until `shutdown` resolves, then drain them.
+///
+/// hyper enforces `header_read_timeout` only once a timer is configured, and
+/// the `axum::serve` loop sets neither, so this loop replaces it. Everything
+/// else keeps the previous behavior: one task per connection, a graceful
+/// shutdown for in-flight connections, and no new connection after the first
+/// shutdown signal.
+async fn serve_connections(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    head_deadline: Duration,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> io::Result<()> {
+    let mut builder = ConnectionBuilder::new(TokioExecutor::new());
+    builder
+        .http1()
+        .timer(TokioTimer::new())
+        .header_read_timeout(Some(head_deadline));
+    // Every connection watches this channel so the first shutdown signal can
+    // close it gracefully; the loop then waits for each task before returning.
+    let (drain_tx, _) = tokio::sync::watch::channel(false);
+    let mut connections = tokio::task::JoinSet::new();
+    tokio::pin!(shutdown);
+    loop {
+        tokio::select! {
+            () = &mut shutdown => break,
+            accepted = listener.accept() => {
+                let (stream, _peer) = accepted?;
+                let connection = builder
+                    .serve_connection_with_upgrades(
+                        TokioIo::new(stream),
+                        TowerToHyperService::new(app.clone()),
+                    )
+                    .into_owned();
+                let mut drain = drain_tx.subscribe();
+                connections.spawn(async move {
+                    let mut connection = std::pin::pin!(connection);
+                    let result = tokio::select! {
+                        result = connection.as_mut() => result,
+                        _ = drain.changed() => {
+                            connection.as_mut().graceful_shutdown();
+                            connection.as_mut().await
+                        }
+                    };
+                    // A client that never finishes its head produces no
+                    // request log line, so the class gets a connection line.
+                    // The auto builder boxes the connection error, so the
+                    // hyper timeout has to be recovered from it first.
+                    let head_timeout = result.err().is_some_and(|error| {
+                        error
+                            .downcast_ref::<hyper::Error>()
+                            .is_some_and(hyper::Error::is_timeout)
+                    });
+                    if head_timeout {
+                        log(&json!({ "error": "request_head_timeout" }));
+                    }
+                });
+            }
+            Some(_) = connections.join_next() => {}
+        }
+    }
+    let _ = drain_tx.send(true);
+    while connections.join_next().await.is_some() {}
+    Ok(())
 }
 
 async fn handle(State(state): State<Arc<AppState>>, request: Request) -> Response {
