@@ -56,7 +56,7 @@ enum RangeRequest<'a> {
 }
 ```
 
-解析时 `headers.get_all("range")` 用来保留重复字段信息：没有字段是 `None`，恰好一个且 UTF-8 合法才是 `Single`，多个字段行或 `to_str()` 失败都是 `Unusable`（`src/server.rs:512-533`）。`Unusable` 再明确映射为 `RangeDecision::Unsatisfiable`（`src/server.rs:451-456`），最终生成 416、`bytes */<size>`、`Content-Length: 0` 和空 body（`src/server.rs:480-498`）。
+解析时 `headers.get_all("range")` 用来保留重复字段信息：没有字段是 `None`，恰好一个且 UTF-8 合法才是 `Single`，多个字段行或 `to_str()` 失败都是 `Unusable`（`src/server.rs:512-533`）。`Unusable` 再明确映射为 `RangeDecision::Unsatisfiable`（`src/server.rs:451-456`），最终生成 416、`bytes */<size>`、`Content-Length: 0` 和空 body（`src/server.rs:487-498`）。
 
 关键不是枚举名字，而是决策顺序：先确认原始形态是否还能表达成一个受支持的单值，再做业务默认值。`None` 才会进入“无 Range”的 200 路径；畸形输入不能借用该默认值。Range 能力本身的公开契约写明：不可满足、畸形、多 Range 或空文件上的 Range 都答 416（`docs/contracts/ctx-api.md:67`；中文合同同样规定于 `docs/contracts/ctx-api.zh-CN.md:69`）。
 
@@ -84,7 +84,7 @@ enum RangeRequest<'a> {
 
 ### 4. 回归测试要走传输层原始形态，而不是只调用便利 API
 
-便利的 `request` helper 可以表达重复 header，但无法表达非法 UTF-8 的 header 字节；因此 `ctx.file.stream` 的 416 用例使用 `request_raw_range` 手工写 HTTP/1.1 请求字节（`tests/cli.rs:335-359`）。这很重要：如果测试层先经过客户端/字符串类型，`bytes=\x80` 可能在到达 server 前就被拒绝或替换，测试就永远覆盖不到实际的 HeaderValue 解析边界。
+便利的 `request` helper 可以表达重复 header，但无法表达非法 UTF-8 的 header 字节；因此 `ctx.file.stream` 的 416 用例使用 `request_raw_range` 手工写 HTTP/1.1 请求字节（`tests/cli.rs:335-350`）。这很重要：如果测试层先经过客户端/字符串类型，`bytes=\x80` 可能在到达 server 前就被拒绝或替换，测试就永远覆盖不到实际的 HeaderValue 解析边界。
 
 同一原则适用于阻塞对象：FIFO 测试用 `mkfifo` 创建真实对象，并把 sandbox 超时缩短到 500 ms；修复前它会挂到脚本 deadline，修复后必须快速返回可捕获的 `file_io_error`（`tests/cli.rs:1924-1948`）。测试不是断言“某个 helper 返回某个内部枚举”，而是断言客户端最终看到的状态、header 和 body。
 
@@ -150,7 +150,7 @@ fn range_request(headers: &HeaderMap) -> RangeRequest<'_> {
 }
 ```
 
-当前实现见 `src/server.rs:512-533`；`Unusable` 到 416 的映射见 `src/server.rs:451-456`，最终响应见 `src/server.rs:480-498`。公开契约要求不可满足、畸形、多 Range 或空文件 Range 答 `416`、`Content-Range: bytes */<size>`、无 body（`docs/contracts/ctx-api.md:67`）。回归测试 `ctx_file_stream_answers_416_for_unusable_ranges` 在 `tests/cli.rs:1682`，其中 `tests/cli.rs:1697-1708` 发送不可满足、非数字、逗号多 Range、空文件、重复字段行、非 UTF-8 原始字节和内部空白，`tests/cli.rs:1711-1728` 对七种情况逐一断言 416、正确的 `Content-Range`、`Content-Length: 0` 和空 body。非 UTF-8 请求由 `request_raw_range` 发送（`tests/cli.rs:335-359`）。
+当前实现见 `src/server.rs:512-533`；`Unusable` 到 416 的映射见 `src/server.rs:451-456`，最终响应见 `src/server.rs:487-498`。公开契约要求不可满足、畸形、多 Range 或空文件 Range 答 `416`、`Content-Range: bytes */<size>`、无 body（`docs/contracts/ctx-api.md:67`）。回归测试 `ctx_file_stream_answers_416_for_unusable_ranges` 在 `tests/cli.rs:1682`，其中 `tests/cli.rs:1697-1708` 发送不可满足、非数字、逗号多 Range、空文件、重复字段行、非 UTF-8 原始字节和内部空白，`tests/cli.rs:1711-1728` 对七种情况逐一断言 416、正确的 `Content-Range`、`Content-Length: 0` 和空 body。非 UTF-8 请求由 `request_raw_range` 发送（`tests/cli.rs:335-350`）。
 
 ### 例 2：Range 内部空白必须保持为畸形
 
