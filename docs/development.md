@@ -43,10 +43,11 @@ docs: describe the release process
 ## 版本号
 
 - 遵循 Semantic Versioning 2.0.0。
-- tag 格式为 `vMAJOR.MINOR.PATCH`，例如 `v0.1.0-alpha.1`。
+- tag 格式为 `vMAJOR.MINOR.PATCH`，例如 `v0.2.0`；**不使用 prerelease 后缀**（见下一条）。
+- 版本号与 tag 都不带 `-alpha`/`-beta`/`-rc` 后缀：release-plz 的 tag 探测正则是 `^vX.Y.Z$`（上游硬编码的数字组），带后缀的 tag 它看不见，会让它永远认为仓库已是最新、再也不发版本 PR。pre-1.0 的不稳定语义由 `0.x` 版本、CHANGELOG 文字与 release notes 承担；代价是 cargo-dist 不会把这类 GitHub Release 自动标为 pre-release，需要该标记时应单独在 `release-extras` 里补一步（未做）。
 - Cargo 包版本号不带 `v` 前缀。
 - 版本号的唯一来源是 workspace 的 `Cargo.toml`。
-- 预发布顺序：`alpha` → `beta` → `rc` → stable。
+- 预发布阶段用 `0.x` 版本加 CHANGELOG/release notes 文字表达，不再用版本后缀；`1.0.0` 仍是稳定分界。
 - `0.x` minor 版本可以包含破坏性变更；`0.x` patch 版本必须向后兼容。
 - `1.0.0` 要求 CLI、配置格式与 `ctx` API version 1 稳定。
 - 不要在发布 tag 中使用 build metadata。
@@ -60,11 +61,11 @@ docs: describe the release process
 3. `release-plz release-pr` 按 Conventional Commits 计算下一版本，打开或更新 release PR；PR 包含 `Cargo.toml` 与 `CHANGELOG.md` 改动。
 4. 核对 release PR 的版本号、`CHANGELOG.md`、release notes 与 B 层文档的中文译本。
 5. 合并 release PR；下一次 `release-plz release` 会为合并后的版本创建 tag，并触发产物流水线。
-6. `.github/workflows/release.yml` 由 `cargo-dist` 从 `dist-workspace.toml` 生成，只接受 `workflow_dispatch` 的 tag 输入；`.github/release-build-setup.yml` 会在构建前断言 ref 就是 `vMAJOR.MINOR.PATCH[-prerelease]` 形式的输入 tag，且 tag commit 可从 `origin/main` 到达，绝不直接发布 `main`。它构建 Linux x86_64、macOS arm64、Windows x86_64 的 `.tar.gz`/`.zip`、逐文件 `.sha256`、`sha256.sum`、源码归档与 `types/ctx-api-v1.d.ts`，生成 GitHub artifact attestation，并创建 GitHub Release。
+6. `.github/workflows/release.yml` 由 `cargo-dist` 从 `dist-workspace.toml` 生成，只接受 `workflow_dispatch` 的 tag 输入；`.github/release-build-setup.yml` 会在构建前断言 ref 就是 `vMAJOR.MINOR.PATCH` 形式的输入 tag（正则仍接受旧式后缀，供历史 tag 使用），且 tag commit 可从 `origin/main` 到达，绝不直接发布 `main`。它构建 Linux x86_64、macOS arm64、Windows x86_64 的 `.tar.gz`/`.zip`、逐文件 `.sha256`、`sha256.sum`、源码归档与 `types/ctx-api-v1.d.ts`，生成 GitHub artifact attestation，并创建 GitHub Release。
 7. `release-extras` post-announce job 在 Release 创建后生成 CycloneDX SBOM、附加 `SHA256SUMS`、构建并推送 `ghcr.io/geeknonerd/stuntdouble:<tag>`、附加镜像 digest，并用 `gh attestation verify` 验证已发布的 Linux 二进制与容器 attestation。GHCR tag 已存在时复用 digest，不覆盖、不重新生成 provenance，只验证已有 attestation；存在性检查无法确认时 fail closed。
 8. 用“发布验证”中的命令复核 Release；全部资产存在后再公告。
 
-首次发布当前 `0.1.0-alpha.1` 时，第 2 步会为 `Cargo.toml` 中的版本创建 `v0.1.0-alpha.1` tag，第 3 步同时打开下一次版本的 release PR。
+`v0.1.0-alpha.1` 这个旧 tag 对 release-plz 不可见，因此 `0.2.0` 是一次性的桥接版本：版本号与 CHANGELOG 段由人工在同一个 PR 里写好，合并后第 2 步为 `Cargo.toml` 的版本建 tag 并触发产物流水线；此后 tag 形如 `v0.2.0` 能被正常识别，第 3 步恢复由 release-plz 打开版本 PR。
 
 `release-extras` 失败或取消时，会把已公开但不完整的 Release 回退为 draft；修复后优先重跑该 job，若需要更换已有产物则发布新的 patch 或预发布版本。发布失败不得复用或覆盖已有 tag；只有 crates.io 发布损坏时才用 `cargo yank`，绝不删除已发布的版本。
 
