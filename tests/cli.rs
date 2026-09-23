@@ -4019,7 +4019,20 @@ fn demo_fixture(dir: &Path, port: u16) -> PathBuf {
         );
     std::fs::create_dir_all(dir.join("files")).expect("files dir");
     std::fs::create_dir_all(dir.join("scripts")).expect("scripts dir");
-    for script in ["manifest.js", "download.js"] {
+    for file in ["metadata.json", "DOC-0001.pdf", "DOC-0002.pdf"] {
+        std::fs::copy(
+            source.join("files").join(file),
+            dir.join("files").join(file),
+        )
+        .expect("copy demo file");
+    }
+    for script in [
+        "manifest.js",
+        "download.js",
+        "local-manifest.js",
+        "local-download.js",
+        "upload.js",
+    ] {
         std::fs::copy(
             source.join("scripts").join(script),
             dir.join("scripts").join(script),
@@ -4033,12 +4046,73 @@ fn demo_fixture(dir: &Path, port: u16) -> PathBuf {
 
 /// Serve a copy of the repository demo fixture with `env` set.
 fn with_demo<T>(env: &[(&str, &str)], run_tests: impl FnOnce(u16) -> T) -> (T, String) {
+    with_demo_prepared(env, |_| {}, |port, _| run_tests(port))
+}
+
+/// Serve a copy of the repository demo fixture with `env` set. `prepare` runs
+/// after the copy and before the server starts, so a test can substitute
+/// fixture data; `run_tests` also receives the fixture directory so it can
+/// assert what the routes wrote — and did not write — to disk.
+fn with_demo_prepared<T>(
+    env: &[(&str, &str)],
+    prepare: impl Fn(&Path),
+    run_tests: impl FnOnce(u16, &Path) -> T,
+) -> (T, String) {
     let dir = tempfile::tempdir().expect("tempdir");
-    serve_and_run(|port| demo_fixture(dir.path(), port), env, &[], run_tests)
+    let path = dir.path().to_path_buf();
+    serve_and_run(
+        |port| {
+            let config = demo_fixture(&path, port);
+            prepare(&path);
+            config
+        },
+        env,
+        &[],
+        |port| run_tests(port, &path),
+    )
 }
 
 fn demo_manifest_request(port: u16, headers: &[(&str, &str)]) -> Response {
     request(port, "GET", "/demo/documents/manifest/group-a", headers)
+}
+
+fn demo_local_manifest_request(port: u16, headers: &[(&str, &str)]) -> Response {
+    request(
+        port,
+        "GET",
+        "/demo/documents/local-manifest/group-a",
+        headers,
+    )
+}
+
+fn demo_local_download_request(port: u16, document_id: &str, headers: &[(&str, &str)]) -> Response {
+    request(
+        port,
+        "GET",
+        &format!("/demo/documents/local-download/{document_id}"),
+        headers,
+    )
+}
+
+/// The committed bytes of one demo PDF fixture.
+fn fixture_pdf(name: &str) -> Vec<u8> {
+    std::fs::read(Path::new(DEMO_DIR).join("files").join(name)).expect("read demo pdf")
+}
+
+/// Sorted file names in a directory, used to assert that a route wrote nothing.
+fn dir_listing(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .expect("read dir")
+        .map(|entry| {
+            entry
+                .expect("dir entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    names
 }
 
 /// Run one manifest request against a served demo fixture whose
@@ -4420,6 +4494,177 @@ fn demo_manifest_route_does_not_forward_client_request_id() {
         !head.contains("x-request-id"),
         "client header leaked upstream: {}",
         requests[0]
+    );
+}
+
+// Offline file-slice routes: the same document domain served from
+// demo/files/ without an upstream or an environment override.
+
+#[test]
+fn demo_local_manifest_route_returns_the_catalog_csv() {
+    let (response, _) = with_demo(&[], |port| demo_local_manifest_request(port, &[]));
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(
+        response.header("content-type"),
+        Some("text/plain; charset=utf-8")
+    );
+    assert_eq!(
+        response.body,
+        "文件编码,文件标题,系统代码\n\
+         DOC-0001,示例设备 A 安装手册,SYS-A\n\
+         DOC-0002,示例设备 B 运行手册,SYS-B\n"
+    );
+}
+
+#[test]
+fn demo_local_manifest_route_escapes_csv_fields() {
+    // Same escaping case the upstream manifest route covers; the offline
+    // route must answer the identical CSV contract.
+    let metadata = r#"{"data":[
+{"code":"DOC-0003","title":"示例,设备 \"A\"\n第二行","system_code":"SYS,C","file":"DOC-0002.pdf"},
+{"code":"DOC-0004","title":"回车\r换行","system_code":"SYS-D","file":"DOC-0002.pdf"}
+]}"#;
+    let (response, _) = with_demo_prepared(
+        &[],
+        |dir| std::fs::write(dir.join("files/metadata.json"), metadata).expect("write metadata"),
+        |port, _| demo_local_manifest_request(port, &[]),
+    );
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(
+        response.body,
+        "文件编码,文件标题,系统代码\n\
+         DOC-0003,\"示例,设备 \"\"A\"\"\n第二行\",\"SYS,C\"\n\
+         DOC-0004,\"回车\r换行\",SYS-D\n"
+    );
+}
+
+#[test]
+fn demo_local_manifest_route_returns_header_only_for_empty_data() {
+    let (response, _) = with_demo_prepared(
+        &[],
+        |dir| {
+            std::fs::write(dir.join("files/metadata.json"), br#"{"data":[]}"#)
+                .expect("write metadata");
+        },
+        |port, _| demo_local_manifest_request(port, &[]),
+    );
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(response.body, "文件编码,文件标题,系统代码\n");
+}
+
+#[test]
+fn demo_local_download_route_streams_the_fixture_pdf() {
+    let pdf = fixture_pdf("DOC-0001.pdf");
+    let (response, _) = with_demo(&[], |port| {
+        demo_local_download_request(port, "DOC-0001", &[])
+    });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(response.header("content-type"), Some("application/pdf"));
+    assert_eq!(
+        response.header("content-disposition"),
+        Some("attachment;filename=\"DOC-0001.pdf\"")
+    );
+    assert_eq!(response.header("accept-ranges"), Some("bytes"));
+    assert_eq!(
+        response.header("content-length"),
+        Some(pdf.len().to_string().as_str())
+    );
+    assert_eq!(response.body_bytes, pdf);
+}
+
+#[test]
+fn demo_local_download_route_serves_a_range_request() {
+    let pdf = fixture_pdf("DOC-0001.pdf");
+    let (response, _) = with_demo(&[], |port| {
+        demo_local_download_request(port, "DOC-0001", &[("Range", "bytes=0-4")])
+    });
+    assert_eq!(response.status, 206, "body: {}", response.body);
+    assert_eq!(
+        response.header("content-range"),
+        Some(format!("bytes 0-4/{}", pdf.len()).as_str())
+    );
+    assert_eq!(response.header("content-length"), Some("5"));
+    assert_eq!(response.body_bytes, pdf[..5]);
+}
+
+#[test]
+fn demo_local_download_route_answers_416_for_an_unusable_range() {
+    let pdf = fixture_pdf("DOC-0001.pdf");
+    let ((unsatisfiable, malformed), _) = with_demo(&[], |port| {
+        (
+            demo_local_download_request(port, "DOC-0001", &[("Range", "bytes=999999-")]),
+            demo_local_download_request(port, "DOC-0001", &[("Range", "bytes=abc")]),
+        )
+    });
+    for response in [&unsatisfiable, &malformed] {
+        assert_eq!(response.status, 416, "body: {}", response.body);
+        assert_eq!(
+            response.header("content-range"),
+            Some(format!("bytes */{}", pdf.len()).as_str())
+        );
+        assert!(
+            response.body_bytes.is_empty(),
+            "416 carries no body: {}",
+            response.body
+        );
+    }
+}
+
+#[test]
+fn demo_local_download_route_answers_404_for_an_unknown_document() {
+    let (response, _) = with_demo(&[], |port| {
+        demo_local_download_request(port, "DOC-9999", &[])
+    });
+    assert_eq!(response.status, 404, "body: {}", response.body);
+    assert_eq!(
+        response.header("content-type"),
+        Some("application/json; charset=utf-8")
+    );
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("document_not_found"),
+        "body: {}",
+        response.body
+    );
+}
+
+#[test]
+fn demo_upload_route_reports_the_file_and_keeps_no_state() {
+    const UPLOAD: &[u8] = b"%PDF-1.4\n% uploaded, never stored\n%%EOF\n";
+    let ((), _) = with_demo_prepared(
+        &[],
+        |_| {},
+        |port, dir| {
+            let files_dir = dir.join("files");
+            let before = dir_listing(&files_dir);
+            let response = request_multipart(
+                port,
+                "/demo/documents/upload",
+                "sd-demo-upload",
+                &[
+                    MultipartPart::field("note", b"ignored"),
+                    MultipartPart::file("document", "DOC-0002.pdf", "application/pdf", UPLOAD),
+                ],
+            );
+            assert_eq!(response.status, 201, "body: {}", response.body);
+            assert_eq!(
+                response.header("content-type"),
+                Some("application/json; charset=utf-8")
+            );
+            let json: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+            assert_eq!(json["field"], "document");
+            assert_eq!(json["filename"], "DOC-0002.pdf");
+            assert_eq!(json["content_type"], "application/pdf");
+            assert_eq!(json["size"], serde_json::json!(UPLOAD.len()));
+
+            // A later request cannot observe the upload: the committed fixture
+            // still serves its own bytes, and the upload wrote nothing to the
+            // static file root.
+            let download = demo_local_download_request(port, "DOC-0002", &[]);
+            assert_eq!(download.status, 200, "body: {}", download.body);
+            assert_eq!(download.body_bytes, fixture_pdf("DOC-0002.pdf"));
+            assert_eq!(dir_listing(&files_dir), before);
+        },
     );
 }
 
