@@ -1,0 +1,16 @@
+{
+  "data": [
+    {
+      "code": "DOC-0001",
+      "title": "示例设备 A 安装手册",
+      "system_code": "SYS-A",
+      "file": "DOC-0001.pdf"
+    },
+    {
+      "code": "DOC-0002",
+      "title": "示例设备 B 运行手册",
+      "system_code": "SYS-B",
+      "file": "DOC-0002.pdf"
+    }
+  ]
+}

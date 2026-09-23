@@ -1,6 +1,7 @@
 # 示例文档清单与二进制下载场景
 
-> 本文记录一个已验证的公开演示场景：从元数据接口生成 CSV 清单并下载 PDF。
+> 本文记录一个已验证的公开演示场景：从元数据接口生成 CSV 清单并下载 PDF；
+> §3.3–§3.5 另记录 Stunt Double 的离线文件切片夹具（本地清单、本地下载与上传）。
 
 ## 1. 文档目的
 
@@ -8,7 +9,9 @@
 
 实现基于 `json-server@0.17.4`，通过 CLI 的 `--middlewares` 参数加载自定义 Express middleware。Mock 服务对外提供两个固定路径，同时保留 json-server 的默认资源能力。
 
-Stunt Double 复现 §3.1 清单与 §3.2 下载接口的夹具位于 [demo/](../demo/README.md)；与本文参考实现的差异（流式转发、`ctx.http.pipe` 的错误分类、Range 行为）记录在该夹具 README 与 [ADR 0005](adr/0005-upstream-failure-semantics.md) 的 T6 修订中；本文其余部分仍是 json-server 参考实现的记录。
+Stunt Double 复现 §3.1 清单与 §3.2 下载接口的夹具位于 [demo/](../demo/README.md)；与本文参考实现的差异（流式转发、`ctx.http.pipe` 的错误分类、Range 行为）记录在该夹具 README 与 [ADR 0005](adr/0005-upstream-failure-semantics.md) 的 T6 修订中。
+
+§3.3–§3.5 是 Stunt Double 的扩展（T13）：参考实现没有这些路由，它们用仓库内的公开夹具在完全离线、无环境变量覆盖的情况下演示同域文档的本地清单、本地下载（含 Range）与 multipart 上传；契约同样记录在该夹具 README 中。本文其余部分仍是 json-server 参考实现的记录。
 
 ## 2. 需求概述
 
@@ -183,6 +186,154 @@ Content-Disposition: attachment; filename="DOC-0001.pdf"
 5. 请求 PDF 地址；请求采用手动重定向模式。
 6. 对每个重定向目标再次校验 URL 协议，最多跟随 3 次重定向。
 7. 将响应体读为 Buffer，并以 `application/pdf` 返回给客户端。
+
+### 3.3 离线清单：`GET /demo/documents/local-manifest/:group`
+
+> Stunt Double 扩展（T13）：参考实现没有该路由；它用静态文件根下的公开夹具复现 §3.1 的清单契约，全程不访问上游。
+
+#### 路径参数
+
+| 参数 | 说明 |
+| --- | --- |
+| `group` | 与 §3.1 相同：为兼容既有调用方保留，当前实现不使用它筛选数据。 |
+
+#### 请求示例
+
+```bash
+curl -i http://localhost:3000/demo/documents/local-manifest/group-a
+```
+
+#### 成功响应
+
+状态码：`200 OK`
+
+响应头：
+
+```http
+Content-Type: text/plain; charset=utf-8
+```
+
+响应体是普通 UTF-8 文本，CSV 规则与 §3.1 完全一致：表头 `文件编码,文件标题,系统代码`，数据行按 `code,title,system_code`，字段含逗号、双引号、回车或换行时加引号并翻倍内部双引号，结尾一个换行。区别只在数据来源：记录来自静态文件根下的 `files/metadata.json`，不请求元数据接口。
+
+夹具使用 §2.2 的公开演示记录，每条形如：
+
+```json
+{
+  "code": "DOC-0001",
+  "title": "示例设备 A 安装手册",
+  "system_code": "SYS-A",
+  "file": "DOC-0001.pdf"
+}
+```
+
+`file` 是静态文件根内的相对路径，只被 §3.4 使用；与 §3.1 的 `pdf_url` 一样，它不会出现在清单里。
+
+实现规则：
+
+1. 用 `ctx.file.readText("metadata.json")` 读取静态文件根下的夹具，每次请求重新读取（v1 不提供请求间共享状态）。
+2. 解析顶层 `data` 数组，按 §3.1 的规则生成 CSV。
+3. `data` 为空数组时答 200，只有表头行加一个结尾换行。
+4. 夹具缺失、不可读、非 UTF-8、JSON 非法或没有 `data` 数组时，不映射成客户端错误：宿主保留文件/JSON 异常，按引擎默认答 500 `script_error`（`ctx.file` 不会因为文件缺失自动产生 404）。
+
+### 3.4 离线下载：`GET /demo/documents/local-download/:document_id`
+
+> Stunt Double 扩展（T13）：文档匹配语义与 §3.2 相同，PDF 从静态文件根流式读出，全程不访问网络。
+
+#### 路径参数
+
+| 参数 | 说明 |
+| --- | --- |
+| `document_id` | 与 `files/metadata.json` 中元素的 `code` 精确匹配（`String(item.code) === document_id`）。 |
+
+#### 请求示例
+
+```bash
+curl -fSLo DOC-0001.pdf \
+  http://localhost:3000/demo/documents/local-download/DOC-0001
+
+curl -i -H 'Range: bytes=0-1023' \
+  http://localhost:3000/demo/documents/local-download/DOC-0001
+```
+
+#### 成功响应
+
+状态码：`200 OK`（完整响应）或 `206 Partial Content`（合法单区间 `Range`）
+
+响应头：
+
+```http
+Content-Type: application/pdf
+Content-Length: <实际字节数>
+Content-Disposition: attachment;filename="DOC-0001.pdf"
+Accept-Ranges: bytes
+```
+
+`Accept-Ranges`、`Content-Length` 与 `Content-Range` 由宿主负责，脚本不参与；`Content-Type` 由脚本显式设置为 `application/pdf`，不做 MIME 推断。
+
+Range 行为：
+
+| 请求 | 响应 |
+| --- | --- |
+| 无 `Range` | `200`，完整文件 |
+| 合法单区间 `bytes=N-M` / `bytes=N-` / `bytes=-N` | `206`，`Content-Range: bytes N-M/<size>`，区间末端按文件长度截断 |
+| 不可满足、格式非法、多区间，或在空文件上请求 Range | `416`，`Content-Range: bytes */<size>`，无响应体 |
+| 携带 `If-Range` | 关闭 Range 处理，答 `200` 完整文件 |
+
+错误行为：
+
+| 场景 | HTTP 状态 | 响应示例 |
+| --- | ---: | --- |
+| `document_id` 不在夹具 `data` 中 | `404` | `{"error":"document_not_found"}` |
+| 夹具缺失、不可读、JSON 非法或没有 `data` 数组 | `500` | 引擎默认 `{"error":"script_error",...}` |
+| 匹配记录的 `file` 缺失、为绝对路径、含 `..` 或解析后逃出静态文件根 | `500` | 引擎默认 `{"error":"script_error",...}` |
+
+实现规则：
+
+1. 用 `ctx.file.readText("metadata.json")` 读取夹具并解析 `data`。
+2. 按 `code` 精确匹配；找不到匹配项时直接答 404，不打开任何文件。
+3. 用匹配记录的 `file` 调用 `ctx.file.stream(file)`，把文件流作为 `ctx.respond(200, ...)` 的 body，字节不进入脚本堆。
+4. 文件打开失败（不存在、路径越界、不是普通文件）是脚本可捕获的错误；本夹具不捕获，按引擎默认答 500 `script_error`。
+
+### 3.5 上传：`POST /demo/documents/upload`
+
+> Stunt Double 扩展（T13）：宿主在脚本运行前解析 multipart，把文件 part 放进请求级临时存储并暴露为 `ctx.request.files`；该路由只回显元数据，不持久化任何内容。
+
+#### 请求示例
+
+```bash
+curl -i -F document=@DOC-0001.pdf \
+  http://localhost:3000/demo/documents/upload
+```
+
+#### 成功响应
+
+状态码：`201 Created`
+
+响应头：
+
+```http
+Content-Type: application/json; charset=utf-8
+```
+
+响应体描述第一个文件 part：
+
+```json
+{"field":"document","filename":"DOC-0001.pdf","content_type":"application/pdf","size":596}
+```
+
+| 字段 | 来源 |
+| --- | --- |
+| `field` | part 的 `name` 属性（`ctx.request.files[].field`） |
+| `filename` | 客户端提供的 basename，`/` 与 `\` 路径组件会被剥离（`ctx.request.files[].filename`） |
+| `content_type` | part 的 `Content-Type`，缺失时为 `null` |
+| `size` | 该 part 的数据字节数，不含 framing |
+
+行为：
+
+1. 命中的 `multipart/form-data` 请求在脚本运行前由宿主解析；非文件表单字段被忽略，但仍计入 `files.upload_max_bytes`。
+2. 路由取 `ctx.request.files[0]`（第一个文件 part）并回显上述字段；请求没有任何文件 part 时本夹具没有响应契约（脚本取不到元素，按引擎默认答 500 `script_error`）。
+3. 不持久化：内容只存在于按请求创建、请求结束时清理的临时存储里；静态文件根不写入任何内容，后续请求无法观察到本次上传。
+4. part 缺少 `name` 属性或 multipart 结构非法时，宿主在脚本运行前答 400 `invalid_multipart`；文件与表单字段数据超过 `files.upload_max_bytes` 时答 413 `upload_too_large`，脚本不会运行（见[配置契约](../docs/contracts/config.md)）。
 
 ## 4. 状态码与错误响应
 

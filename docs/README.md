@@ -15,7 +15,7 @@
 - [README](../README.md) — 项目概览与当前状态。
 - [中文 README](../README.zh-CN.md) — 中文项目说明。
 - [产品功能定义](../plans/product-definition.md) — v1 范围与不做清单。
-- [演示夹具](../demo/README.md) — 可运行的清单场景、上游覆盖、契约与错误映射。
+- [演示夹具](../demo/README.md) — 可运行的清单场景、上游覆盖、离线文件路由（本地清单、本地下载与上传）、契约与错误映射。
 - [架构决策](../plans/adr/) — ADR 0001–0013。
 - [调研](../research/) — mock server 生态、运行时选型与开源基线。
 - [解决方案](solutions/) — 经 ce-compound 沉淀的经验与已解决问题。

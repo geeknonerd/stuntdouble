@@ -6,6 +6,10 @@
 # METADATA_API_URL is optional: the scripts fall back to the same public demo
 # URL. Only hosts listed in [upstream] allow_hosts can be reached: the metadata
 # API plus the demo PDF host used by the catalog fixture.
+#
+# The local-* routes serve the fixtures under ./files, and the upload route
+# answers request-scoped multipart metadata; all three need no upstream and
+# no environment overrides.
 config_version = "1"
 
 [server]
@@ -30,3 +34,21 @@ name = "document-download"
 method = "GET"
 path = "/demo/documents/download/:document_id"
 script = "scripts/download.js"
+
+[[routes]]
+name = "document-local-manifest"
+method = "GET"
+path = "/demo/documents/local-manifest/:group"
+script = "scripts/local-manifest.js"
+
+[[routes]]
+name = "document-local-download"
+method = "GET"
+path = "/demo/documents/local-download/:document_id"
+script = "scripts/local-download.js"
+
+[[routes]]
+name = "document-upload"
+method = "POST"
+path = "/demo/documents/upload"
+script = "scripts/upload.js"

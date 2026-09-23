@@ -24,7 +24,7 @@ T4 确定了 `ctx.http.get` 的引擎边界：最终的非重定向 HTTP 响应�
 
 这条引擎边界不等于客户端可见的错误表。此前会话的一次探查（会话历史，2026-09-20 T4）显示有三个问题被有意留待决定：manifest JSON 解析失败或缺少 `data` 数组属于哪一类、allowlist／URL 策略拒绝应以什么形式暴露、以及随仓库发布的 demo fixture 应如何在测试中驱动。T5（issue #8）在 fixture 内回答了它们并已合并；T6（issue #9，PR #19）增加了流式下载路由，并已合并到 main。两者都随仓库从 `demo/` 发布。
 
-`demo/stuntdouble.toml` 声明了 `GET /demo/documents/manifest/:group` 与 `GET /demo/documents/download/:document_id`，`allow_hosts = ["metadata.example.com", "files.example.com"]`。配置契约要求 `files.root` 是已存在的目录（`docs/contracts/config.md`、`src/config.rs`），这就是 fixture 携带 `demo/files/.gitkeep` 的原因。
+`demo/stuntdouble.toml` 声明了 `GET /demo/documents/manifest/:group` 与 `GET /demo/documents/download/:document_id`，`allow_hosts = ["metadata.example.com", "files.example.com"]`；T13 起它还声明同域的离线路由（本地清单、本地下载与 multipart 上传），这些路由不读取 `METADATA_API_URL`，见 [演示夹具 README](../../../demo/README.md)。配置契约要求 `files.root` 是已存在的目录（`docs/contracts/config.md`、`src/config.rs`）；T5 时该目录只靠 `demo/files/.gitkeep` 存在，T13 起目录内是真实夹具（`metadata.json` 与两张公开 PDF）。
 
 两个脚本都读取 `ctx.env.METADATA_API_URL`（默认 `https://metadata.example.com/demo/documents`）。manifest 脚本答固定表头 `文件编码,文件标题,系统代码`，行数据按 `code,title,system_code` 顺序；任何包含逗号、双引号、CR 或 LF 的字段都会加引号、内部双引号翻倍，且始终以一个换行结尾；`data` 为空数组时只答表头行（`demo/scripts/manifest.js`）。
 
