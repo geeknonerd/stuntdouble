@@ -53,7 +53,7 @@ gh attestation verify stuntdouble-x86_64-unknown-linux-gnu.tar.gz --repo geeknon
 - 内置 JavaScript 运行时：Boa。
 - 内置 Python 运行时：RustPython stdlib 子集。
 - 宿主注入 `ctx` API，不暴露裸 `fetch`、`fs`、`os`、`subprocess`、`socket`。
-- 上游 HTTP（`ctx.http.get` 与支持 Range 透传的流式 `ctx.http.pipe` 已实现，`ctx.http.request` 待后续切片）`ctx.file` 读取、文件流、本地文件 Range 响应，以及通过 `ctx.request.files` 暴露的请求级 multipart 上传。
+- 上游 HTTP（`ctx.http.get` 与支持 Range 透传的流式 `ctx.http.pipe` 已实现，`ctx.http.request` 待后续切片）、`ctx.file` 读取、文件流、本地文件 Range 响应，以及通过 `ctx.request.files` 暴露的请求级 multipart 上传。
 - 唯一静态文件根，并阻止路径穿越。
 - 静态配置 + 重启。热重载与 Admin API 推迟。
 - Linux x86_64、macOS arm64、Windows x86_64 二进制与容器镜像（T9 已配置发布自动化）。
