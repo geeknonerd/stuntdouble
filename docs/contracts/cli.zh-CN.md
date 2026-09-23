@@ -4,7 +4,7 @@
 
 > 本页是英文版 [cli.md](./cli.md) 的译本；如有出入，以英文版为准。
 
-- **状态**：v1 切片已冻结；增量更新至 T12
+- **状态**：v1 切片已冻结；版本 "1" 内允许增量更新
 - **适用**：v0.1.0-alpha.1 及以后、同一 CLI 家族内的 `stuntdouble` 二进制
 - **稳定性**：1.0 之前的破坏性变更需带弃用窗口
 
@@ -23,9 +23,9 @@
 stuntdouble serve [--config <path>] [--verbose]
 ```
 
-启动 mock server 并绑定到配置的地址。命中的 Route 在内置 Boa 运行时中执行其 JavaScript，宿主注入 `ctx`，包含 allowlist 约束的 `ctx.http.get` 调用、流式 `ctx.http.pipe` 调用，带根限制的 `ctx.file` 读取与流式本地文件响应，以及通过 `ctx.request.files` 暴露的请求级 multipart 上传；未命中的 Route 返回 404 `not_found`。命中的 multipart 请求在脚本运行前解析：multipart 畸形返回 400 `invalid_multipart`，文件与非文件字段数据超过 `files.upload_max_bytes` 返回 413 `upload_too_large`，非 multipart body 超过 2 MiB 上限时保持原有的有界 413 响应。命中的 Route 在 `server.request_timeout_ms` 内没有读完请求头或请求体时返回 408 `request_timeout`；请求头超时则直接关闭连接，因为此时还写不出任何 Response。脚本失败返回 500 `script_error` 或 `script_no_response`；未捕获的上游传输层失败返回 502 `upstream_unreachable`。
+启动 mock server 并绑定到配置的地址。命中的 Route 在内置 Boa 运行时中执行其 JavaScript，宿主注入 `ctx`，包含 allowlist 约束的 `ctx.http.get` 调用、流式 `ctx.http.pipe` 调用，带根限制的 `ctx.file` 读取与流式本地文件响应，以及通过 `ctx.request.files` 暴露的请求级 multipart 上传；未命中的 Route 返回 404 `not_found`。命中的 multipart 请求在脚本运行前解析：multipart 畸形返回 400 `invalid_multipart`，文件与非文件字段数据超过 `files.upload_max_bytes` 返回 413 `upload_too_large`，非 multipart body 超过 2 MiB 上限时保持原有的有界 413 响应。命中的 Route 在 `server.request_timeout_ms` 内没有读完请求体或解析完 multipart 时返回 408 `request_timeout`；请求头始终没有读完则直接关闭连接并记为 `request_head_timeout`，因为此时还写不出任何 Response。脚本失败返回 500 `script_error` 或 `script_no_response`；未捕获的上游传输层失败返回 502 `upstream_unreachable`。
 
-`--verbose` 会为引擎生成的 JSON 错误 body 附加 `detail` 字段，包括 multipart 400/413 与引擎 500/502 响应。它的值是稳定的失败类别，例如 `script execution failed`、`script exceeded the configured timeout`、`upstream transport failure: timeout`、`upstream transport failure: dns` 或 `upstream transport failure: transport`；绝不包含堆栈、脚本消息、上游 body、hostname、IP 地址或 URL。不开启该 flag 时，错误 body 只含 `error` 与 `request_id`。该 flag 只用于本地诊断，不要在共享环境开启。404 `not_found` 响应永远不带 `detail`；非 multipart 413 响应 body 为空，也不带 `detail`。
+`--verbose` 会为引擎生成的 JSON 错误 body 附加 `detail` 字段，包括 multipart 400/413、请求体 408 与引擎 500/502 响应。它的值是稳定的失败类别，例如 `script execution failed`、`script exceeded the configured timeout`、`upstream transport failure: timeout`、`upstream transport failure: dns` 或 `upstream transport failure: transport`；绝不包含堆栈、脚本消息、上游 body、hostname、IP 地址或 URL。不开启该 flag 时，错误 body 只含 `error` 与 `request_id`。该 flag 只用于本地诊断，不要在共享环境开启。404 `not_found` 响应永远不带 `detail`；非 multipart 413 响应 body 为空，也不带 `detail`。
 
 默认配置路径是 `stuntdouble.toml`。配置必须包含非空 `routes` 数组；每条 Route 指定 method、path、脚本位置与可选 name。完整 schema 规则见[配置契约](config.zh-CN.md)。
 

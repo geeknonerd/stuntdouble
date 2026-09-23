@@ -13,8 +13,8 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use axum::Router;
-use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
-use hyper_util::server::conn::auto::Builder as ConnectionBuilder;
+use hyper::server::conn::http1::Builder as ConnectionBuilder;
+use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::service::TowerToHyperService;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
@@ -381,19 +381,20 @@ pub async fn run(
 /// Serve accepted connections until `shutdown` resolves, then drain them.
 ///
 /// hyper enforces `header_read_timeout` only once a timer is configured, and
-/// the `axum::serve` loop sets neither, so this loop replaces it. Everything
-/// else keeps the previous behavior: one task per connection, a graceful
-/// shutdown for in-flight connections, and no new connection after the first
-/// shutdown signal.
+/// the `axum::serve` loop sets neither, so this loop replaces it. The
+/// HTTP/1-only builder is deliberate: the auto builder first sniffs up to 24
+/// bytes for an HTTP/2 preface without any deadline, which would leave a short
+/// request head unbounded. Everything else keeps the previous behavior: one
+/// task per connection, a graceful shutdown for in-flight connections, and no
+/// new connection after the first shutdown signal.
 async fn serve_connections(
     listener: tokio::net::TcpListener,
     app: Router,
     head_deadline: Duration,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
-    let mut builder = ConnectionBuilder::new(TokioExecutor::new());
+    let mut builder = ConnectionBuilder::new();
     builder
-        .http1()
         .timer(TokioTimer::new())
         .header_read_timeout(Some(head_deadline));
     // Every connection watches this channel so the first shutdown signal can
@@ -406,14 +407,12 @@ async fn serve_connections(
             () = &mut shutdown => break,
             accepted = listener.accept() => {
                 let (stream, _peer) = accepted?;
-                let connection = builder
-                    .serve_connection_with_upgrades(
-                        TokioIo::new(stream),
-                        TowerToHyperService::new(app.clone()),
-                    )
-                    .into_owned();
+                // The connection borrows its builder, so the task owns a clone.
+                let builder = builder.clone();
+                let service = TowerToHyperService::new(app.clone());
                 let mut drain = drain_tx.subscribe();
                 connections.spawn(async move {
+                    let connection = builder.serve_connection(TokioIo::new(stream), service);
                     let mut connection = std::pin::pin!(connection);
                     let result = tokio::select! {
                         result = connection.as_mut() => result,
@@ -424,14 +423,7 @@ async fn serve_connections(
                     };
                     // A client that never finishes its head produces no
                     // request log line, so the class gets a connection line.
-                    // The auto builder boxes the connection error, so the
-                    // hyper timeout has to be recovered from it first.
-                    let head_timeout = result.err().is_some_and(|error| {
-                        error
-                            .downcast_ref::<hyper::Error>()
-                            .is_some_and(hyper::Error::is_timeout)
-                    });
-                    if head_timeout {
+                    if result.is_err_and(|error| error.is_timeout()) {
                         log(&json!({ "error": "request_head_timeout" }));
                     }
                 });
@@ -565,7 +557,11 @@ fn map_handled(
         },
         Handled::UploadFailed(failure) => upload_failed_mapped(failure, request_id, verbose),
         Handled::RequestTimeout => {
-            let body = error_body(request_id, "request_timeout", None);
+            let body = error_body(
+                request_id,
+                "request_timeout",
+                verbose.then_some("request body read timeout"),
+            );
             Mapped {
                 status: StatusCode::REQUEST_TIMEOUT,
                 error_class: "request_timeout",

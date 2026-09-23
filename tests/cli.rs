@@ -4756,23 +4756,39 @@ fn demo_upload_route_reports_the_file_and_keeps_no_state() {
 /// request deadline instead of holding the connection until the client leaves.
 #[test]
 fn slow_non_multipart_body_answers_408_request_timeout() {
+    const ANNOUNCED: usize = 64 * 1024;
     let dir = tempfile::tempdir().expect("tempdir");
     let config = with_partial_body_route(good_config(), 300);
-    let (response, _) = serve_upload_fixture(dir.path(), &config, OK_SCRIPT, &[], |port| {
-        request_partial_body(
-            port,
-            "/demo/documents/manifest/group-a",
-            "text/plain",
-            64 * 1024,
-            b"partial body",
-        )
-    });
+    let (response, log) = serve_and_run(
+        |port| fixture_with_script(dir.path(), port, &config, OK_SCRIPT),
+        &[],
+        &["--verbose"],
+        |port| {
+            request_partial_body(
+                port,
+                "/demo/documents/manifest/group-a",
+                "text/plain",
+                ANNOUNCED,
+                b"partial body",
+            )
+        },
+    );
     assert_eq!(response.status, 408, "body: {}", response.body);
     assert_eq!(
         error_class(&response.body).as_deref(),
         Some("request_timeout"),
         "body: {}",
         response.body
+    );
+    assert!(
+        response.body.contains("request body read timeout"),
+        "verbose detail missing: {}",
+        response.body
+    );
+    assert!(log.contains("\"error\":\"request_timeout\""), "log: {log}");
+    assert!(
+        log.contains(&format!("\"request_body_bytes\":{ANNOUNCED}")),
+        "log: {log}"
     );
 }
 
@@ -4786,7 +4802,7 @@ fn slow_multipart_body_answers_408_and_cleans_up() {
     let partial = b"--sd-slow-body\r\nContent-Disposition: form-data; name=\"document\"; \
         filename=\"big.bin\"\r\nContent-Type: application/octet-stream\r\n\r\nabc";
     let temp_env = temp_root.to_str().expect("temp root path");
-    let (response, _) = serve_upload_fixture(
+    let (response, log) = serve_upload_fixture(
         dir.path(),
         &config,
         OK_SCRIPT,
@@ -4808,6 +4824,8 @@ fn slow_multipart_body_answers_408_and_cleans_up() {
         "body: {}",
         response.body
     );
+    assert!(log.contains("\"error\":\"request_timeout\""), "log: {log}");
+    assert!(log.contains("\"request_body_bytes\":65536"), "log: {log}");
     wait_for_empty_temp(&temp_root);
 }
 
@@ -4822,9 +4840,9 @@ fn slow_request_head_is_closed_at_the_deadline() {
         stream
             .set_read_timeout(Some(Duration::from_secs(10)))
             .expect("read timeout");
-        stream
-            .write_all(b"GET /demo/documents/manifest/group-a HTTP/1.1\r\nHost: 127.0.0.1\r\n")
-            .expect("write partial head");
+        // One byte is deliberate: fewer than the 24 bytes an HTTP/2 preface
+        // sniff would wait for, so a sniffing connection loop would hang here.
+        stream.write_all(b"G").expect("write one head byte");
         stream.flush().expect("flush");
         // A half-read head has no HTTP answer: the server must close instead.
         let mut buffer = [0_u8; 64];

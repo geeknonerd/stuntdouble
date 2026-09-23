@@ -19,7 +19,7 @@ tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 axum = { version = "0.8", features = ["multipart"] }
 hyper = { version = "1", features = ["http1", "server"] }
-hyper-util = { version = "0.1", features = ["http1", "server", "server-auto", "service", "tokio"] }
+hyper-util = { version = "0.1", features = ["service", "tokio"] }
 boa_engine = { version = "0.22", default-features = false }
 url = "2"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
