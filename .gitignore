@@ -5,3 +5,5 @@ private/
 *.local
 *.local.md
 .codegraph/
+# release-plz CLI schema dump (release-plz generate-schema)
+.schema/

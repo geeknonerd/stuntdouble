@@ -7,4 +7,7 @@ publish = false
 git_release_enable = false
 git_tag_enable = true
 # Published state is derived from git tags because the crate is not on crates.io.
+# Its tag detection regex is `^vX.Y.Z$` (numeric version group, hard-coded
+# upstream), so prerelease tags are invisible and must never be used as
+# release markers; keep Cargo.toml versions plain `MAJOR.MINOR.PATCH`.
 git_only = true
