@@ -311,6 +311,45 @@ fn request_bytes(
     read_response(&mut stream)
 }
 
+/// Send a request head plus an incomplete body, then read the answer without
+/// ever finishing the announced body.
+fn request_partial_body(
+    port: u16,
+    path: &str,
+    content_type: &str,
+    announced: usize,
+    partial: &[u8],
+) -> Response {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .expect("read timeout");
+    let head = format!(
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Type: {content_type}\r\nContent-Length: {announced}\r\n\r\n"
+    );
+    stream.write_all(head.as_bytes()).expect("write head");
+    stream.write_all(partial).expect("write partial body");
+    stream.flush().expect("flush");
+    read_response_until_complete(&mut stream)
+}
+
+/// Give a fixture config a short request deadline.
+fn with_request_timeout(body: &str, timeout_ms: u64) -> String {
+    body.replace(
+        "port = {port}",
+        &format!("port = {{port}}\nrequest_timeout_ms = {timeout_ms}"),
+    )
+}
+
+/// The same deadline plus a POST route, so a test can send an unfinished body
+/// to a matched route.
+fn with_partial_body_route(body: &str, timeout_ms: u64) -> String {
+    format!(
+        "{}\n[[routes]]\nname = \"partial-body\"\nmethod = \"POST\"\npath = \"/demo/documents/manifest/group-a\"\nscript = \"scripts/manifest.js\"\n",
+        with_request_timeout(body, timeout_ms)
+    )
+}
+
 /// One part in a test-built multipart body. `filename` distinguishes a file
 /// field from a non-file form field.
 struct MultipartPart<'a> {
@@ -552,6 +591,36 @@ fn wait_for_empty_temp(root: &Path) {
 fn read_response(stream: &mut TcpStream) -> Response {
     let mut bytes = Vec::new();
     stream.read_to_end(&mut bytes).expect("read response");
+    parse_response(&bytes)
+}
+
+/// Read one complete response without waiting for EOF, so a test that leaves a
+/// request body unfinished can still assert on the server's answer.
+fn read_response_until_complete(stream: &mut TcpStream) -> Response {
+    let mut bytes = Vec::new();
+    let mut buffer = [0_u8; 1024];
+    let mut expected_body = None;
+    loop {
+        if let Some(head_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+            let body_len = *expected_body.get_or_insert_with(|| {
+                String::from_utf8_lossy(&bytes[..head_end])
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
+                    .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0)
+            });
+            if bytes.len() >= head_end + 4 + body_len {
+                return parse_response(&bytes);
+            }
+        }
+        let read = stream.read(&mut buffer).expect("read response");
+        assert_ne!(read, 0, "server closed before the response completed");
+        bytes.extend_from_slice(&buffer[..read]);
+    }
+}
+
+fn parse_response(bytes: &[u8]) -> Response {
     let head_end = bytes
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
@@ -892,6 +961,21 @@ script = "scripts/manifest.js"
         "defaults missing: {stderr}"
     );
     assert!(stderr.contains("GET /x"), "method not normalised: {stderr}");
+}
+
+#[test]
+fn validate_rejects_a_non_positive_server_request_timeout() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let broken = with_request_timeout(good_config(), 0);
+    let config = fixture(dir.path(), 3000, &broken);
+    let (code, _, stderr) = run(&["validate", "--config", config.to_str().unwrap()]);
+    assert_eq!(code, 2, "expected configuration error, stderr: {stderr}");
+    assert!(
+        stderr.contains(
+            "server.request_timeout_ms: expected integer number of milliseconds greater than 0"
+        ),
+        "stderr: {stderr}"
+    );
 }
 
 #[test]
@@ -4666,6 +4750,65 @@ fn demo_upload_route_reports_the_file_and_keeps_no_state() {
             assert_eq!(dir_listing(&files_dir), before);
         },
     );
+}
+
+/// A matched route whose body never finishes must be cut off by the configured
+/// request deadline instead of holding the connection until the client leaves.
+#[test]
+fn slow_non_multipart_body_answers_408_request_timeout() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = with_partial_body_route(good_config(), 300);
+    let (response, _) = serve_upload_fixture(dir.path(), &config, OK_SCRIPT, &[], |port| {
+        request_partial_body(
+            port,
+            "/demo/documents/manifest/group-a",
+            "text/plain",
+            64 * 1024,
+            b"partial body",
+        )
+    });
+    assert_eq!(response.status, 408, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("request_timeout"),
+        "body: {}",
+        response.body
+    );
+}
+
+/// The multipart path must time out mid-parse, answer 408, and drop the
+/// request-scoped temporary storage the parse had already created.
+#[test]
+fn slow_multipart_body_answers_408_and_cleans_up() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let temp_root = upload_temp_root(dir.path());
+    let config = with_partial_body_route(good_config(), 300);
+    let partial = b"--sd-slow-body\r\nContent-Disposition: form-data; name=\"document\"; \
+        filename=\"big.bin\"\r\nContent-Type: application/octet-stream\r\n\r\nabc";
+    let temp_env = temp_root.to_str().expect("temp root path");
+    let (response, _) = serve_upload_fixture(
+        dir.path(),
+        &config,
+        OK_SCRIPT,
+        &[("TMPDIR", temp_env), ("TMP", temp_env), ("TEMP", temp_env)],
+        |port| {
+            request_partial_body(
+                port,
+                "/demo/documents/manifest/group-a",
+                "multipart/form-data; boundary=sd-slow-body",
+                64 * 1024,
+                partial,
+            )
+        },
+    );
+    assert_eq!(response.status, 408, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("request_timeout"),
+        "body: {}",
+        response.body
+    );
+    wait_for_empty_temp(&temp_root);
 }
 
 #[cfg(unix)]

@@ -100,15 +100,20 @@ impl AppState {
         let label = route.name.clone().unwrap_or_else(|| route.path.clone());
         let params = found.params;
 
-        match self
-            .prepare_request(request, &method, &uri, &headers, &params)
-            .await
+        // One deadline for the whole inbound request body, multipart parsing
+        // included; the script deadline stays separate in `sandbox`.
+        let body_deadline = Duration::from_millis(self.config.server.request_timeout_ms);
+        match tokio::time::timeout(
+            body_deadline,
+            self.prepare_request(request, &method, &uri, &headers, &params),
+        )
+        .await
         {
-            Ok(prepared) => self.run_script(route_index, label, params, prepared).await,
-            Err(PrepareError::Upload {
+            Ok(Ok(prepared)) => self.run_script(route_index, label, params, prepared).await,
+            Ok(Err(PrepareError::Upload {
                 failure,
                 request_body_bytes,
-            }) => Routed {
+            })) => Routed {
                 route_label: label,
                 params,
                 handled: Handled::UploadFailed(failure),
@@ -123,7 +128,7 @@ impl AppState {
                     Some(failure.code()),
                 ),
             },
-            Err(PrepareError::BodyTooLarge { request_body_bytes }) => Routed {
+            Ok(Err(PrepareError::BodyTooLarge { request_body_bytes })) => Routed {
                 route_label: label,
                 params,
                 handled: Handled::BodyTooLarge,
@@ -133,6 +138,19 @@ impl AppState {
                 script_duration_ms: None,
                 request_body_bytes,
                 upload: upload_log(0, 0, None),
+            },
+            // The parse future is dropped here, which also drops the upload
+            // store's temporary directory.
+            Err(_elapsed) => Routed {
+                route_label: label,
+                params,
+                handled: Handled::RequestTimeout,
+                script_logs: Vec::new(),
+                upstream_calls: Vec::new(),
+                file_calls: files::CallLog::default(),
+                script_duration_ms: None,
+                request_body_bytes: files::content_length(&headers),
+                upload: upload_log(0, 0, Some("request_timeout")),
             },
         }
     }
@@ -300,6 +318,8 @@ enum Handled {
     NotFound,
     /// The request body exceeded the non-multipart extractor limit.
     BodyTooLarge,
+    /// Reading or parsing the request body exceeded the configured deadline.
+    RequestTimeout,
     /// Multipart parsing failed before the script could run.
     UploadFailed(files::ParseFailure),
     /// The script did not produce a response.
@@ -476,6 +496,16 @@ fn map_handled(
             body: MappedBody::Ready(Body::empty()),
         },
         Handled::UploadFailed(failure) => upload_failed_mapped(failure, request_id, verbose),
+        Handled::RequestTimeout => {
+            let body = error_body(request_id, "request_timeout", None);
+            Mapped {
+                status: StatusCode::REQUEST_TIMEOUT,
+                error_class: "request_timeout",
+                headers: HeaderMap::new(),
+                body_bytes: u64::try_from(body.len()).ok(),
+                body: MappedBody::Ready(Body::from(body)),
+            }
+        }
         Handled::NotFound => {
             let body = error_body(request_id, "not_found", None);
             Mapped {
