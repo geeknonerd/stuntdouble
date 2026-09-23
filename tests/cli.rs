@@ -314,7 +314,7 @@ fn request_bytes(
 /// One part in a test-built multipart body. `filename` distinguishes a file
 /// field from a non-file form field.
 struct MultipartPart<'a> {
-    name: &'a str,
+    name: Option<&'a str>,
     filename: Option<&'a str>,
     content_type: Option<&'a str>,
     data: &'a [u8],
@@ -323,7 +323,7 @@ struct MultipartPart<'a> {
 impl<'a> MultipartPart<'a> {
     fn field(name: &'a str, data: &'a [u8]) -> Self {
         Self {
-            name,
+            name: Some(name),
             filename: None,
             content_type: None,
             data,
@@ -332,7 +332,16 @@ impl<'a> MultipartPart<'a> {
 
     fn file(name: &'a str, filename: &'a str, content_type: &'a str, data: &'a [u8]) -> Self {
         Self {
-            name,
+            name: Some(name),
+            filename: Some(filename),
+            content_type: Some(content_type),
+            data,
+        }
+    }
+
+    fn unnamed_file(filename: &'a str, content_type: &'a str, data: &'a [u8]) -> Self {
+        Self {
+            name: None,
             filename: Some(filename),
             content_type: Some(content_type),
             data,
@@ -344,7 +353,10 @@ fn multipart_body(boundary: &str, parts: &[MultipartPart<'_>]) -> Vec<u8> {
     let mut body = Vec::new();
     for part in parts {
         body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
-        let mut disposition = format!("Content-Disposition: form-data; name=\"{}\"", part.name);
+        let mut disposition = String::from("Content-Disposition: form-data");
+        if let Some(name) = part.name {
+            let _ = write!(disposition, "; name=\"{name}\"");
+        }
         if let Some(filename) = part.filename {
             let _ = write!(disposition, "; filename=\"{filename}\"");
         }
@@ -1944,6 +1956,86 @@ ctx.respond(200, {}, "unreachable");
         assert_eq!(log["error"], "invalid_multipart");
         assert_eq!(log["upload"]["error"], "invalid_multipart");
     }
+}
+
+#[test]
+fn multipart_part_without_name_is_invalid() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = r#"
+ctx.log.info("script-ran");
+ctx.respond(200, {}, "unreachable");
+"#;
+    let (response, stderr) = serve_upload_fixture(
+        dir.path(),
+        &upload_config(1024 * 1024),
+        script,
+        &[],
+        |port| {
+            request_multipart(
+                port,
+                "/demo/documents/manifest/group-a",
+                "sd-unnamed",
+                &[MultipartPart::unnamed_file(
+                    "x.bin",
+                    "application/octet-stream",
+                    b"x",
+                )],
+            )
+        },
+    );
+    assert_eq!(response.status, 400, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("invalid_multipart")
+    );
+    assert!(!stderr.contains("script-ran"), "stderr: {stderr}");
+    let log: serde_json::Value = stderr
+        .lines()
+        .find(|line| line.contains("\"request_id\""))
+        .map(|line| serde_json::from_str(line).expect("structured log json"))
+        .expect("request log");
+    assert_eq!(log["error"], "invalid_multipart");
+    assert_eq!(log["upload"]["error"], "invalid_multipart");
+}
+
+#[test]
+fn chunked_invalid_boundary_logs_unknown_request_body_bytes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = r#"
+ctx.respond(200, {}, "unreachable");
+"#;
+    let (response, stderr) = serve_upload_fixture(
+        dir.path(),
+        &upload_config(1024 * 1024),
+        script,
+        &[],
+        |port| {
+            request_chunked_bytes(
+                port,
+                "POST",
+                "/demo/documents/manifest/group-a",
+                &[("Content-Type", "multipart/form-data")],
+                &[b"x"],
+            )
+        },
+    );
+    assert_eq!(response.status, 400, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("invalid_multipart")
+    );
+    let log: serde_json::Value = stderr
+        .lines()
+        .find(|line| line.contains("\"request_id\""))
+        .map(|line| serde_json::from_str(line).expect("structured log json"))
+        .expect("request log");
+    assert_eq!(
+        log["request_body_bytes"],
+        serde_json::Value::Null,
+        "log: {log}"
+    );
+    assert_eq!(log["upload"]["total_bytes"], 0);
+    assert_eq!(log["upload"]["error"], "invalid_multipart");
 }
 
 #[test]

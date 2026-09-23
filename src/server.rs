@@ -117,7 +117,11 @@ impl AppState {
                 file_calls: files::CallLog::default(),
                 script_duration_ms: None,
                 request_body_bytes,
-                upload: upload_log(failure.files(), failure.total_bytes(), Some(failure.code())),
+                upload: upload_log(
+                    failure.files(),
+                    failure.counted_bytes().unwrap_or(0),
+                    Some(failure.code()),
+                ),
             },
             Err(PrepareError::BodyTooLarge { request_body_bytes }) => Routed {
                 route_label: label,
@@ -152,7 +156,7 @@ impl AppState {
                 .is_some_and(|len| len > max_bytes.saturating_add(MULTIPART_FRAMING_ALLOWANCE))
             {
                 return Err(PrepareError::Upload {
-                    failure: files::ParseFailure::too_large(0, 0),
+                    failure: files::ParseFailure::too_large(0, None),
                     request_body_bytes: content_length,
                 });
             }
@@ -179,7 +183,7 @@ impl AppState {
                 }
                 Err(failure) => Err(PrepareError::Upload {
                     failure,
-                    request_body_bytes: content_length.or(Some(failure.total_bytes())),
+                    request_body_bytes: content_length.or(failure.counted_bytes()),
                 }),
             }
         } else {

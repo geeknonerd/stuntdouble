@@ -227,23 +227,41 @@ impl UploadStore {
 /// Stable failure from parsing a multipart request before any script runs.
 #[derive(Debug, Clone, Copy)]
 pub enum ParseFailure {
-    Invalid { files: usize, total_bytes: u64 },
-    TooLarge { files: usize, total_bytes: u64 },
-    Io { files: usize, total_bytes: u64 },
+    Invalid {
+        files: usize,
+        counted_bytes: Option<u64>,
+    },
+    TooLarge {
+        files: usize,
+        counted_bytes: Option<u64>,
+    },
+    Io {
+        files: usize,
+        counted_bytes: Option<u64>,
+    },
 }
 
 impl ParseFailure {
     #[must_use]
-    pub fn too_large(files: usize, total_bytes: u64) -> Self {
-        Self::TooLarge { files, total_bytes }
+    pub fn too_large(files: usize, counted_bytes: Option<u64>) -> Self {
+        Self::TooLarge {
+            files,
+            counted_bytes,
+        }
     }
 
-    fn invalid(files: usize, total_bytes: u64) -> Self {
-        Self::Invalid { files, total_bytes }
+    fn invalid(files: usize, counted_bytes: Option<u64>) -> Self {
+        Self::Invalid {
+            files,
+            counted_bytes,
+        }
     }
 
-    fn io(files: usize, total_bytes: u64) -> Self {
-        Self::Io { files, total_bytes }
+    fn io(files: usize, counted_bytes: Option<u64>) -> Self {
+        Self::Io {
+            files,
+            counted_bytes,
+        }
     }
 
     #[must_use]
@@ -264,12 +282,14 @@ impl ParseFailure {
         }
     }
 
+    /// Field data already counted when the failure occurred. `None` means no
+    /// part body had been read yet; `Some(0)` is a real zero-byte count.
     #[must_use]
-    pub fn total_bytes(self) -> u64 {
+    pub fn counted_bytes(self) -> Option<u64> {
         match self {
-            Self::Invalid { total_bytes, .. }
-            | Self::TooLarge { total_bytes, .. }
-            | Self::Io { total_bytes, .. } => total_bytes,
+            Self::Invalid { counted_bytes, .. }
+            | Self::TooLarge { counted_bytes, .. }
+            | Self::Io { counted_bytes, .. } => counted_bytes,
         }
     }
 
@@ -302,47 +322,53 @@ pub async fn parse_multipart(
     request: Request,
     max_bytes: u64,
 ) -> Result<Arc<UploadStore>, ParseFailure> {
-    let temp = create_upload_dir().map_err(|_| ParseFailure::io(0, 0))?;
+    let temp = create_upload_dir().map_err(|_| ParseFailure::io(0, None))?;
     let mut multipart = Multipart::from_request(request, &())
         .await
-        .map_err(|_| ParseFailure::invalid(0, 0))?;
+        .map_err(|_| ParseFailure::invalid(0, None))?;
     let mut files = Vec::new();
     let mut total_bytes = 0_u64;
+    let mut counted_bytes = None;
     while let Some(mut field) = multipart
         .next_field()
         .await
-        .map_err(|error| map_multipart_error(&error, files.len(), total_bytes))?
+        .map_err(|error| map_multipart_error(&error, files.len(), counted_bytes))?
     {
-        let field_name = field.name().map(str::to_string);
+        let Some(field_name) = field.name().map(str::to_string) else {
+            return Err(ParseFailure::invalid(files.len(), counted_bytes));
+        };
         let filename = field.file_name().map(client_basename);
         let content_type = field.content_type().map(str::to_string);
-        let is_file = field_name.is_some() && filename.is_some();
+        let is_file = filename.is_some();
         // Opaque numbered names: a client filename never reaches the disk.
         let path = is_file.then(|| temp.path().join(files.len().to_string()));
         let mut writer = match path.as_deref() {
             Some(path) => Some(
                 tokio::fs::File::create(path)
                     .await
-                    .map_err(|_| ParseFailure::io(files.len(), total_bytes))?,
+                    .map_err(|_| ParseFailure::io(files.len(), counted_bytes))?,
             ),
             None => None,
         };
         let mut size = 0_u64;
+        // From here on, zero bytes is a real count rather than "not read".
+        counted_bytes = Some(total_bytes);
         while let Some(chunk) = field
             .chunk()
             .await
-            .map_err(|error| map_multipart_error(&error, files.len(), total_bytes))?
+            .map_err(|error| map_multipart_error(&error, files.len(), counted_bytes))?
         {
             let chunk_len = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
             total_bytes = total_bytes.saturating_add(chunk_len);
+            counted_bytes = Some(total_bytes);
             if total_bytes > max_bytes {
-                return Err(ParseFailure::too_large(files.len(), total_bytes));
+                return Err(ParseFailure::too_large(files.len(), counted_bytes));
             }
             if let Some(writer) = writer.as_mut() {
                 writer
                     .write_all(&chunk)
                     .await
-                    .map_err(|_| ParseFailure::io(files.len(), total_bytes))?;
+                    .map_err(|_| ParseFailure::io(files.len(), counted_bytes))?;
                 size = size.saturating_add(chunk_len);
             }
         }
@@ -350,16 +376,16 @@ pub async fn parse_multipart(
             writer
                 .flush()
                 .await
-                .map_err(|_| ParseFailure::io(files.len(), total_bytes))?;
+                .map_err(|_| ParseFailure::io(files.len(), counted_bytes))?;
             writer
                 .shutdown()
                 .await
-                .map_err(|_| ParseFailure::io(files.len(), total_bytes))?;
+                .map_err(|_| ParseFailure::io(files.len(), counted_bytes))?;
         }
         if is_file {
             files.push(UploadedFile {
                 meta: UploadFileMeta {
-                    field: field_name.unwrap_or_default(),
+                    field: field_name,
                     filename: filename.unwrap_or_default(),
                     content_type,
                     size,
@@ -395,12 +421,12 @@ fn create_upload_dir() -> std::io::Result<TempDir> {
 fn map_multipart_error(
     error: &axum::extract::multipart::MultipartError,
     files: usize,
-    total_bytes: u64,
+    counted_bytes: Option<u64>,
 ) -> ParseFailure {
     if error.status() == axum::http::StatusCode::PAYLOAD_TOO_LARGE {
-        ParseFailure::too_large(files, total_bytes)
+        ParseFailure::too_large(files, counted_bytes)
     } else {
-        ParseFailure::invalid(files, total_bytes)
+        ParseFailure::invalid(files, counted_bytes)
     }
 }
 
@@ -507,7 +533,10 @@ impl UploadAccess {
             UploadOp::Stream => {
                 return match self.open_stream(&uploaded.path, call_index, started) {
                     Ok(handle) => json!({ "ok": true, "handle": handle }),
-                    Err(error) => error_json(&error),
+                    Err(error) => {
+                        finish_call(&self.calls, call_index, started, None, Some(error.code()));
+                        error_json(&error)
+                    }
                 };
             }
         };
@@ -534,9 +563,7 @@ impl UploadAccess {
     fn open_stream(&self, path: &Path, call_index: usize, started: Instant) -> Result<u64, Error> {
         let metadata = std::fs::metadata(path).map_err(|error| map_open_error(&error))?;
         if !metadata.is_file() {
-            let error = Error::Io("path is not a regular file".to_string());
-            finish_call(&self.calls, call_index, started, None, Some(error.code()));
-            return Err(error);
+            return Err(Error::Io("path is not a regular file".to_string()));
         }
         let file = File::open(path).map_err(|error| map_open_error(&error))?;
         let size = metadata.len();
@@ -1013,4 +1040,41 @@ fn error_json(error: &Error) -> Json {
         "code": error.code(),
         "message": error.message(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_upload_stream_records_a_stable_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("0");
+        std::fs::write(&path, b"data").expect("upload fixture");
+        let store = Arc::new(UploadStore {
+            dir: Mutex::new(Some(temp)),
+            files: vec![UploadedFile {
+                meta: UploadFileMeta {
+                    field: "document".to_string(),
+                    filename: "fixture.bin".to_string(),
+                    content_type: None,
+                    size: 4,
+                },
+                path,
+            }],
+            total_bytes: 4,
+        });
+        let calls: CallLog = Arc::new(Mutex::new(Vec::new()));
+        let access = UploadAccess::new(Arc::clone(&store), Arc::clone(&calls));
+        store.close();
+
+        let result = access.call(&json!({ "op": "stream", "index": 0 }));
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["code"], "file_not_found");
+        let calls = calls_json(&calls);
+        assert_eq!(calls.len(), 1, "calls: {calls:?}");
+        assert_eq!(calls[0]["api"], "upload.stream");
+        assert_eq!(calls[0]["error"], "file_not_found");
+        assert!(calls[0]["duration_ms"].is_number(), "calls: {calls:?}");
+    }
 }
