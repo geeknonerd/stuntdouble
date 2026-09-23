@@ -3,7 +3,7 @@
 // This file is part of the public contract; the release artifact set defined by
 // plans/adr/0012-release-artifacts-and-supply-chain.md must include it. T9 wires
 // the release pipeline.
-// It covers the first-slice subset implemented by T1-T11; pending capabilities
+// It covers the implemented subset through T1-T12; pending capabilities
 // are intentionally absent until they land. Keep this file in sync with
 // docs/contracts/ctx-api.md.
 
@@ -16,8 +16,38 @@ interface SdRequest {
   readonly query: Readonly<Record<string, string>>;
   /** Lowercased header names; a repeated name keeps the last value. */
   readonly headers: Readonly<Record<string, string>>;
-  /** `null` when the request body is not valid UTF-8. */
+  /**
+   * `null` when the request body is not valid UTF-8, and for multipart
+   * requests because the framing is consumed before the script runs.
+   */
   readonly bodyText: string | null;
+  /** Uploaded files in multipart order; empty for non-multipart requests. */
+  readonly files: readonly SdUploadedFile[];
+}
+
+/** One uploaded file exposed through `ctx.request.files`. */
+interface SdUploadedFile {
+  readonly field: string;
+  /** Client basename after `/` and `\` path components are stripped. */
+  readonly filename: string;
+  readonly contentType: string | null;
+  /** File size in bytes. */
+  readonly size: number;
+  /**
+   * Reads the upload as strict UTF-8. Throws a catchable error with code
+   * "file_too_large", "file_encoding_error", or "file_io_error".
+   */
+  text(): string;
+  /**
+   * Reads the upload as bytes. Throws a catchable error with code
+   * "file_too_large" or "file_io_error".
+   */
+  bytes(): Uint8Array;
+  /**
+   * Opens the upload as an opaque, single-consumption streamed Response body.
+   * Valid only as the `body` argument of `ctx.respond` in the same request.
+   */
+  stream(): SdFileStream;
 }
 
 /** An allowlisted upstream HTTP response returned by `ctx.http.get`. */
@@ -64,7 +94,8 @@ interface SdHttp {
 declare const sdFileStreamBrand: unique symbol;
 
 /**
- * Opaque, single-consumption handle returned by `ctx.file.stream`. It exposes
+ * Opaque, single-consumption handle returned by `ctx.file.stream` or
+ * `ctx.request.files[].stream()`. It exposes
  * no readable properties and is valid only as the `body` argument of
  * `ctx.respond` in the same request. The brand symbol makes the handle
  * impossible to construct outside the host.

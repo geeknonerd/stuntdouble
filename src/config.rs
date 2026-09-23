@@ -41,6 +41,7 @@ pub struct ServerConfig {
 #[derive(Debug, Clone)]
 pub struct FilesConfig {
     pub root: PathBuf,
+    pub upload_max_bytes: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -174,28 +175,7 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
         }
     };
 
-    let root_dir = match root_table.get("files") {
-        None => {
-            v.push(missing("files", "table"));
-            None
-        }
-        Some(toml::Value::Table(t)) => {
-            reject_unknown(t, &["root"], "files", &mut v);
-            req_string(t, "root", "files.root", &mut v).map(|raw| {
-                let p = PathBuf::from(&raw);
-                let base = path.parent().unwrap_or(Path::new("."));
-                if p.is_absolute() {
-                    p
-                } else {
-                    base.join(p)
-                }
-            })
-        }
-        Some(other) => {
-            v.push(bad("files", "table", other));
-            None
-        }
-    };
+    let (root_dir, upload_max_bytes) = parse_files(root_table, path, &mut v);
 
     // Optional: an absent [sandbox] keeps every default.
     let sandbox = parse_sandbox(root_table, &mut v);
@@ -214,11 +194,48 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
     Ok(Config {
         config_version: config_version.expect("config_version presence is enforced by violations"),
         server,
-        files: FilesConfig { root: root_dir },
+        files: FilesConfig {
+            root: root_dir,
+            upload_max_bytes,
+        },
         sandbox,
         upstream,
         routes,
     })
+}
+
+/// Parse the required `[files]` table and resolve its static root.
+fn parse_files(
+    root: &Table,
+    config_path: &Path,
+    out: &mut Vec<Violation>,
+) -> (Option<PathBuf>, u64) {
+    match root.get("files") {
+        None => {
+            out.push(missing("files", "table"));
+            (None, default_upload_max_bytes())
+        }
+        Some(toml::Value::Table(table)) => {
+            reject_unknown(table, &["root", "upload_max_bytes"], "files", out);
+            let root = req_string(table, "root", "files.root", out).map(|raw| {
+                let path = PathBuf::from(&raw);
+                let base = config_path.parent().unwrap_or(Path::new("."));
+                if path.is_absolute() {
+                    path
+                } else {
+                    base.join(path)
+                }
+            });
+            let upload_max_bytes =
+                opt_positive_bytes(table, "upload_max_bytes", "files.upload_max_bytes", out)
+                    .unwrap_or_else(default_upload_max_bytes);
+            (root, upload_max_bytes)
+        }
+        Some(other) => {
+            out.push(bad("files", "table", other));
+            (None, default_upload_max_bytes())
+        }
+    }
 }
 
 fn schema_error(path: &Path, violations: Vec<Violation>) -> ConfigError {
@@ -534,6 +551,33 @@ fn opt_string(table: &Table, key: &str, field: &str, out: &mut Vec<Violation>) -
     }
 }
 
+/// Positive byte count used by `files.upload_max_bytes`.
+fn opt_positive_bytes(
+    table: &Table,
+    key: &str,
+    field: &str,
+    out: &mut Vec<Violation>,
+) -> Option<u64> {
+    match table.get(key) {
+        None => None,
+        Some(toml::Value::Integer(n)) => match u64::try_from(*n) {
+            Ok(0) | Err(_) => {
+                out.push(Violation {
+                    field: field.into(),
+                    expected: "integer number of bytes greater than 0".into(),
+                    actual: n.to_string(),
+                });
+                None
+            }
+            Ok(bytes) => Some(bytes),
+        },
+        Some(other) => {
+            out.push(bad(field, "integer number of bytes", other));
+            None
+        }
+    }
+}
+
 fn opt_port(table: &Table, field: &str, out: &mut Vec<Violation>) -> Option<u16> {
     match table.get("port") {
         None => None,
@@ -627,6 +671,10 @@ fn default_script_timeout_ms() -> u64 {
     10_000
 }
 
+fn default_upload_max_bytes() -> u64 {
+    20 * 1024 * 1024
+}
+
 fn default_upstream_timeout_ms() -> u64 {
     15_000
 }
@@ -656,6 +704,37 @@ method = "GET"
 path = "/x"
 script = "scripts/x.js"
 "#
+    }
+
+    #[test]
+    fn upload_max_bytes_defaults_and_accepts_a_positive_integer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_config(dir.path(), minimal());
+        let config = load(&path).expect("load default");
+        assert_eq!(config.files.upload_max_bytes, 20 * 1024 * 1024);
+
+        let configured = minimal().replace(
+            "[files]\nroot = \"./files\"",
+            "[files]\nroot = \"./files\"\nupload_max_bytes = 1024",
+        );
+        let config = load(&write_config(dir.path(), &configured)).expect("load explicit");
+        assert_eq!(config.files.upload_max_bytes, 1024);
+    }
+
+    #[test]
+    fn upload_max_bytes_rejects_zero_negative_and_non_integer_values() {
+        for value in ["0", "-1", "1.5", "\"1024\""] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let configured = minimal().replace(
+                "[files]\nroot = \"./files\"",
+                &format!("[files]\nroot = \"./files\"\nupload_max_bytes = {value}"),
+            );
+            let error = load(&write_config(dir.path(), &configured)).expect_err("must fail");
+            assert!(
+                error.to_string().contains("files.upload_max_bytes"),
+                "value {value}: {error}"
+            );
+        }
     }
 
     #[test]

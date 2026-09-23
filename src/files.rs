@@ -1,5 +1,5 @@
-//! Rooted local file access for `ctx.file`.
-//! Contract: docs/contracts/ctx-api.md
+//! Rooted local file access for `ctx.file` plus request-scoped uploads.
+//! Contracts: docs/contracts/ctx-api.md, docs/contracts/config.md
 //!
 //! Every script-visible path resolves against the configured static file root.
 //! Absolute paths and `..` components are rejected before resolution, and the
@@ -8,6 +8,9 @@
 //! resolution and open is an accepted tradeoff for this local, semi-trusted
 //! model; `SECURITY.md` records it and the `openat`/`O_NOFOLLOW` upgrade
 //! path.
+use axum::extract::{FromRequest as _, Multipart, Request};
+use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE};
+use axum::http::HeaderMap;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use std::cell::RefCell;
@@ -19,6 +22,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value as Json};
+use tempfile::TempDir;
+use tokio::io::AsyncWriteExt as _;
 
 /// Buffered read cap shared by `ctx.file.readText` and `ctx.file.readBytes`.
 const MAX_READ_BYTES: u64 = 8 * 1024 * 1024;
@@ -77,13 +82,11 @@ impl Error {
     #[must_use]
     pub fn message(&self) -> String {
         match self {
-            Self::PathInvalid(reason) => format!("ctx.file: {reason}"),
-            Self::NotFound => "ctx.file: file not found".to_string(),
-            Self::TooLarge => {
-                format!("ctx.file: file exceeds the {MAX_READ_BYTES}-byte read cap")
-            }
-            Self::Encoding => "ctx.file.readText: file is not valid UTF-8".to_string(),
-            Self::Io(message) => format!("ctx.file: {message}"),
+            Self::PathInvalid(reason) => (*reason).to_string(),
+            Self::NotFound => "file not found".to_string(),
+            Self::TooLarge => format!("file exceeds the {MAX_READ_BYTES}-byte read cap"),
+            Self::Encoding => "file is not valid UTF-8".to_string(),
+            Self::Io(message) => message.clone(),
         }
     }
 }
@@ -132,6 +135,516 @@ pub fn calls_json(calls: &CallLog) -> Vec<Json> {
     )
 }
 
+/// `Content-Type` media type that selects the multipart parser.
+const MULTIPART_CONTENT_TYPE: &str = "multipart/form-data";
+
+/// Whether a request body should be parsed as multipart form data.
+#[must_use]
+pub fn is_multipart(headers: &HeaderMap) -> bool {
+    headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|media| media.trim().eq_ignore_ascii_case(MULTIPART_CONTENT_TYPE))
+}
+
+/// Parsed `Content-Length`, when the client supplied a valid one.
+#[must_use]
+pub fn content_length(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get(CONTENT_LENGTH)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Script-visible metadata for one uploaded file. The temporary path is never
+/// part of this type.
+#[derive(Debug, Clone)]
+pub struct UploadFileMeta {
+    pub field: String,
+    pub filename: String,
+    pub content_type: Option<String>,
+    pub size: u64,
+}
+
+impl UploadFileMeta {
+    #[must_use]
+    pub fn to_json(&self) -> Json {
+        json!({
+            "field": self.field,
+            "filename": self.filename,
+            "contentType": self.content_type,
+            "size": self.size,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct UploadedFile {
+    meta: UploadFileMeta,
+    path: PathBuf,
+}
+
+/// One request's uploaded files plus the guard that removes their random
+/// temporary directory when the last owner drops it.
+#[derive(Debug)]
+pub struct UploadStore {
+    dir: Mutex<Option<TempDir>>,
+    files: Vec<UploadedFile>,
+    pub total_bytes: u64,
+}
+
+impl UploadStore {
+    /// Clone the script-visible metadata in upload order.
+    #[must_use]
+    pub fn metas(&self) -> Vec<UploadFileMeta> {
+        self.files.iter().map(|file| file.meta.clone()).collect()
+    }
+
+    fn file(&self, index: usize) -> Option<&UploadedFile> {
+        self.files.get(index)
+    }
+
+    /// Delete the temporary contents immediately while retaining the guard.
+    /// Used when a timed-out worker may still hold an `Arc` after the client
+    /// response is decided. On Windows an already-open upload file can block
+    /// deletion; keeping the guard lets its `Drop` retry once that worker
+    /// releases the handle.
+    pub fn close(&self) {
+        let dir = self
+            .dir
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(dir) = dir.as_ref() {
+            let _ = std::fs::remove_dir_all(dir.path());
+        }
+    }
+}
+
+/// Stable failure from parsing a multipart request before any script runs.
+#[derive(Debug, Clone, Copy)]
+pub enum ParseFailure {
+    Invalid {
+        files: usize,
+        counted_bytes: Option<u64>,
+    },
+    TooLarge {
+        files: usize,
+        counted_bytes: Option<u64>,
+    },
+    Io {
+        files: usize,
+        counted_bytes: Option<u64>,
+    },
+}
+
+impl ParseFailure {
+    #[must_use]
+    pub fn too_large(files: usize, counted_bytes: Option<u64>) -> Self {
+        Self::TooLarge {
+            files,
+            counted_bytes,
+        }
+    }
+
+    fn invalid(files: usize, counted_bytes: Option<u64>) -> Self {
+        Self::Invalid {
+            files,
+            counted_bytes,
+        }
+    }
+
+    fn io(files: usize, counted_bytes: Option<u64>) -> Self {
+        Self::Io {
+            files,
+            counted_bytes,
+        }
+    }
+
+    #[must_use]
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Invalid { .. } => "invalid_multipart",
+            Self::TooLarge { .. } => "upload_too_large",
+            Self::Io { .. } => "upload_io_error",
+        }
+    }
+
+    #[must_use]
+    pub fn files(self) -> usize {
+        match self {
+            Self::Invalid { files, .. } | Self::TooLarge { files, .. } | Self::Io { files, .. } => {
+                files
+            }
+        }
+    }
+
+    /// Field data already counted when the failure occurred. `None` means no
+    /// part body had been read yet; `Some(0)` is a real zero-byte count.
+    #[must_use]
+    pub fn counted_bytes(self) -> Option<u64> {
+        match self {
+            Self::Invalid { counted_bytes, .. }
+            | Self::TooLarge { counted_bytes, .. }
+            | Self::Io { counted_bytes, .. } => counted_bytes,
+        }
+    }
+
+    #[must_use]
+    pub fn status_code(self) -> u16 {
+        match self {
+            Self::TooLarge { .. } => 413,
+            Self::Invalid { .. } => 400,
+            Self::Io { .. } => 500,
+        }
+    }
+
+    /// Client-visible diagnostic under `--verbose`: a stable class only.
+    #[must_use]
+    pub fn detail(self) -> &'static str {
+        match self {
+            Self::TooLarge { .. } => "upload exceeds files.upload_max_bytes",
+            Self::Invalid { .. } => "multipart body is malformed",
+            Self::Io { .. } => "upload temporary storage failed",
+        }
+    }
+}
+
+/// Parse a multipart request into a request-scoped temporary directory.
+///
+/// File data and non-file field data share the configured byte budget;
+/// multipart framing overhead is not counted. The client filename is never
+/// used for a path.
+pub async fn parse_multipart(
+    request: Request,
+    max_bytes: u64,
+) -> Result<Arc<UploadStore>, ParseFailure> {
+    let temp = create_upload_dir().map_err(|_| ParseFailure::io(0, None))?;
+    let mut multipart = Multipart::from_request(request, &())
+        .await
+        .map_err(|_| ParseFailure::invalid(0, None))?;
+    let mut files = Vec::new();
+    let mut total_bytes = 0_u64;
+    let mut counted_bytes = None;
+    while let Some(mut field) = multipart
+        .next_field()
+        .await
+        .map_err(|error| map_multipart_error(&error, files.len(), counted_bytes))?
+    {
+        let Some(field_name) = field.name().map(str::to_string) else {
+            return Err(ParseFailure::invalid(files.len(), counted_bytes));
+        };
+        let filename = field.file_name().map(client_basename);
+        let content_type = field.content_type().map(str::to_string);
+        let is_file = filename.is_some();
+        // Opaque numbered names: a client filename never reaches the disk.
+        let path = is_file.then(|| temp.path().join(files.len().to_string()));
+        let mut writer = match path.as_deref() {
+            Some(path) => Some(
+                tokio::fs::File::create(path)
+                    .await
+                    .map_err(|_| ParseFailure::io(files.len(), counted_bytes))?,
+            ),
+            None => None,
+        };
+        let mut size = 0_u64;
+        // From here on, zero bytes is a real count rather than "not read".
+        counted_bytes = Some(total_bytes);
+        while let Some(chunk) = field
+            .chunk()
+            .await
+            .map_err(|error| map_multipart_error(&error, files.len(), counted_bytes))?
+        {
+            let chunk_len = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
+            total_bytes = total_bytes.saturating_add(chunk_len);
+            counted_bytes = Some(total_bytes);
+            if total_bytes > max_bytes {
+                return Err(ParseFailure::too_large(files.len(), counted_bytes));
+            }
+            if let Some(writer) = writer.as_mut() {
+                writer
+                    .write_all(&chunk)
+                    .await
+                    .map_err(|_| ParseFailure::io(files.len(), counted_bytes))?;
+                size = size.saturating_add(chunk_len);
+            }
+        }
+        if let Some(mut writer) = writer {
+            writer
+                .flush()
+                .await
+                .map_err(|_| ParseFailure::io(files.len(), counted_bytes))?;
+            writer
+                .shutdown()
+                .await
+                .map_err(|_| ParseFailure::io(files.len(), counted_bytes))?;
+        }
+        if is_file {
+            files.push(UploadedFile {
+                meta: UploadFileMeta {
+                    field: field_name,
+                    filename: filename.unwrap_or_default(),
+                    content_type,
+                    size,
+                },
+                path: path.expect("file fields have a temporary path"),
+            });
+        }
+    }
+    Ok(Arc::new(UploadStore {
+        dir: Mutex::new(Some(temp)),
+        files,
+        total_bytes,
+    }))
+}
+
+/// Create the random request-scoped upload directory. Unix permissions are
+/// pinned to owner-only; other platforms use the host's default ACL.
+#[cfg(unix)]
+fn create_upload_dir() -> std::io::Result<TempDir> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+}
+
+#[cfg(not(unix))]
+fn create_upload_dir() -> std::io::Result<TempDir> {
+    tempfile::tempdir()
+}
+
+/// Classify one multer/axum parser failure without exposing parser text.
+fn map_multipart_error(
+    error: &axum::extract::multipart::MultipartError,
+    files: usize,
+    counted_bytes: Option<u64>,
+) -> ParseFailure {
+    if error.status() == axum::http::StatusCode::PAYLOAD_TOO_LARGE {
+        ParseFailure::too_large(files, counted_bytes)
+    } else {
+        ParseFailure::invalid(files, counted_bytes)
+    }
+}
+
+/// Strip both slash styles; only the client-provided basename is metadata.
+fn client_basename(raw: &str) -> String {
+    raw.rsplit(['/', '\\']).next().unwrap_or(raw).to_string()
+}
+
+/// One script-visible `ctx.request.files[i]` operation.
+#[derive(Debug, Clone, Copy)]
+enum UploadOp {
+    ReadText,
+    ReadBytes,
+    Stream,
+}
+
+impl UploadOp {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "readText" => Some(Self::ReadText),
+            "readBytes" => Some(Self::ReadBytes),
+            "stream" => Some(Self::Stream),
+            _ => None,
+        }
+    }
+
+    fn api(self) -> &'static str {
+        match self {
+            Self::ReadText => "upload.text",
+            Self::ReadBytes => "upload.bytes",
+            Self::Stream => "upload.stream",
+        }
+    }
+}
+
+/// Request-scoped access to uploaded files. It shares the file call chain with
+/// `ctx.file`, so operator logs keep one ordered list.
+#[derive(Debug)]
+pub struct UploadAccess {
+    store: Arc<UploadStore>,
+    calls: CallLog,
+    streams: RefCell<Vec<Option<FileBody>>>,
+}
+
+impl UploadAccess {
+    #[must_use]
+    pub fn new(store: Arc<UploadStore>, calls: CallLog) -> Self {
+        Self {
+            store,
+            calls,
+            streams: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// Handle one bridge call. Payload: `{op, index}`.
+    #[must_use]
+    pub fn call(&self, payload: &Json) -> Json {
+        let Some(raw_op) = payload.get("op").and_then(Json::as_str) else {
+            return json!({
+                "ok": false,
+                "code": "script_error",
+                "message": "ctx.request.files: missing operation"
+            });
+        };
+        let Some(op) = UploadOp::parse(raw_op) else {
+            return json!({
+                "ok": false,
+                "code": "script_error",
+                "message": "ctx.request.files: unknown operation"
+            });
+        };
+        let Some(index) = payload
+            .get("index")
+            .and_then(Json::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+        else {
+            return json!({
+                "ok": false,
+                "code": "script_error",
+                "message": "ctx.request.files: index must be a non-negative integer"
+            });
+        };
+        let Some(uploaded) = self.store.file(index) else {
+            return json!({
+                "ok": false,
+                "code": "script_error",
+                "message": "ctx.request.files: index out of range"
+            });
+        };
+        let call_index = begin_call(&self.calls, op.api());
+        let started = Instant::now();
+        let read = match op {
+            UploadOp::ReadText => read_upload_capped(&uploaded.path)
+                .and_then(|bytes| String::from_utf8(bytes).map_err(|_| Error::Encoding))
+                .map(|text| {
+                    let payload = json!({ "ok": true, "text": text });
+                    (payload, text.len())
+                }),
+            UploadOp::ReadBytes => read_upload_capped(&uploaded.path).map(|bytes| {
+                let len = bytes.len();
+                let payload = json!({ "ok": true, "bytes_base64": BASE64.encode(&bytes) });
+                (payload, len)
+            }),
+            UploadOp::Stream => {
+                return match self.open_stream(&uploaded.path, call_index, started) {
+                    Ok(handle) => json!({ "ok": true, "handle": handle }),
+                    Err(error) => {
+                        finish_call(&self.calls, call_index, started, None, Some(error.code()));
+                        error_json(&error)
+                    }
+                };
+            }
+        };
+        match read {
+            Ok((payload, bytes)) => {
+                finish_call(
+                    &self.calls,
+                    call_index,
+                    started,
+                    u64::try_from(bytes).ok(),
+                    None,
+                );
+                payload
+            }
+            Err(error) => {
+                finish_call(&self.calls, call_index, started, None, Some(error.code()));
+                error_json(&error)
+            }
+        }
+    }
+
+    /// Open one uploaded file as a streamed Response body. The guard keeps the
+    /// request-scoped directory alive until the relay finishes or disconnects.
+    fn open_stream(&self, path: &Path, call_index: usize, started: Instant) -> Result<u64, Error> {
+        let metadata = std::fs::metadata(path).map_err(|error| map_open_error(&error))?;
+        if !metadata.is_file() {
+            return Err(Error::Io("path is not a regular file".to_string()));
+        }
+        let file = File::open(path).map_err(|error| map_open_error(&error))?;
+        let size = metadata.len();
+        let call = CallHandle::new(Arc::clone(&self.calls), call_index, started);
+        let body = FileBody {
+            file,
+            size,
+            offset: 0,
+            len: size,
+            call,
+            guard: Some(Arc::clone(&self.store)),
+        };
+        Ok(register_stream(&self.streams, body))
+    }
+
+    /// Claim one streamed body for the first Response that used it.
+    #[must_use]
+    pub fn take_stream(&self, handle: u64) -> Option<FileBody> {
+        let index = usize::try_from(handle).ok()?;
+        self.streams.borrow_mut().get_mut(index)?.take()
+    }
+}
+
+/// Read one host-owned uploaded file under the shared buffered cap.
+fn read_upload_capped(path: &Path) -> Result<Vec<u8>, Error> {
+    let metadata = std::fs::metadata(path).map_err(|error| map_open_error(&error))?;
+    if !metadata.is_file() {
+        return Err(Error::Io("path is not a regular file".to_string()));
+    }
+    let file = File::open(path).map_err(|error| map_open_error(&error))?;
+    read_capped_file(file, metadata.len())
+}
+
+/// Register one opened body under a fresh opaque stream handle.
+fn register_stream(streams: &RefCell<Vec<Option<FileBody>>>, body: FileBody) -> u64 {
+    let mut streams = streams.borrow_mut();
+    streams.push(Some(body));
+    u64::try_from(streams.len().saturating_sub(1)).unwrap_or(u64::MAX)
+}
+
+fn read_capped_file(file: File, size: u64) -> Result<Vec<u8>, Error> {
+    if size > MAX_READ_BYTES {
+        return Err(Error::TooLarge);
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(size).unwrap_or(0));
+    file.take(MAX_READ_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| Error::Io(error.to_string()))?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_READ_BYTES {
+        return Err(Error::TooLarge);
+    }
+    Ok(bytes)
+}
+
+/// Append one file call and return its slot in the shared per-request log.
+fn begin_call(calls: &CallLog, api: &'static str) -> usize {
+    let mut calls = calls
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    calls.push(CallRecord::new(api));
+    calls.len().saturating_sub(1)
+}
+
+fn finish_call(
+    calls: &CallLog,
+    index: usize,
+    started: Instant,
+    bytes: Option<u64>,
+    error: Option<&'static str>,
+) {
+    let mut calls = calls
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(record) = calls.get_mut(index) else {
+        return;
+    };
+    record.bytes = bytes;
+    record.duration_ms = Some(elapsed_ms(started.elapsed()));
+    record.error = error;
+}
+
 /// Request-scoped access rooted at the configured static file root.
 #[derive(Debug)]
 pub struct FileAccess {
@@ -178,7 +691,7 @@ impl FileAccess {
                 "message": "ctx.file: unknown operation"
             });
         };
-        let index = self.begin_call(op.api());
+        let index = begin_call(&self.calls, op.api());
         let started = Instant::now();
         let read = match op {
             FileOp::ReadText => self.read_text(path).map(|text| {
@@ -199,11 +712,11 @@ impl FileAccess {
         };
         match read {
             Ok((payload, bytes)) => {
-                self.finish_call(index, started, u64::try_from(bytes).ok(), None);
+                finish_call(&self.calls, index, started, u64::try_from(bytes).ok(), None);
                 payload
             }
             Err(error) => {
-                self.finish_call(index, started, None, Some(error.code()));
+                finish_call(&self.calls, index, started, None, Some(error.code()));
                 error_json(&error)
             }
         }
@@ -214,7 +727,7 @@ impl FileAccess {
         let (file, size) = match self.open(path) {
             Ok(opened) => opened,
             Err(error) => {
-                self.finish_call(index, started, None, Some(error.code()));
+                finish_call(&self.calls, index, started, None, Some(error.code()));
                 return Err(error);
             }
         };
@@ -225,10 +738,9 @@ impl FileAccess {
             offset: 0,
             len: size,
             call,
+            guard: None,
         };
-        let mut streams = self.streams.borrow_mut();
-        streams.push(Some(body));
-        Ok(u64::try_from(streams.len().saturating_sub(1)).unwrap_or(u64::MAX))
+        Ok(register_stream(&self.streams, body))
     }
 
     /// Claim one streamed body for the first Response that used it. Reusing a
@@ -237,34 +749,6 @@ impl FileAccess {
     pub fn take_stream(&self, handle: u64) -> Option<FileBody> {
         let index = usize::try_from(handle).ok()?;
         self.streams.borrow_mut().get_mut(index)?.take()
-    }
-
-    fn begin_call(&self, api: &'static str) -> usize {
-        let mut calls = self
-            .calls
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        calls.push(CallRecord::new(api));
-        calls.len().saturating_sub(1)
-    }
-
-    fn finish_call(
-        &self,
-        index: usize,
-        started: Instant,
-        bytes: Option<u64>,
-        error: Option<&'static str>,
-    ) {
-        let mut calls = self
-            .calls
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(record) = calls.get_mut(index) else {
-            return;
-        };
-        record.bytes = bytes;
-        record.duration_ms = Some(elapsed_ms(started.elapsed()));
-        record.error = error;
     }
 
     fn read_text(&self, path: &str) -> Result<String, Error> {
@@ -278,17 +762,7 @@ impl FileAccess {
 
     fn read_capped(&self, path: &str) -> Result<Vec<u8>, Error> {
         let (file, size) = self.open(path)?;
-        if size > MAX_READ_BYTES {
-            return Err(Error::TooLarge);
-        }
-        let mut bytes = Vec::with_capacity(usize::try_from(size).unwrap_or(0));
-        file.take(MAX_READ_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|error| Error::Io(error.to_string()))?;
-        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_READ_BYTES {
-            return Err(Error::TooLarge);
-        }
-        Ok(bytes)
+        read_capped_file(file, size)
     }
 
     fn open(&self, raw: &str) -> Result<(File, u64), Error> {
@@ -467,6 +941,9 @@ pub struct FileBody {
     pub offset: u64,
     pub len: u64,
     pub call: CallHandle,
+    /// Uploaded bodies keep the temporary directory alive until the relay
+    /// finishes; rooted `ctx.file.stream` bodies leave this empty.
+    pub guard: Option<Arc<UploadStore>>,
 }
 
 /// How a streamed file body ended.
@@ -563,4 +1040,41 @@ fn error_json(error: &Error) -> Json {
         "code": error.code(),
         "message": error.message(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_upload_stream_records_a_stable_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("0");
+        std::fs::write(&path, b"data").expect("upload fixture");
+        let store = Arc::new(UploadStore {
+            dir: Mutex::new(Some(temp)),
+            files: vec![UploadedFile {
+                meta: UploadFileMeta {
+                    field: "document".to_string(),
+                    filename: "fixture.bin".to_string(),
+                    content_type: None,
+                    size: 4,
+                },
+                path,
+            }],
+            total_bytes: 4,
+        });
+        let calls: CallLog = Arc::new(Mutex::new(Vec::new()));
+        let access = UploadAccess::new(Arc::clone(&store), Arc::clone(&calls));
+        store.close();
+
+        let result = access.call(&json!({ "op": "stream", "index": 0 }));
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["code"], "file_not_found");
+        let calls = calls_json(&calls);
+        assert_eq!(calls.len(), 1, "calls: {calls:?}");
+        assert_eq!(calls[0]["api"], "upload.stream");
+        assert_eq!(calls[0]["error"], "file_not_found");
+        assert!(calls[0]["duration_ms"].is_number(), "calls: {calls:?}");
+    }
 }

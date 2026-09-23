@@ -36,6 +36,14 @@ _Avoid_: jail, container, isolation layer
 脚本可读取文件的唯一配置目录。
 _Avoid_: file root, document root, upload directory
 
+**Upload data budget**：
+一次 multipart 请求允许提交的 part 内容字节总量（文件与非文件字段都计入），不包含 boundary、part header 等 framing。它是“客户端能提交多少内容”的权威账目，由配置声明。
+_Avoid_: upload size, payload limit
+
+**Framing allowance**：
+原始请求流上限中预留给 multipart framing（boundary、part header、分隔符等）的固定余量。它限制的是 wire 字节，不是第二个数据预算；超出余量的 framing 会让请求在数据预算生效前被拒绝。
+_Avoid_: reserved budget, extra quota
+
 **Upstream failure**：
 未能从上游调用取得 HTTP 响应。非 2xx 的 HTTP 响应是数据，不是 upstream failure。
 例外：把 body 直接交给客户端的流式能力无法把最终非 2xx 响应当作数据；它把该响应表现为可捕获错误，使脚本仍能掌握客户端可见的状态。

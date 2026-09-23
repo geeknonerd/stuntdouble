@@ -4,7 +4,7 @@
 
 > 本页是英文版 [cli.md](./cli.md) 的译本；如有出入，以英文版为准。
 
-- **状态**：v1 切片已冻结；增量更新至 T11
+- **状态**：v1 切片已冻结；增量更新至 T12
 - **适用**：v0.1.0-alpha.1 及以后、同一 CLI 家族内的 `stuntdouble` 二进制
 - **稳定性**：1.0 之前的破坏性变更需带弃用窗口
 
@@ -23,9 +23,9 @@
 stuntdouble serve [--config <path>] [--verbose]
 ```
 
-启动 mock server 并绑定到配置的地址。命中的 Route 在内置 Boa 运行时中执行其 JavaScript，宿主注入 `ctx`，包含 allowlist 约束的 `ctx.http.get` 调用、流式 `ctx.http.pipe` 调用，以及带根限制的 `ctx.file` 读取与流式本地文件响应；未命中的 Route 返回 404 `not_found`。脚本失败返回 500 `script_error` 或 `script_no_response`；未捕获的上游传输层失败返回 502 `upstream_unreachable`。
+启动 mock server 并绑定到配置的地址。命中的 Route 在内置 Boa 运行时中执行其 JavaScript，宿主注入 `ctx`，包含 allowlist 约束的 `ctx.http.get` 调用、流式 `ctx.http.pipe` 调用，带根限制的 `ctx.file` 读取与流式本地文件响应，以及通过 `ctx.request.files` 暴露的请求级 multipart 上传；未命中的 Route 返回 404 `not_found`。命中的 multipart 请求在脚本运行前解析：multipart 畸形返回 400 `invalid_multipart`，文件与非文件字段数据超过 `files.upload_max_bytes` 返回 413 `upload_too_large`，非 multipart body 超过 2 MiB 上限时保持原有的有界 413 响应。脚本失败返回 500 `script_error` 或 `script_no_response`；未捕获的上游传输层失败返回 502 `upstream_unreachable`。
 
-`--verbose` 会为引擎生成的 500/502 JSON 错误 body 附加 `detail` 字段。它的值是稳定的失败类别，例如 `script execution failed`、`script exceeded the configured timeout`、`upstream transport failure: timeout`、`upstream transport failure: dns` 或 `upstream transport failure: transport`；绝不包含堆栈、脚本消息、上游 body、hostname、IP 地址或 URL。不开启该 flag 时，错误 body 只含 `error` 与 `request_id`。该 flag 只用于本地诊断，不要在共享环境开启。404 `not_found` 响应永远不带 `detail`。
+`--verbose` 会为引擎生成的 JSON 错误 body 附加 `detail` 字段，包括 multipart 400/413 与引擎 500/502 响应。它的值是稳定的失败类别，例如 `script execution failed`、`script exceeded the configured timeout`、`upstream transport failure: timeout`、`upstream transport failure: dns` 或 `upstream transport failure: transport`；绝不包含堆栈、脚本消息、上游 body、hostname、IP 地址或 URL。不开启该 flag 时，错误 body 只含 `error` 与 `request_id`。该 flag 只用于本地诊断，不要在共享环境开启。404 `not_found` 响应永远不带 `detail`；非 multipart 413 响应 body 为空，也不带 `detail`。
 
 默认配置路径是 `stuntdouble.toml`。配置必须包含非空 `routes` 数组；每条 Route 指定 method、path、脚本位置与可选 name。完整 schema 规则见[配置契约](config.zh-CN.md)。
 
@@ -56,13 +56,15 @@ stuntdouble serve [--config <path>] [--verbose]
 
 #### 请求日志
 
-`serve` 每个请求向 stderr 写出一条 JSON 日志，包含 `request_id`、命中的 `route`、`method`、`path`、`params`、`status`、`error`、`elapsed_ms`、`script_duration_ms`、`upstream_calls`、`file_calls`、`request_body_bytes`、`response_body_bytes`、`request_headers`、`response_headers`、`client_request_id`、`host`，以及脚本有日志时的 `script_logs`。
+`serve` 每个请求向 stderr 写出一条 JSON 日志，包含 `request_id`、命中的 `route`、`method`、`path`、`params`、`status`、`error`、`elapsed_ms`、`script_duration_ms`、`upstream_calls`、`file_calls`、`upload`、`request_body_bytes`、`response_body_bytes`、`request_headers`、`response_headers`、`client_request_id`、`host`，以及脚本有日志时的 `script_logs`。
 
 - `upstream_calls` 是脚本发起调用的有序列表。每项记录 `api`（`http.get` 或 `http.pipe`）、`host`、`path`、`status`、`response_bytes`、`duration_ms`、`redirects`，失败时还记录稳定的 `error`/`kind`。query string 不写入日志。`http.pipe` 的记录在 body 流结束时定稿。
-- `file_calls` 是脚本发起的文件调用有序列表，记录 `api`（`file.readText`、`file.readBytes` 或 `file.stream`）、`bytes`、`duration_ms`，失败时还记录稳定的 `error`。文件路径绝不写入日志。`file.stream` 的记录在 body 结束或客户端断开时定稿。
+- `file_calls` 是脚本发起的文件调用有序列表，记录 `api`（`file.readText`、`file.readBytes`、`file.stream`、`upload.text`、`upload.bytes` 或 `upload.stream`）、`bytes`、`duration_ms`，失败时还记录稳定的 `error`。文件路径与客户端文件名绝不写入日志。流式记录在 body 结束或客户端断开时定稿。
+- `upload` 是 `{files, total_bytes, error}`。`files` 统计已保存的文件 part；`total_bytes` 统计解析结束前已计数的文件与非文件字段数据，不含 framing 字节。`error` 为 `invalid_multipart`、`upload_too_large`、`upload_io_error` 或 `null`。脚本运行前的解析失败仍写出同一请求的一行日志，带稳定错误类别与 `null` 的 `script_duration_ms`。客户端文件名与临时路径绝不进入日志。
 - 宿主不会自动记录请求体或响应体，只记录大小与白名单 header：请求 header 为 `accept`、`content-type`、`content-length`、`range`、`user-agent`；响应 header 为 `content-type`、`content-length`、`content-range`。Authorization、Cookie 及其他 header 永不写日志。`script_logs[].message` 由脚本产生且不做脱敏：`ctx.log.*` 中不得包含 body、Token、Cookie 或其他机密。
-- 缓冲 Response 在写出前落日志。流式 Response（`ctx.http.pipe` 或 `ctx.file.stream`）在 body 结束或客户端断开后落一条完成日志：`response_body_bytes` 统计转发进 Response body 的字节数；`error` 可能是 `upstream_stream_error` 或 `file_stream_error`（状态已经发出后读取失败，客户端状态保持已发送值）或 `client_disconnected`。该行的 `elapsed_ms` 覆盖整个流。
+- 缓冲 Response 在写出前落日志。流式 Response（`ctx.http.pipe`、`ctx.file.stream` 或 `ctx.request.files[].stream()`）在 body 结束或客户端断开后落一条完成日志：`response_body_bytes` 统计转发进 Response body 的字节数；`error` 可能是 `upstream_stream_error` 或 `file_stream_error`（状态已经发出后读取失败，客户端状态保持已发送值）或 `client_disconnected`。该行的 `elapsed_ms` 覆盖整个流。
 - 脚本到达截止时间时仍在途的 `http.get` 调用，其 `status`、`response_bytes` 与 `duration_ms` 保持 `null`；截止前完成的调用保留已记录的值。
+- multipart 请求的 `request_body_bytes` 在存在 `Content-Length` 时取声明值；否则取已计数的字段数据，因此不含 multipart framing 字节。body 未被读取或计数时（例如未命中 Route）该字段为 `null`。
 - 这些日志是运维诊断面，可能包含 allowlist 中的上游 host 与 path；发布到 issue、pull request 或其他公开产物前必须脱敏。
 - `client_request_id` 记录客户端传入的 `X-Request-ID`；它既不会被采用为 `request_id`，也不会转发给上游调用。
 

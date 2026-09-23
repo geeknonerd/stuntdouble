@@ -39,8 +39,7 @@ Files:
 - `stuntdouble.toml` — route declarations plus the upstream allowlist.
 - `scripts/manifest.js` — CSV transform.
 - `scripts/download.js` — document lookup plus PDF passthrough.
-- `files/` — the static file root the configuration contract requires; file
-  capabilities arrive in a later slice.
+- `files/` — the static file root the configuration contract requires; uploads use separate request-scoped temporary storage.
 
 ## Manifest contract
 

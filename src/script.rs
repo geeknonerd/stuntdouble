@@ -55,6 +55,7 @@ pub struct RequestSnapshot {
     pub query: BTreeMap<String, String>,
     pub headers: Vec<(String, String)>,
     pub body_text: Option<String>,
+    pub files: Vec<files::UploadFileMeta>,
 }
 
 impl RequestSnapshot {
@@ -67,7 +68,8 @@ impl RequestSnapshot {
         params: HashMap<String, String>,
         raw_query: &str,
         headers: &HeaderMap,
-        body: &[u8],
+        body: Option<&[u8]>,
+        files: Vec<files::UploadFileMeta>,
     ) -> Self {
         Self {
             method: method.as_str().to_ascii_uppercase(),
@@ -83,7 +85,8 @@ impl RequestSnapshot {
                     )
                 })
                 .collect(),
-            body_text: std::str::from_utf8(body).map(str::to_string).ok(),
+            body_text: body.and_then(|body| std::str::from_utf8(body).map(str::to_string).ok()),
+            files,
         }
     }
 
@@ -115,6 +118,7 @@ impl RequestSnapshot {
             "query": query,
             "headers": headers,
             "bodyText": self.body_text,
+            "files": self.files.iter().map(files::UploadFileMeta::to_json).collect::<Vec<_>>(),
         })
     }
 }
@@ -232,7 +236,7 @@ impl Outcome {
 // The prelude is the only writer of `__sd`; `ctx` is a frozen view over it.
 const PRELUDE: &str = r#"
 var __sd = { response: null, logs: [] };
-var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_upstream_marker, __sd_file) {
+var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_upstream_marker, __sd_file, __sd_upload) {
   "use strict";
   var state = __sd;
   var FILE_HANDLES = new WeakMap();
@@ -299,8 +303,8 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
     if (body === undefined || body === null) { return ""; }
     if (typeof body === "string") { return body; }
     if (typeof body === "object") {
-      var handle = FILE_HANDLES.get(body);
-      if (handle !== undefined) { return { file: handle }; }
+      var mapped = FILE_HANDLES.get(body);
+      if (mapped !== undefined) { return mapped; }
     }
     var bytes;
     if (body instanceof Uint8Array) {
@@ -345,7 +349,7 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
     var index = 0;
     for (var i = 0; i < clean.length; i++) {
       var value = BASE64_ALPHABET.indexOf(clean.charAt(i));
-      if (value < 0) { throw new TypeError("ctx.http.get: invalid base64 body"); }
+      if (value < 0) { throw new TypeError("invalid base64 body"); }
       buffer = (buffer << 6) | value;
       bits += 6;
       if (bits >= 8) {
@@ -435,8 +439,37 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
   function fileStream(path) {
     var result = fileCall("stream", path, "ctx.file.stream");
     var handle = Object.freeze(Object.create(null));
-    FILE_HANDLES.set(handle, result.handle);
+    FILE_HANDLES.set(handle, { file: result.handle });
     return handle;
+  }
+  function uploadCall(op, index, label) {
+    return callBridge(__sd_upload, { op: op, index: index }, label);
+  }
+  function uploadFile(meta, index) {
+    var label = "ctx.request.files[" + index + "]";
+    return Object.freeze({
+      field: meta.field,
+      filename: meta.filename,
+      contentType: meta.contentType,
+      size: meta.size,
+      text: function () { return uploadCall("readText", index, label + ".text").text; },
+      bytes: function () {
+        return decodeBase64(uploadCall("readBytes", index, label + ".bytes").bytes_base64);
+      },
+      stream: function () {
+        var result = uploadCall("stream", index, label + ".stream");
+        var handle = Object.freeze(Object.create(null));
+        FILE_HANDLES.set(handle, { upload: result.handle });
+        return handle;
+      }
+    });
+  }
+  function requestSnapshot(raw) {
+    var mapped = [];
+    var rawFiles = raw.files || [];
+    for (var i = 0; i < rawFiles.length; i++) { mapped.push(uploadFile(rawFiles[i], i)); }
+    raw.files = mapped;
+    return freezeShallow(raw);
   }
   var FILE_FRAMING_HEADERS = ["content-length", "content-range", "accept-ranges"];
   function checkFileStreamResponse(status, headers) {
@@ -482,7 +515,7 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
   }
   return Object.freeze({
     apiVersion: "__SD_API_VERSION__",
-    request: freezeShallow(__SD_REQUEST__),
+    request: requestSnapshot(__SD_REQUEST__),
     env: Object.freeze(__SD_ENV__),
     http: Object.freeze({ get: httpGet, pipe: httpPipe }),
     file: Object.freeze({
@@ -503,7 +536,8 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
       var checkedStatus = checkStatus(status, "ctx.respond");
       var checkedHeaders = checkHeaders(headers, "ctx.respond");
       var checkedBody = checkBody(body);
-      if (typeof checkedBody === "object" && checkedBody !== null && checkedBody.file !== undefined) {
+      if (typeof checkedBody === "object" && checkedBody !== null &&
+          (checkedBody.file !== undefined || checkedBody.upload !== undefined)) {
         checkFileStreamResponse(checkedStatus, checkedHeaders);
         FILE_HANDLES.delete(body);
       }
@@ -515,11 +549,12 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
       return true;
     }
   });
-})(__sd_http_get, __sd_http_pipe, __sd_validate_headers, __SD_UPSTREAM_MARKER__, __sd_file);
+})(__sd_http_get, __sd_http_pipe, __sd_validate_headers, __SD_UPSTREAM_MARKER__, __sd_file, __sd_upload);
 delete globalThis.__sd_http_get;
 delete globalThis.__sd_http_pipe;
 delete globalThis.__sd_validate_headers;
 delete globalThis.__sd_file;
+delete globalThis.__sd_upload;
 "#;
 
 /// Read the recorded response and log lines back out of the realm.
@@ -544,6 +579,9 @@ thread_local! {
 
     /// Per-request file access installed before the route script runs.
     static FILE_HOST: RefCell<Option<files::FileAccess>> = const { RefCell::new(None) };
+
+    /// Per-request uploaded-file access installed before the route script runs.
+    static UPLOAD_HOST: RefCell<Option<files::UploadAccess>> = const { RefCell::new(None) };
 }
 
 /// Decode one host-bridge argument and encode the JSON result for the script.
@@ -665,6 +703,17 @@ fn sd_file(
     })
 }
 
+/// Native bridge behind `ctx.request.files`; temporary paths stay in `files`.
+fn sd_upload(
+    _this: &JsValue,
+    args: &[JsValue],
+    _context: &mut Context,
+) -> boa_engine::JsResult<JsValue> {
+    host_bridge("__sd_upload", args, |call| {
+        host_call("__sd_upload", &UPLOAD_HOST, call, files::UploadAccess::call)
+    })
+}
+
 /// Native bridge used by the prelude to validate script-supplied response
 /// headers before `ctx.respond` stores them or `ctx.http.pipe` starts an
 /// upstream call. The script sees a catchable `script_error`.
@@ -743,22 +792,54 @@ fn guard_engine<T>(run: impl FnOnce() -> T) -> Result<T, Error> {
         .map_err(|_| Error::Failed("script panicked in the engine".into()))
 }
 
+/// Request-scoped file hosts installed before one script evaluates.
+struct FileHosts {
+    root: std::path::PathBuf,
+    calls: files::CallLog,
+    uploads: Option<Arc<files::UploadStore>>,
+}
+
+/// Install rooted file access and uploaded-file access for the worker thread.
+fn install_file_hosts(hosts: FileHosts) {
+    let file_access = files::FileAccess::new(&hosts.root, Arc::clone(&hosts.calls));
+    let upload_access = hosts
+        .uploads
+        .map(|store| files::UploadAccess::new(store, hosts.calls));
+    FILE_HOST.with(|cell| {
+        *cell.borrow_mut() = Some(file_access);
+    });
+    UPLOAD_HOST.with(|cell| {
+        *cell.borrow_mut() = upload_access;
+    });
+}
+
+/// Serialize one request and environment snapshot into the script prelude.
+fn prelude_for_request(request: &RequestSnapshot, upstream_marker: &str) -> String {
+    PRELUDE
+        .replace("__SD_API_VERSION__", API_VERSION)
+        .replace("__SD_REQUEST__", &js_literal(&request.to_json()))
+        .replace("__SD_ENV__", &js_literal(&env_json()))
+        .replace(
+            "__SD_UPSTREAM_MARKER__",
+            &js_literal(&Json::String(upstream_marker.to_string())),
+        )
+}
+
 /// Evaluate one request's script and read back its recorded state.
 fn evaluate(
     source: &str,
     request: &RequestSnapshot,
     upstream: &UpstreamConfig,
-    files_config: &FilesConfig,
+    hosts: FileHosts,
     script_deadline: Instant,
     calls: upstream::CallLog,
-    file_calls: files::CallLog,
 ) -> Outcome {
     let client_range = request
         .headers
         .iter()
         .find(|(name, _)| name == "range")
         .map(|(_, value)| value.clone());
-    let file_access = files::FileAccess::new(&files_config.root, file_calls);
+    install_file_hosts(hosts);
     HTTP_HOST.with(|cell| {
         *cell.borrow_mut() = Some(upstream::UpstreamAccess::new(
             upstream.allow_hosts.clone(),
@@ -768,21 +849,11 @@ fn evaluate(
             calls,
         ));
     });
-    FILE_HOST.with(|cell| {
-        *cell.borrow_mut() = Some(file_access);
-    });
     PIPE_STREAM.with(|cell| {
         *cell.borrow_mut() = None;
     });
     let upstream_marker = upstream_marker();
-    let prelude = PRELUDE
-        .replace("__SD_API_VERSION__", API_VERSION)
-        .replace("__SD_REQUEST__", &js_literal(&request.to_json()))
-        .replace("__SD_ENV__", &js_literal(&env_json()))
-        .replace(
-            "__SD_UPSTREAM_MARKER__",
-            &js_literal(&Json::String(upstream_marker.clone())),
-        );
+    let prelude = prelude_for_request(request, &upstream_marker);
     let mut context = Context::default();
     let limits = context.runtime_limits_mut();
     limits.set_loop_iteration_limit(LOOP_ITERATION_LIMIT);
@@ -818,6 +889,13 @@ fn evaluate(
                 NativeFunction::from_fn_ptr(sd_file),
             )
             .map_err(|error| (None, error.to_string()))?;
+        context
+            .register_global_builtin_callable(
+                js_string!("__sd_upload"),
+                1,
+                NativeFunction::from_fn_ptr(sd_upload),
+            )
+            .map_err(|error| (None, error.to_string()))?;
         let evaluated = (|| -> Result<String, JsError> {
             context.eval(Source::from_bytes(&prelude))?;
             context.eval(Source::from_bytes(source))?;
@@ -838,6 +916,7 @@ fn evaluate(
     });
     let stream = PIPE_STREAM.with(|cell| cell.borrow_mut().take());
     let file_host = FILE_HOST.with(|cell| cell.borrow_mut().take());
+    let upload_host = UPLOAD_HOST.with(|cell| cell.borrow_mut().take());
     HTTP_HOST.with(|cell| {
         cell.borrow_mut().take();
     });
@@ -847,7 +926,7 @@ fn evaluate(
             Outcome::failed(Error::UpstreamUnreachable { message, kind })
         }
         Ok(Err((None, message))) => Outcome::failed(Error::Failed(message)),
-        Ok(Ok(dump)) => parse_host_record(&dump, stream, file_host),
+        Ok(Ok(dump)) => parse_host_record(&dump, stream, file_host, upload_host),
     }
 }
 
@@ -905,6 +984,7 @@ fn parse_host_record(
     raw: &str,
     pipe_stream: Option<upstream::PipeBody>,
     file_host: Option<files::FileAccess>,
+    upload_host: Option<files::UploadAccess>,
 ) -> Outcome {
     let host: Json = match serde_json::from_str(raw) {
         Ok(value) => value,
@@ -928,7 +1008,7 @@ fn parse_host_record(
         );
     };
     let headers = parse_script_headers(response);
-    let body = match parse_script_body(response, pipe_stream, file_host) {
+    let body = match parse_script_body(response, pipe_stream, file_host, upload_host) {
         Ok(body) => body,
         Err(error) => return script_outcome(None, logs, Some(error)),
     };
@@ -997,6 +1077,7 @@ fn parse_script_body(
     response: &Json,
     pipe_stream: Option<upstream::PipeBody>,
     file_host: Option<files::FileAccess>,
+    upload_host: Option<files::UploadAccess>,
 ) -> Result<ResponseBody, Error> {
     if response.get("stream").and_then(Json::as_bool) == Some(true) {
         let Some(stream) = pipe_stream else {
@@ -1023,6 +1104,23 @@ fn parse_script_body(
         };
         return Ok(ResponseBody::File(file));
     }
+    if let Some(handle) = response
+        .get("body")
+        .and_then(|body| body.get("upload"))
+        .and_then(Json::as_u64)
+    {
+        let Some(host) = upload_host else {
+            return Err(Error::Failed(
+                "ctx.request.files: upload access was not recorded".into(),
+            ));
+        };
+        let Some(file) = host.take_stream(handle) else {
+            return Err(Error::Failed(
+                "ctx.request.files: upload stream was not recorded".into(),
+            ));
+        };
+        return Ok(ResponseBody::File(file));
+    }
     Ok(match response.get("body") {
         Some(Json::String(text)) => ResponseBody::Text(text.clone()),
         Some(Json::Array(bytes)) => ResponseBody::Bytes(
@@ -1045,6 +1143,7 @@ pub async fn execute(
     timeout: Duration,
     upstream: UpstreamConfig,
     files_config: FilesConfig,
+    uploads: Option<Arc<files::UploadStore>>,
 ) -> Outcome {
     // tradeoff: `spawn_blocking` cannot be cancelled, so on timeout the host
     // answers immediately and the worker stops at `LOOP_ITERATION_LIMIT`.
@@ -1055,19 +1154,24 @@ pub async fn execute(
     let worker_calls = Arc::clone(&calls);
     let file_calls: files::CallLog = Arc::new(Mutex::new(Vec::new()));
     let worker_file_calls = Arc::clone(&file_calls);
+    let timeout_uploads = uploads.clone();
+    let hosts = FileHosts {
+        root: files_config.root,
+        calls: worker_file_calls,
+        uploads,
+    };
     let worker = tokio::task::spawn_blocking(move || {
-        evaluate(
-            &source,
-            &request,
-            &upstream,
-            &files_config,
-            deadline,
-            worker_calls,
-            worker_file_calls,
-        )
+        evaluate(&source, &request, &upstream, hosts, deadline, worker_calls)
     });
     let mut outcome = match tokio::time::timeout(timeout, worker).await {
-        Err(_) => Outcome::failed(Error::TimedOut),
+        Err(_) => {
+            // The abandoned worker may still hold an Arc; remove its upload
+            // storage now so a client timeout cannot leak temporary files.
+            if let Some(store) = &timeout_uploads {
+                store.close();
+            }
+            Outcome::failed(Error::TimedOut)
+        }
         Ok(Err(_)) => Outcome::failed(Error::Failed("script worker panicked".into())),
         Ok(Ok(outcome)) => outcome,
     };
@@ -1116,7 +1220,8 @@ mod tests {
             HashMap::from([("group".to_string(), "a".to_string())]),
             "x=1",
             &headers,
-            b"body",
+            Some(b"body"),
+            Vec::new(),
         );
         assert_eq!(snapshot.method, "POST");
         assert_eq!(snapshot.params["group"], "a");
@@ -1132,7 +1237,8 @@ mod tests {
             HashMap::new(),
             "",
             &HeaderMap::new(),
-            &[0xFF, 0xFE],
+            Some(&[0xFF, 0xFE]),
+            Vec::new(),
         );
         assert!(snapshot.body_text.is_none());
     }

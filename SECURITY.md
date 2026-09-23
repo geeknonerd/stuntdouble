@@ -6,7 +6,7 @@
 | --- | --- |
 | No releases yet | Not applicable |
 
-Stunt Double has no released versions yet. The project is in early development, with the first vertical slice (T1–T11) implemented, so there are no supported release lines to patch. Once the first stable release exists, this table lists the supported lines.
+Stunt Double has no released versions yet. The project is in early development, with the first vertical slice (T1–T12) implemented, so there are no supported release lines to patch. Once the first stable release exists, this table lists the supported lines.
 
 ## Threat model
 
@@ -17,6 +17,12 @@ Stunt Double runs the route scripts you supply; it is not a sandbox for untruste
 `ctx.file` reads resolve against the single configured static file root. Absolute paths and any `..` component are rejected before resolution, and the canonicalized target must stay inside the canonicalized root, so a symlink cannot widen the readable set; the root itself gets the same check. Buffered reads (`readText`, `readBytes`) are capped at 8 MiB; `stream` bypasses the size cap by design but stays confined to the same root. File paths and file names never enter logs.
 
 Resolution and open are separate operations. On Linux the opened descriptor's target is re-checked through `/proc/self/fd` before any byte is read, which narrows the race; other platforms keep the pre-open check only. A local writer who can rewrite directory entries inside the root can in principle still race that window, which is an accepted tradeoff for the local, semi-trusted-script model. The upgrade path is `openat`-style resolution with `O_NOFOLLOW` (and equivalent platform APIs) when the root must also be defended against untrusted local writers.
+
+## Multipart uploads
+
+Multipart parsing runs before the script only for a matched Route. File parts are streamed into a random directory under the system temporary directory, created with owner-only (`0700`) permissions on Unix; non-file field data is counted but discarded. A part without a `name` attribute is rejected as malformed, and files use opaque numbered names, never client-provided filenames. `files.upload_max_bytes` (default 20 MiB) is enforced by a `Content-Length` pre-check plus streaming accounting that includes non-file fields. The entire multipart body stream, including framing, is bounded by `files.upload_max_bytes` plus a 1 MiB framing allowance; the data budget itself excludes framing, and streaming accounting remains authoritative. Buffered upload reads (`text()`, `bytes()`) are capped at 8 MiB; `stream()` is uncapped but is relayed to the client only as a `ctx.respond` body under the same Range and host-owned framing rules as local file streams.
+
+The temporary-directory guard removes upload storage on buffered responses, script errors, parse errors, timeouts, stream completion, and client disconnect. If the script deadline expires while the blocking worker is still running, the host deletes the contents immediately and keeps the guard as a retry if the platform still blocks deletion. Client filenames are never used as filesystem paths and never written to logs; only the basename reaches `ctx.request.files[].filename`. Temporary upload paths are never exposed or logged.
 
 ## Reporting a vulnerability
 

@@ -31,7 +31,7 @@ curl -i -H 'Range: bytes=0-1023' \
 - `stuntdouble.toml` —— 路由声明与上游 allowlist。
 - `scripts/manifest.js` —— CSV 变换。
 - `scripts/download.js` —— 文档查找与 PDF 透传。
-- `files/` —— 配置契约要求的静态文件根；文件能力在后续切片落地。
+- `files/` —— 配置契约要求的静态文件根；上传使用独立的请求级临时存储。
 
 ## 清单契约
 

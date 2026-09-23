@@ -104,6 +104,23 @@ ctx.respond(200, { "Content-Type": "application/json" }, text);
 ctx.respond(200, { "Content-Type": "application/pdf" }, ctx.file.stream("documents/DOC-0001.pdf"));
 ```
 
+## 处理 multipart 上传
+
+命中的 `multipart/form-data` 请求会在路由脚本运行前由宿主解析。`[files] upload_max_bytes` 限制文件与非文件字段的数据总量（默认 `20971520`），整个 multipart body（含 framing）另有 1 MiB framing allowance。part 畸形或缺少 `name` 属性时返回 400 `invalid_multipart`；数据超限返回 413 `upload_too_large`。两者都使用带 `request_id` 的项目 JSON 错误 envelope，且脚本不会运行。
+
+```js
+const file = ctx.request.files[0];
+if (!file) {
+  ctx.respond(400, { "Content-Type": "application/json" }, '{"error":"document_required"}');
+} else {
+  ctx.respond(200, { "Content-Type": "text/plain; charset=utf-8" }, file.text());
+}
+```
+
+`ctx.request.files` 是只读数组，元素形如 `{field, filename, contentType, size, text(), bytes(), stream()}`。`filename` 只保留客户端 basename：`/` 与 `\` 路径组件会被剥离，临时路径绝不暴露。非 multipart 请求暴露 `[]`；非文件字段会被忽略，但仍计入上限。
+
+`text()` 严格按 UTF-8 解码，`text()` 与 `bytes()` 上限为 8 MiB。`stream()` 不限大小、不透明、只能消费一次，且仅可作为同一请求内 `ctx.respond` 的 body；它遵循与 `ctx.file.stream` 相同的 Range 与宿主 framing 规则。上传存放在请求级临时存储中，请求结束或流结束时清理——精确形状见 [`ctx` API 契约](../contracts/ctx-api.zh-CN.md) 与[配置契约](../contracts/config.zh-CN.md)。
+
 ## 出错时怎么判断
 
 | 你看到的 | 含义 |

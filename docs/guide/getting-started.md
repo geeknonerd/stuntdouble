@@ -102,6 +102,23 @@ To serve a file without loading it into the script heap, pass `ctx.file.stream(p
 ctx.respond(200, { "Content-Type": "application/pdf" }, ctx.file.stream("documents/DOC-0001.pdf"));
 ```
 
+## Handle multipart uploads
+
+A matched `multipart/form-data` request is parsed by the host before the route script runs. `[files] upload_max_bytes` caps file and non-file field data (default `20971520`), while the whole multipart body, including framing, has a 1 MiB framing allowance. A malformed part or a part without a `name` attribute answers 400 `invalid_multipart`; data over the limit answers 413 `upload_too_large`. Both use the project JSON error envelope with `request_id` and never run the script.
+
+```js
+const file = ctx.request.files[0];
+if (!file) {
+  ctx.respond(400, { "Content-Type": "application/json" }, '{"error":"document_required"}');
+} else {
+  ctx.respond(200, { "Content-Type": "text/plain; charset=utf-8" }, file.text());
+}
+```
+
+`ctx.request.files` is a read-only array of `{field, filename, contentType, size, text(), bytes(), stream()}`. `filename` is the client basename after `/` and `\` path components are stripped; no temporary path is exposed. Non-multipart requests expose `[]`; non-file fields are ignored but still count toward the limit.
+
+`text()` decodes strict UTF-8, and `text()`/`bytes()` are capped at 8 MiB. `stream()` is uncapped, opaque, single-consumption, and valid only as the `ctx.respond` body in the same request; it follows the same Range and host-owned framing rules as `ctx.file.stream`. Uploads use request-scoped temporary storage and are removed when the request ends or the stream finishes — see the [`ctx` API contract](../contracts/ctx-api.md) and [configuration contract](../contracts/config.md) for exact shapes.
+
 ## When something fails
 
 | You see | Meaning |
