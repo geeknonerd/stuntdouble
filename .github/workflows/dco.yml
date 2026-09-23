@@ -13,6 +13,12 @@ jobs:
   dco:
     name: dco
     runs-on: ubuntu-latest
+    # release-plz cannot add a `Signed-off-by` trailer to the commits it
+    # generates, so release pull requests from this repository's
+    # `release-plz-*` branches skip the check; a skipped job reports success.
+    # Requiring the branch to live in this repository keeps fork pull requests,
+    # whose branch names we do not control, covered.
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'release-plz-')) }}
     steps:
       - name: Get PR Commits
         if: github.event_name == 'pull_request'

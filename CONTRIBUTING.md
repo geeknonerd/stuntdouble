@@ -56,7 +56,7 @@ See [docs/development.md](docs/development.md) for the full workflow, versioning
   Example: `feat(config): add route validation` or `fix(sandbox): reject path traversal`.
 - Allowed types: `feat`, `fix`, `docs`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `security`.
 - Scope is optional but recommended when it matches our areas: `config`, `match`, `source`, `transform`, `response`, `sandbox`, `runtime-js`, `runtime-python`, `files`, `obs`, `dist`.
-- Signing-off with `git commit -s` (DCO) is mandatory on every commit.
+- Signing-off with `git commit -s` (DCO) is mandatory on every commit. The only exception is the release pull request that release-plz generates: it cannot add the trailer, so the `dco` workflow skips pull requests opened from `release-plz-*` branches in this repository.
 
 ## License and DCO
 
