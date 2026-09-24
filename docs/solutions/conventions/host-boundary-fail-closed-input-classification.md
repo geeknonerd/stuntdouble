@@ -1,7 +1,7 @@
 ---
 title: Keep host-boundary failures distinct from absence and validate before blocking
 date: 2026-09-23
-last_updated: 2026-09-23
+last_updated: 2026-09-24
 category: conventions
 module: host boundary input validation
 problem_type: convention
@@ -28,7 +28,7 @@ tags: [host-boundary, fail-closed, missing-vs-unusable, range, ctx-file, fifo, n
 
 ## Context
 
-Stunt Double 是宿主注入 `ctx` 的 mock server。issue #52（T11）实现 `ctx.file.readText`、`ctx.file.readBytes`、`ctx.file.stream` 的根目录受限读取，以及本地文件流的单 Range 响应。T11 已随 PR #55 合并进 `main`；后续的 T12 multipart 上传在 `feat/multipart-uploads` 分支上落地（截至本次刷新时该分支尚未推送、未创建 PR、未合并）。本文的代码与行号引用按该分支的当前工作树核对。
+Stunt Double 是宿主注入 `ctx` 的 mock server。issue #52（T11）实现 `ctx.file.readText`、`ctx.file.readBytes`、`ctx.file.stream` 的根目录受限读取，以及本地文件流的单 Range 响应。T11 已随 PR #55 合并进 `main`；后续的 T12 multipart 上传随 PR #57 合并进 `main`（issue #53 已关闭）。本文的代码与行号引用按当前 `main` 工作树核对。
 
 落地后的两轮对抗性黑盒评审又发现 4 个同类缺陷：
 
@@ -39,7 +39,7 @@ Stunt Double 是宿主注入 `ctx` 的 mock server。issue #52（T11）实现 `c
 3. 根目录内 FIFO 会阻塞 `File::open`。读取路径先 open、后检查 `metadata.is_file()`，无写端 FIFO 会一直阻塞到脚本超时，最终变成 500 `script_error`；类型检查必须发生在可能阻塞的 open 之前。
 4. Range 解析曾 trim unit、spec 及两端数字，`bytes=0 - 3` 因此被当作合法单 Range 返回 206。RFC 9110 的 range-spec 不允许这种内部空白，应返回 416。
 
-这四条不是四个互不相关的偶发 bug，而是同一条 host-boundary 规律：原始协议输入有“缺失、合法单值、畸形/复合”三种状态，文件系统对象也有“普通文件、目录、FIFO、socket、设备”等类型；如果过早把状态压成 `Option` 或先执行可能阻塞/有副作用的调用，宿主就会静默答错或挂住。T11 落地时预测 T12 的 multipart 上传会碰到同一形状，T12 已在 `feat/multipart-uploads` 分支上兑现这一点（400 `invalid_multipart` 与 413 `upload_too_large` 是分开的失败类别）：Content-Length 缺失与值超限、multipart 结构畸形与体积超限、临时文件写入限制都不能混成一个“没有值/解析失败”的分支。因此这份记录按 knowledge track 的 practice 文档化，而不是只记录某次补丁。
+这四条不是四个互不相关的偶发 bug，而是同一条 host-boundary 规律：原始协议输入有“缺失、合法单值、畸形/复合”三种状态，文件系统对象也有“普通文件、目录、FIFO、socket、设备”等类型；如果过早把状态压成 `Option` 或先执行可能阻塞/有副作用的调用，宿主就会静默答错或挂住。T11 落地时预测 T12 的 multipart 上传会碰到同一形状，T12 已在 `main` 上兑现这一点（400 `invalid_multipart` 与 413 `upload_too_large` 是分开的失败类别）：Content-Length 缺失与值超限、multipart 结构畸形与体积超限、临时文件写入限制都不能混成一个“没有值/解析失败”的分支。因此这份记录按 knowledge track 的 practice 文档化，而不是只记录某次补丁。
 
 (session history) 更早的会话已经为这条规则提供了先例与反例：T11 规划明确否决了"非法 `Range` 一律忽略并返回 200"的备选方案，理由是调用方无法区分"服务端不支持区间"与"请求区间语法坏了"；T6 则把 catch-all 的错误归类拆成 `upstream_url_invalid` / `upstream_redirect_error` / `upstream_unreachable` / `upstream_http_error` / `script_error`，因为压平会丢失可操作的边界语义。这两次决策都把"畸形输入必须走显式路径"当作可预测性要求，而不是风格偏好。
 
@@ -57,11 +57,11 @@ enum RangeRequest<'a> {
 }
 ```
 
-解析时 `headers.get_all("range")` 用来保留重复字段信息：没有字段是 `None`，恰好一个且 UTF-8 合法才是 `Single`，多个字段行或 `to_str()` 失败都是 `Unusable`（`src/server.rs:712-733`）。`Unusable` 再明确映射为 `RangeDecision::Unsatisfiable`（`src/server.rs:651-656`），最终生成 416、`bytes */<size>`、`Content-Length: 0` 和空 body（`src/server.rs:687-700`）。
+解析时 `headers.get_all("range")` 用来保留重复字段信息：没有字段是 `None`，恰好一个且 UTF-8 合法才是 `Single`，多个字段行或 `to_str()` 失败都是 `Unusable`（`src/server.rs:806-827`）。`Unusable` 再明确映射为 `RangeDecision::Unsatisfiable`（`src/server.rs:745-751`），最终生成 416、`bytes */<size>`、`Content-Length: 0` 和空 body（`src/server.rs:781-800`）。
 
 关键不是枚举名字，而是决策顺序：先确认原始形态是否还能表达成一个受支持的单值，再做业务默认值。`None` 才会进入“无 Range”的 200 路径；畸形输入不能借用该默认值。Range 能力本身的公开契约写明：不可满足、畸形、多 Range 或空文件上的 Range 都答 416（`docs/contracts/ctx-api.md:68`；中文合同同样规定于 `docs/contracts/ctx-api.zh-CN.md:70`）。
 
-这里还要区分两个“重复字段”概念。`ctx.request.headers` 快照对重复名字采用 last-wins，是脚本可见的数据契约（`docs/contracts/ctx-api.md:41`）；它不能替代宿主对 Range 等 framing 字段的协议解析。文件响应直接接收请求 `HeaderMap`（`src/server.rs:620-627`），并按 HTTP 字段语义处理重复行。
+这里还要区分两个“重复字段”概念。`ctx.request.headers` 快照对重复名字采用 last-wins，是脚本可见的数据契约（`docs/contracts/ctx-api.md:41`）；它不能替代宿主对 Range 等 framing 字段的协议解析。文件响应直接接收请求 `HeaderMap`（`src/server.rs:714-721`），并按 HTTP 字段语义处理重复行。
 
 ### 2. 复合字段先按协议语义展开，再判断能力子集
 
@@ -85,9 +85,9 @@ enum RangeRequest<'a> {
 
 ### 4. 回归测试要走传输层原始形态，而不是只调用便利 API
 
-便利的 `request` helper 可以表达重复 header，但无法表达非法 UTF-8 的 header 字节；因此 `ctx.file.stream` 的 416 用例使用 `request_raw_range` 手工写 HTTP/1.1 请求字节（`tests/cli.rs:582-597`）。这很重要：如果测试层先经过客户端/字符串类型，`bytes=\x80` 可能在到达 server 前就被拒绝或替换，测试就永远覆盖不到实际的 HeaderValue 解析边界。
+便利的 `request` helper 可以表达重复 header，但无法表达非法 UTF-8 的 header 字节；因此 `ctx.file.stream` 的 416 用例使用 `request_raw_range` 手工写 HTTP/1.1 请求字节（`tests/cli.rs:654-672`）。这很重要：如果测试层先经过客户端/字符串类型，`bytes=\x80` 可能在到达 server 前就被拒绝或替换，测试就永远覆盖不到实际的 HeaderValue 解析边界。
 
-同一原则适用于阻塞对象：FIFO 测试用 `mkfifo` 创建真实对象，并把 sandbox 超时缩短到 500 ms；修复前它会挂到脚本 deadline，修复后必须快速返回可捕获的 `file_io_error`（`tests/cli.rs:3053-3077`）。测试不是断言“某个 helper 返回某个内部枚举”，而是断言客户端最终看到的状态、header 和 body。
+同一原则适用于阻塞对象：FIFO 测试用 `mkfifo` 创建真实对象，并把 sandbox 超时缩短到 500 ms；修复前它会挂到脚本 deadline，修复后必须快速返回可捕获的 `file_io_error`（`tests/cli.rs:3151-3177`）。测试不是断言“某个 helper 返回某个内部枚举”，而是断言客户端最终看到的状态、header 和 body。
 
 ## Why This Matters
 
@@ -151,7 +151,7 @@ fn range_request(headers: &HeaderMap) -> RangeRequest<'_> {
 }
 ```
 
-当前实现见 `src/server.rs:712-733`；`Unusable` 到 416 的映射见 `src/server.rs:651-656`，最终响应见 `src/server.rs:687-700`。公开契约要求不可满足、畸形、多 Range 或空文件 Range 答 `416`、`Content-Range: bytes */<size>`、无 body（`docs/contracts/ctx-api.md:68`）。回归测试 `ctx_file_stream_answers_416_for_unusable_ranges` 在 `tests/cli.rs:2811`，其中 `tests/cli.rs:2825-2838` 发送不可满足、非数字、逗号多 Range、空文件、重复字段行、非 UTF-8 原始字节和内部空白，`tests/cli.rs:2840-2858` 对七种情况逐一断言 416、正确的 `Content-Range`、`Content-Length: 0` 和空 body。非 UTF-8 请求由 `request_raw_range` 发送（`tests/cli.rs:582-597`）。
+当前实现见 `src/server.rs:806-827`；`Unusable` 到 416 的映射见 `src/server.rs:745-751`，最终响应见 `src/server.rs:781-800`。公开契约要求不可满足、畸形、多 Range 或空文件 Range 答 `416`、`Content-Range: bytes */<size>`、无 body（`docs/contracts/ctx-api.md:68`）。回归测试 `ctx_file_stream_answers_416_for_unusable_ranges`（`tests/cli.rs:2909-2969`）发送不可满足、非数字、逗号多 Range、空文件、重复字段行、非 UTF-8 原始字节和内部空白，并对七种情况逐一断言 416、正确的 `Content-Range`、`Content-Length: 0` 和空 body。非 UTF-8 请求由 `request_raw_range` 发送（`tests/cli.rs:654-672`）。
 
 ### 例 2：Range 内部空白必须保持为畸形
 
@@ -183,7 +183,7 @@ fn parse_index(raw: &str) -> Option<u64> {
 }
 ```
 
-当前实现见 `src/files.rs:877-927` 与 `src/files.rs:929-934`。该行为由同一个 `ctx_file_stream_answers_416_for_unusable_ranges` 用例的 `bytes=0 - 3` 分支固定（`tests/cli.rs:2837`），并与合同中的 malformed Range 结果一致（`docs/contracts/ctx-api.md:68`）。
+当前实现见 `src/files.rs:877-927` 与 `src/files.rs:929-934`。该行为由同一个 `ctx_file_stream_answers_416_for_unusable_ranges` 用例的 `bytes=0 - 3` 分支固定（`tests/cli.rs:2909-2969`），并与合同中的 malformed Range 结果一致（`docs/contracts/ctx-api.md:68`）。
 
 ### 例 3：FIFO 在 open 前被拒绝，同时保留已声明的 TOCTOU 取舍
 
@@ -213,12 +213,16 @@ if !opened.is_file() {
 self.verify_open_target(&file, &root)?;
 ```
 
-当前实现见 `src/files.rs:768-786`。非普通文件映射为 `file_io_error`，与合同一致（`src/files.rs:71-79`、`docs/contracts/ctx-api.md:64`）。回归测试 `ctx_file_rejects_non_regular_files_without_blocking` 在 Unix 上用 `mkfifo` 创建无写端 FIFO，并用 500 ms sandbox deadline 断言快速返回 `file_io_error`（`tests/cli.rs:3053-3077`）。这次修复没有消除剩余 TOCTOU；该窗口仍按 `src/files.rs:7-10` 与 `SECURITY.md:19` 记录的本地半信任取舍保留。
+当前实现见 `src/files.rs:768-786`。非普通文件映射为 `file_io_error`，与合同一致（`src/files.rs:71-79`、`docs/contracts/ctx-api.md:64`）。回归测试 `ctx_file_rejects_non_regular_files_without_blocking` 在 Unix 上用 `mkfifo` 创建无写端 FIFO，并用 500 ms sandbox deadline 断言快速返回 `file_io_error`（`tests/cli.rs:3151-3177`）。这次修复没有消除剩余 TOCTOU；该窗口仍按 `src/files.rs:7-10` 与 `SECURITY.md:19` 记录的本地半信任取舍保留。
 
 ### 例 4：相关但独立的路径解释边界
 
-本轮还固定了一个相邻问题：URL 风格路径和平台特定路径不能被当前宿主误解析为系统路径。`ctx_file_never_resolves_url_style_or_platform_specific_names_outside_the_root` 验证 `file:///etc/passwd`、`C:\Windows\win.ini` 和 `..\..\secret` 在各平台都只能按根内相对名或路径规则处理，不能借路径风格逃逸（`tests/cli.rs:3081-3111`）。这不属于前面四种 Range/FIFO 缺陷，但它强化了同一个边界习惯：先按本能力的路径模型解释，再讨论对象是否存在；不要让字符串形状隐式切换到另一套语义。
+本轮还固定了一个相邻问题：URL 风格路径和平台特定路径不能被当前宿主误解析为系统路径。`ctx_file_never_resolves_url_style_or_platform_specific_names_outside_the_root` 验证 `file:///etc/passwd`、`C:\Windows\win.ini` 和 `..\..\secret` 在各平台都只能按根内相对名或路径规则处理，不能借路径风格逃逸（`tests/cli.rs:3179-3212`）。这不属于前面四种 Range/FIFO 缺陷，但它强化了同一个边界习惯：先按本能力的路径模型解释，再讨论对象是否存在；不要让字符串形状隐式切换到另一套语义。
 
 ### 验证状态
 
-四项修复已随 PR #55 合并进 `main`。本次刷新在 `feat/multipart-uploads` 分支的工作树上运行 `cargo test --workspace --all-features`，结果为 159 passed、0 failed（4 个测试套件）；T11 的回归覆盖（重复/非 UTF-8/内部空白 Range、FIFO 非阻塞拒绝、路径风格逃逸边界）仍在通过，本文引用的代码行号已按该工作树重新核对。
+四项修复已随 PR #55 合并进 `main`；T12 的 multipart 上传与读取期限随后分别随 PR #57、PR #59 合并（issue #53、#56 均已关闭）。本次刷新在 `main` 上运行 `cargo test --workspace --all-features`，结果为 22 + 149 passed、0 failed（另有空的 doctest 套件）；T11 的回归覆盖（重复/非 UTF-8/内部空白 Range、FIFO 非阻塞拒绝、路径风格逃逸边界）仍在通过，本文引用的代码行号已按 `main` 重新核对。
+
+## 相关
+
+- 相邻学习：[hold-upload-temp-dir-with-unfinished-request-body.md](../test-failures/hold-upload-temp-dir-with-unfinished-request-body.md) —— 请求级上传临时目录的确定性观察规则；边界分类仍由本文负责，测试如何观察该目录由那篇负责。

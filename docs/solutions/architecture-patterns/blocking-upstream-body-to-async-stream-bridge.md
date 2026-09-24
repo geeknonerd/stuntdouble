@@ -1,7 +1,7 @@
 ---
 title: "Bridge blocking upstream reads into an async streaming response"
 date: 2026-09-21
-last_updated: 2026-09-23
+last_updated: 2026-09-24
 category: architecture-patterns
 module: upstream HTTP streaming bridge
 problem_type: architecture_pattern
@@ -310,3 +310,4 @@ T11 把同一接缝用于本地文件：`ctx.file.stream(path)` 打开 root 内�
 - `tests/cli.rs` —— 针对传输、重定向、URL、状态、大小与 Range 不变量的端到端 fake-upstream 覆盖。
 - PR #19 —— T6 模式的实现与验证上下文（已合并）。T7 的完成日志修复见 PR #25（已合并，关闭 issue #10）。
 - 相关 issue：#9（T6 来源）、#10（T7 可观测性完成，已关闭）、#7（allowlist 与传输边界）、#8（路由级错误映射）、#37（完成态误报与通道关闭分类）、#3（父 spec）、#52（T11 本地文件流已落地）、#53（T12 上传已随 PR #57 落地）。
+- 同一「完成态不需要观察者」机制在测试侧的后果：[../test-failures/hold-upload-temp-dir-with-unfinished-request-body.md](../test-failures/hold-upload-temp-dir-with-unfinished-request-body.md) —— 客户端停止读取不会让服务端停下，因此观察请求级状态必须自己造同步点。

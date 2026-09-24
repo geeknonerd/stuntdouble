@@ -1,6 +1,7 @@
 ---
 title: "Arm an inbound read deadline on the protocol builder, not the auto-detecting wrapper"
 date: 2026-09-23
+last_updated: 2026-09-24
 category: conventions
 module: server inbound request deadlines
 problem_type: convention
@@ -26,7 +27,7 @@ issue #56 要求 `serve` 用一个期限同时覆盖请求头与请求体（`ser
 1. **默认值存在 ≠ 默认值生效。** hyper 1.11 的 `http1::Builder` 自带 30 秒 `header_read_timeout` 默认值，但它只在注册了 timer 之后才生效；`axum::serve` 搭建连接循环时既不设期限也不设 timer，所以这个默认值一直是惰性的。这也是「`serve` 没有请求读取期限」的直接原因（本仓库 `src/server.rs` 的 383 行起记录了这段推理）。
 2. **自动探测的包装层会把期限挡在外面。** 用 hyper-util 的 `auto::Builder`（axum 内部用的那个）可以拿到该 builder，但代价有两个：`server-auto` feature 会启用 `http2`，把 `h2` 拉进依赖树，而 v1 只承诺 HTTP/1.1；更隐蔽的是 auto 在建立 HTTP/1 连接前会先跑 `read_version`，无期限地最多读 24 字节判断 HTTP/2 preface——短于此长度的半写请求头完全不受 `header_read_timeout` 约束。
 
-第 2 点被两轴 review 独立指出，而当时的回归（发送约 50 字节的半写请求头）恰好通过：它已经越过 24 字节嗅探窗口。回归现已改为只发 1 字节（本仓库 `tests/cli.rs` 的 4835 行起）。
+第 2 点被两轴 review 独立指出，而当时的回归（发送约 50 字节的半写请求头）恰好通过：它已经越过 24 字节嗅探窗口。回归现已改为只发 1 字节（本仓库 `tests/cli.rs:4849-4919` 的 `slow_request_head_is_closed_at_the_deadline`，写入在 4859 行）。
 
 ## 指南
 
@@ -60,11 +61,12 @@ builder
 ## 示例
 
 - 错误做法与它的绿色测试：auto builder + 约 50 字节半写请求头 —— 测试通过，但只发 1 字节的客户端仍可无限占用连接。
-- 正确做法与回归：`tests/cli.rs` 的 4835 行起断言 1 字节请求头在期限后收到连接关闭且日志出现 `request_head_timeout`；4758 行起与 4798 行起覆盖慢请求体，包含 408 envelope、请求日志类别、announced `Content-Length` 与上传临时目录的清理。
+- 正确做法与回归：`tests/cli.rs:4849-4919` 断言 1 字节请求头在期限后收到连接关闭且日志出现 `request_head_timeout`；`tests/cli.rs:4772-4810` 与 `tests/cli.rs:4812-4848` 覆盖慢请求体，包含 408 envelope、请求日志类别、announced `Content-Length` 与上传临时目录的清理。
 
 ## 相关
 
 - `src/server.rs` —— 连接循环、期限与连接级日志类别的实际位置
 - `Cargo.toml` —— hyper / hyper-util 的 feature 选择
 - `docs/contracts/config.md`、`docs/contracts/cli.md`、`SECURITY.md` —— 期限与错误/日志类别的公开契约
-- issue #56（`server: bound request body read time`）—— 本文的实现来源；分支 `fix/server-body-read-timeout`，截至本文写作时尚未合并
+- 期限对上传临时目录生命周期的约束，以及测试如何确定性地观察它：[../test-failures/hold-upload-temp-dir-with-unfinished-request-body.md](../test-failures/hold-upload-temp-dir-with-unfinished-request-body.md)
+- issue #56（`server: bound request body read time`）—— 本文的实现来源，随 PR #59 合并进 `main`（2026-09-23，issue 已关闭）
