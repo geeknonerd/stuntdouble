@@ -75,6 +75,7 @@ See [plans/product-definition.md](plans/product-definition.md) for the full scop
 ## Documentation
 
 - [Getting started](docs/guide/getting-started.md) — install, first route, and upstream calls.
+- [Mock recipes](docs/guide/mock-recipes.md) — task-oriented JSON, upstream, file, upload, and CI examples.
 - [Public contracts](docs/contracts/) — configuration, `ctx` API, and CLI.
 - [`ctx` API type definitions](types/ctx-api-v1.d.ts) — apiVersion 1 source types.
 - [Demo fixture](demo/README.md) — runnable configuration, script, and error mapping for the CSV manifest.

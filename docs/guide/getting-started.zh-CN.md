@@ -145,6 +145,7 @@ stuntdouble serve --config stuntdouble.toml --verbose
 
 ## 下一步
 
+- [Mock 场景示例](./mock-recipes.zh-CN.md) —— JSON、上游、文件、上传与 CI 的任务型示例。
 - [公开契约](../contracts/README.zh-CN.md) —— 配置、`ctx` API 与 CLI。
 - [演示夹具](../../demo/README.zh-CN.md) —— 清单 CSV 生成、带 Range 的 PDF 流式下载，以及离线文件切片（本地清单、本地下载与 multipart 上传）。
 - [产品功能定义](../../plans/product-definition.md) —— v1 范围与不做清单。

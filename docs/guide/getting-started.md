@@ -143,6 +143,7 @@ The 500/502 JSON body then carries a stable `detail` string such as `upstream tr
 
 ## Next steps
 
+- [Mock recipes](./mock-recipes.md) — task-oriented JSON, upstream, file, upload, and CI examples.
 - [Public contracts](../contracts/) — configuration, `ctx` API, and CLI.
 - [Demo fixture](../../demo/README.md) — manifest CSV generation, PDF streaming with Range, and the offline file slice (local manifest, local download, and multipart upload).
 - [Product definition](../../plans/product-definition.md) (Chinese) — v1 scope and non-goals.
