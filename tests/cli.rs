@@ -1385,7 +1385,7 @@ ctx.respond(200, { "Content-Type": "text/plain", "X-Response-Secret": "response-
         log["response_headers"].get("x-response-secret").is_none(),
         "sensitive response header logged: {line}"
     );
-    for secret in [
+    for (index, fixture) in [
         "request-body",
         "client-body",
         "upstream-secret-body",
@@ -1393,8 +1393,14 @@ ctx.respond(200, { "Content-Type": "text/plain", "X-Response-Secret": "response-
         "response-secret",
         "query-secret",
         "request-secret",
-    ] {
-        assert!(!line.contains(secret), "secret {secret:?} logged: {line}");
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert!(
+            !line.contains(fixture),
+            "redaction fixture {index} leaked into the log line: {line}"
+        );
     }
 }
 
