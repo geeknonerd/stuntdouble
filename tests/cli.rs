@@ -556,7 +556,10 @@ fn temp_entries(root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-fn wait_for_temp_entries(root: &Path) -> Vec<PathBuf> {
+/// Poll until at least one entry appears under `root`. Only use this for a
+/// state the fixture holds open (an unfinished request body, for example); a
+/// state that can come and go needs a synchronization point instead.
+fn wait_for_entries(root: &Path, what: &str) -> Vec<PathBuf> {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let entries = temp_entries(root);
@@ -565,7 +568,7 @@ fn wait_for_temp_entries(root: &Path) -> Vec<PathBuf> {
         }
         assert!(
             Instant::now() < deadline,
-            "upload temp directory never appeared under {}",
+            "{what} never appeared under {}",
             root.display()
         );
         std::thread::sleep(Duration::from_millis(20));
@@ -2440,42 +2443,36 @@ ctx.respond(200, {}, ctx.request.files[0].stream());
                     &data,
                 )],
             );
-            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-            let client = std::thread::spawn(move || {
-                let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(10)))
-                    .expect("read timeout");
-                let head = format!(
-                    "POST /demo/documents/manifest/group-a HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Type: multipart/form-data; boundary=sd-name\r\nContent-Length: {}\r\n\r\n",
-                    body.len()
-                );
-                stream.write_all(head.as_bytes()).expect("write head");
-                stream.write_all(&body).expect("write body");
-                stream.flush().expect("flush");
-                let mut bytes = Vec::new();
-                let mut buffer = [0_u8; 1024];
-                loop {
-                    let read = stream.read(&mut buffer).expect("read response");
-                    assert_ne!(read, 0, "server closed before the response body started");
-                    bytes.extend_from_slice(&buffer[..read]);
-                    if let Some(head_end) =
-                        bytes.windows(4).position(|window| window == b"\r\n\r\n")
-                    {
-                        if bytes.len() > head_end + 4 {
-                            break;
-                        }
-                    }
-                }
-                ready_tx.send(()).expect("signal response body");
-                // Keep the response open so the server-side relay blocks and
-                // the request-scoped directory stays observable.
-                std::thread::sleep(Duration::from_secs(2));
-            });
-            ready_rx
-                .recv_timeout(Duration::from_secs(5))
-                .expect("response body did not start");
-            let dirs = wait_for_temp_entries(&temp_root);
+            // Hold the request open instead of the response: the parser
+            // creates the request-scoped directory before it reads the body
+            // and writes each chunk as it arrives, so an unfinished body keeps
+            // the directory observable. Watching the response instead races —
+            // a 1 MiB answer fits in the socket buffers, so the server can
+            // finish, delete the directory and leave the client's sleep behind
+            // (measured: the directory lived ~53 ms).
+            let data_start = body
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .expect("file part header terminator")
+                + 4;
+            let split = data_start + 4096;
+            assert!(split < body.len(), "partial body must stop before the end");
+
+            let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .expect("read timeout");
+            let head = format!(
+                "POST /demo/documents/manifest/group-a HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Type: multipart/form-data; boundary=sd-name\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(head.as_bytes()).expect("write head");
+            stream
+                .write_all(&body[..split])
+                .expect("write partial body");
+            stream.flush().expect("flush");
+
+            let dirs = wait_for_entries(&temp_root, "upload temp directory");
             assert_eq!(dirs.len(), 1, "upload dirs: {dirs:?}");
             #[cfg(unix)]
             {
@@ -2488,8 +2485,7 @@ ctx.respond(200, {}, ctx.request.files[0].stream());
                     & 0o777;
                 assert_eq!(mode, 0o700, "upload directory mode: {mode:o}");
             }
-            let files = temp_entries(&dirs[0]);
-            assert!(!files.is_empty(), "no files under {}", dirs[0].display());
+            let files = wait_for_entries(&dirs[0], "upload temp file");
             for file in files {
                 let name = file
                     .file_name()
@@ -2501,7 +2497,19 @@ ctx.respond(200, {}, ctx.request.files[0].stream());
                 );
                 assert_ne!(name, "forbidden-client-name.bin");
             }
-            client.join().expect("client thread");
+
+            // Finish the upload so the request takes its normal path, then let
+            // the server answer and remove the directory.
+            stream.write_all(&body[split..]).expect("write body tail");
+            stream.flush().expect("flush");
+            let response = read_response_until_complete(&mut stream);
+            assert_eq!(
+                response.status,
+                200,
+                "body bytes: {}",
+                response.body_bytes.len()
+            );
+            drop(stream);
             wait_for_empty_temp(&temp_root);
         },
     );
