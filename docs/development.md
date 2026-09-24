@@ -82,7 +82,7 @@ docker buildx imagetools inspect "ghcr.io/geeknonerd/stuntdouble:${tag}"
 
 Release 页面必须列出三个平台的归档、`SHA256SUMS`（同时保留 cargo-dist 的 `sha256.sum`）、`stuntdouble-<version>.cdx.json`、`ctx-api-v1.d.ts`、`stuntdouble-<version>-image.txt`（镜像 tag 与 digest）以及 release notes。
 
-首次发布后，在 GHCR package settings 中确认镜像可见性与仓库一致（public repository 对应 public package），否则匿名 `docker pull` 会失败。
+镜像由 `release-extras` 用 job 内 `GITHUB_TOKEN` 推送，因此按 GHCR 默认规则继承运行 workflow 的仓库的可见性与权限模型（公开仓库得到公开包），匿名 `docker pull` 无需登录即可用，也不需要人工确认或设置可见性；public 之后不能改回 private。只有改用 PAT 或 CLI 在 workflow 之外创建**新包名**时才会默认落成 private，那时才需要去 package settings 的 Danger Zone 改一次。依据与核实命令见 [solutions/ci/ghcr-package-visibility-follows-the-publishing-token.md](solutions/ci/ghcr-package-visibility-follows-the-publishing-token.md)。
 
 ## 发布产物
 
@@ -194,7 +194,6 @@ lychee --offline --no-progress --exclude-path target --exclude-path .git './**/*
 以下项目已评估，但不在 T9 当前切片处理，按触发条件跟踪：
 
 - [#41](https://github.com/geeknonerd/stuntdouble/issues/41) 发布原子性：当前 `release-extras` 失败时把 Release 回退为 draft；等 cargo-dist 支持完整 draft 编排或项目自管 Release 生命周期后升级。
-- [#42](https://github.com/geeknonerd/stuntdouble/issues/42) GHCR 匿名拉取验证：首次公开发布并确认 package visibility 后，把无凭据 `docker pull` 加入发布或定时验证。
 - [#43](https://github.com/geeknonerd/stuntdouble/issues/43) 必需资产清单单一来源：出现第二个受支持 `apiVersion` 或新资产类型时，从 dist manifest 派生校验清单。
 - [#44](https://github.com/geeknonerd/stuntdouble/issues/44) cargo-dist 权限与 installer 摘要：上游提供按 job 权限或摘要校验能力，或项目决定承担 `allow-dirty = ["ci"]` 代价时处理。
 - [#45](https://github.com/geeknonerd/stuntdouble/issues/45) CodeQL 合并保护：首次发布后评估 required check 或 code scanning merge protection，并记录最终决策。
