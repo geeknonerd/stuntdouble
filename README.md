@@ -39,7 +39,7 @@ docker run --rm -p 8080:8080 \
   ghcr.io/geeknonerd/stuntdouble:vX.Y.Z
 ```
 
-The release contract requires each [GitHub Release](https://github.com/geeknonerd/stuntdouble/releases) to include the Linux x86_64, macOS arm64, and Windows x86_64 archives, `SHA256SUMS`, the CycloneDX SBOM, `ctx-api-v1.d.ts`, release notes, and the GHCR tag plus digest; the release workflow verifies that every required asset is attached. Verify the provenance of a downloaded archive:
+The release contract requires each [GitHub Release](https://github.com/geeknonerd/stuntdouble/releases) to include the Linux x86_64, macOS arm64, and Windows x86_64 archives, `SHA256SUMS`, the CycloneDX SBOM, `ctx-api-v1.d.ts`, release notes, and the GHCR image tag plus digest for `linux/amd64` and `linux/arm64`; the release workflow verifies that every required asset is attached. Verify the provenance of a downloaded archive:
 
 ```bash
 gh attestation verify stuntdouble-x86_64-unknown-linux-gnu.tar.gz --repo geeknonerd/stuntdouble
@@ -56,7 +56,7 @@ The trigger chain and the release checklist live in [docs/development.md](docs/d
 - Upstream HTTP (`ctx.http.get` plus streaming `ctx.http.pipe` with Range passthrough; `ctx.http.request` pending) and `ctx.file` reads, file streaming, local file Range responses, and request-scoped multipart uploads exposed through `ctx.request.files`.
 - One static file root with path traversal protection.
 - Static configuration with restart. Hot reload and Admin API are deferred.
-- Linux x86_64, macOS arm64, and Windows x86_64 binaries plus a container image (release automation configured in T9).
+- Linux x86_64, macOS arm64, and Windows x86_64 binaries plus a `linux/amd64` and `linux/arm64` container image (release automation configured in T9).
 - Structured per-request logs with `request_id`, the upstream call chain, body sizes, allowlisted headers, and stable error classes.
 
 ## Non-goals for v1

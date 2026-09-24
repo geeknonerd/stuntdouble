@@ -39,7 +39,7 @@ docker run --rm -p 8080:8080 \
   ghcr.io/geeknonerd/stuntdouble:vX.Y.Z
 ```
 
-发布契约要求每个 [GitHub Release](https://github.com/geeknonerd/stuntdouble/releases) 包含 Linux x86_64、macOS arm64、Windows x86_64 归档、`SHA256SUMS`、CycloneDX SBOM、`ctx-api-v1.d.ts`、release notes 以及 GHCR 的 tag 与 digest；发布 workflow 会验证所有必需资产都已附带。验证下载归档的构建来源：
+发布契约要求每个 [GitHub Release](https://github.com/geeknonerd/stuntdouble/releases) 包含 Linux x86_64、macOS arm64、Windows x86_64 归档、`SHA256SUMS`、CycloneDX SBOM、`ctx-api-v1.d.ts`、release notes 以及 `linux/amd64`、`linux/arm64` 双平台 GHCR 镜像的 tag 与 digest；发布 workflow 会验证所有必需资产都已附带。验证下载归档的构建来源：
 
 ```bash
 gh attestation verify stuntdouble-x86_64-unknown-linux-gnu.tar.gz --repo geeknonerd/stuntdouble
@@ -56,7 +56,7 @@ gh attestation verify stuntdouble-x86_64-unknown-linux-gnu.tar.gz --repo geeknon
 - 上游 HTTP（`ctx.http.get` 与支持 Range 透传的流式 `ctx.http.pipe` 已实现，`ctx.http.request` 待后续切片）、`ctx.file` 读取、文件流、本地文件 Range 响应，以及通过 `ctx.request.files` 暴露的请求级 multipart 上传。
 - 唯一静态文件根，并阻止路径穿越。
 - 静态配置 + 重启。热重载与 Admin API 推迟。
-- Linux x86_64、macOS arm64、Windows x86_64 二进制与容器镜像（T9 已配置发布自动化）。
+- Linux x86_64、macOS arm64、Windows x86_64 二进制与 `linux/amd64`、`linux/arm64` 双平台容器镜像（T9 已配置发布自动化）。
 - 结构化请求日志，包含 `request_id`、上游调用链、body 大小、白名单 header 与稳定错误分类。
 
 ## v1 不做
