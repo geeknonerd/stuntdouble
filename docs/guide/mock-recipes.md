@@ -2,7 +2,7 @@
 
 **English** \| [中文](./mock-recipes.zh-CN.md)
 
-Task-oriented examples for common integration tests. Each recipe is additive: copy the route into `stuntdouble.toml`, create the referenced script, then validate and run. The exact key validation and `ctx` rules live in the [configuration contract](../contracts/config.md) and [`ctx` API contract](../contracts/ctx-api.md).
+Task-oriented examples for common integration tests. Each recipe is additive: copy the route into `stuntdouble.toml`, create the referenced script, then validate and run. The exact key validation and `ctx` rules live in the [configuration contract](../contracts/config.md) and the [`ctx` API contract](../contracts/ctx-api.md); command behaviour lives in the [CLI contract](../contracts/cli.md).
 
 For coding agents:
 

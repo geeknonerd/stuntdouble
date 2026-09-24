@@ -1,10 +1,10 @@
 # Mock 场景示例
 
-**English** \| [中文](./mock-recipes.zh-CN.md)
+[English](./mock-recipes.md) \| **中文**
 
-本页是英文版译本；以英文版为准。
+> 本页是英文版 [mock-recipes.md](./mock-recipes.md) 的译本；如有出入，以英文版为准。
 
-这里是常见集成联调测试的任务型示例。每个示例都是增量配置：把 Route 复制到 `stuntdouble.toml`，创建引用的脚本，然后校验并运行。字段校验与 `ctx` 精确规则见[配置契约](../contracts/config.zh-CN.md)与[`ctx` API 契约](../contracts/ctx-api.zh-CN.md)。
+这里是常见集成联调测试的任务型示例。每个示例都是增量配置：把 Route 复制到 `stuntdouble.toml`，创建引用的脚本，然后校验并运行。字段校验与 `ctx` 精确规则见[配置契约](../contracts/config.zh-CN.md)与[`ctx` API 契约](../contracts/ctx-api.zh-CN.md)；命令行为见 [CLI 契约](../contracts/cli.zh-CN.md)。
 
 给 coding agent 的检查清单：
 
