@@ -45,10 +45,12 @@ tags: [github-actions, node-runtime, deprecation, cargo-audit, rustsec, github-p
 
 - 仍有漏洞即失败：`cargo audit` 在发现公告时以退出码 1 结束（本地用一个指向 `time 0.1.44` / RUSTSEC-2020-0071 的构造 `Cargo.lock` 验证过退出码，仓库自身 `Cargo.lock` 退出码 0）。
 - 未造成能力回退：`audit-check` 的「自动创建/更新 issue」在本仓库从未生效，`ci.yml` 的顶层 `permissions: contents: read` 没有给它 `issues: write`。
-- 新增的代价是安装步骤要现场编译：`cargo install cargo-audit --version 0.22.2 --locked` 在 4 核机器上约 4 分半（`--locked` 能用，因为发布的 crate 带 `Cargo.lock`）。tradeoff: 现状是零额外 action 依赖、只走 crates.io；天花板是每次 CI 多花几分钟；当 CI 时长成为瓶颈时，改用预编译二进制或缓存安装结果（RustSec 为 `cargo-audit` 发布了 cargo-dist 产物）。
+- 新增的代价是安装步骤要现场编译：`cargo install cargo-audit --version 0.22.2 --locked` 单独在本机 4 核上耗时 4 分 27 秒，在 GitHub 的 `ubuntu-latest` 上整个 `audit` job 为 3 分 02 秒（替换前的 `audit` job 约 3 分 19 秒），实际没有变慢。`--locked` 可用，因为发布的 crate 带 `Cargo.lock`。tradeoff: 现状是零额外 action 依赖、只走 crates.io；天花板是每次 CI 多花几分钟；当 CI 时长成为瓶颈时，改用预编译二进制或缓存安装结果（RustSec 为 `cargo-audit` 发布了 cargo-dist 产物）。
 - `cargo-audit` 版本由 Dependabot 之外的人工维护：GitHub Actions 生态的 Dependabot 看不到 `run:` 里的版本号，升级时要同时改 workflow 与本文件所在节的记录。
 
 ## 核查方法
+
+替换前后的效果对比（同一套 `gh api` 命令）：分支上 `audit` check run 的注解数从 2 降到 1，剩下的只有 `ubuntu-latest` 迁移提示；`cargo install` 与 `cargo audit` 两个步骤在 job 摘要里均为 success。
 
 ```bash
 # 某个 commit 上每个 check run 的注解数量

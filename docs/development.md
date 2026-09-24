@@ -179,7 +179,7 @@ lychee --offline --no-progress --exclude-path target --exclude-path .git './**/*
 
 ## 发布自动化配置
 
-- `.github/workflows/ci.yml`：`fmt`、`clippy`、`test`、`docs`、`docs-links`、`deny`、`audit`、`msrv` 八个 job，全部 action 按 SHA 固定。`audit` job 不依赖 Node.js action：先 `cargo install cargo-audit --version 0.22.2 --locked`，再跑 `cargo audit`，有漏洞即以非 0 退出使 job 失败，且不创建 issue。升级 `cargo-audit` 需人工改 workflow；安装要现场编译（4 核约 4–5 分钟）。tradeoff: 现状是零额外 action、只走 crates.io；天花板是每次 CI 多花几分钟；CI 时长成为瓶颈时改用预编译二进制或缓存安装结果。原因、运行时核查方法与仍属外部的注解见 [solutions/ci/node20-deprecation-annotations-only-cover-node20-actions.md](solutions/ci/node20-deprecation-annotations-only-cover-node20-actions.md)。
+- `.github/workflows/ci.yml`：`fmt`、`clippy`、`test`、`docs`、`docs-links`、`deny`、`audit`、`msrv` 八个 job，全部 action 按 SHA 固定。`audit` job 不依赖 Node.js action：先 `cargo install cargo-audit --version 0.22.2 --locked`，再跑 `cargo audit`，有漏洞即以非 0 退出使 job 失败，且不创建 issue。升级 `cargo-audit` 需人工改 workflow，且每次运行都要现场编译（2026-09-24 实测整个 `audit` job 3 分 02 秒，与替换前持平）。tradeoff: 现状是零额外 action、只走 crates.io；天花板是每次 CI 多花几分钟；CI 时长成为瓶颈时改用预编译二进制或缓存安装结果。原因、运行时核查方法与仍属外部的注解见 [solutions/ci/node20-deprecation-annotations-only-cover-node20-actions.md](solutions/ci/node20-deprecation-annotations-only-cover-node20-actions.md)。
 - `.github/workflows/release-plz.yml`：release PR、tag 与 cargo-dist 触发。
 - `.github/workflows/release.yml`：由 `dist-workspace.toml` 生成；改配置后运行 `dist generate`，不要手工编辑该文件。
 - `.github/workflows/release-extras.yml`：cargo-dist 的 post-announce job，负责 SBOM、GHCR 镜像、digest，以及二进制、容器与必需 Release 资产的验证。
