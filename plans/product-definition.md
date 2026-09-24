@@ -33,7 +33,7 @@
 | 超时与重试 | 脚本总超时默认 10 秒（可配置），上游超时 = `min(剩余脚本时间, opts.timeout_ms)`，并预留最多 100ms 的回复余量以避免与脚本硬超时竞态；默认不重试，`opts.retries` 显式开启且上限 3 次，只对传输层失败生效 | [ADR 0005](adr/0005-upstream-failure-semantics.md) |
 | 可观测性 | 每请求一条结构化日志（request_id/路由/耗时/上游链/状态码/错误分类）；默认不记录请求体与响应体；诊断开关附加 `detail`；堆栈永不进响应 | [ADR 0005](adr/0005-upstream-failure-semantics.md) |
 | 响应推进 | **不进第一版**，列入不做清单；v2 可加声明式响应序列或脚本 `callCount` 数字 | 本轮讨论 |
-| 目标平台与分发 | 核心二进制：Linux x86_64、macOS arm64、Windows x86_64；分发：GitHub Releases 二进制 + 容器镜像；GUI（如未来做）优先 Linux + macOS | 本轮讨论 |
+| 目标平台与分发 | 核心二进制：Linux x86_64、macOS arm64、Windows x86_64；分发：GitHub Releases 二进制 + 容器镜像（`linux/amd64`、`linux/arm64`）；GUI（如未来做）优先 Linux + macOS | 本轮讨论 |
 | 环境变量注入 | 支持 `ctx.env.*`，来源为 `.env` 或系统环境变量 | 本轮讨论 |
 
 ## 3. 演进约束（第一版 → 模式 2/3 的设计边界）

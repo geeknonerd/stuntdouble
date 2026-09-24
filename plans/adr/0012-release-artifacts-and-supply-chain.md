@@ -65,3 +65,13 @@ T9 的发布工作流已落地，执行时补充以下约束：
 - CodeQL 作为并行安全扫描运行，不加入分支保护的 required checks；是否启用合并保护跟踪于 #45。
 - release-plz 的 tag、分支与 release PR 使用 `RELEASE_PLZ_TOKEN`（细粒度 PAT：Contents 与 Pull requests 读写）；触发 cargo-dist 的 `workflow_dispatch` 使用 job `GITHUB_TOKEN` 的 `actions: write`，PAT 不需要 Actions 权限。
 - 其余后续硬化项：匿名 GHCR 拉取验证（#42）、资产清单单一来源（#43）、cargo-dist 权限与 installer 摘要（#44）。
+
+## #67 修订（2026-09-24）：容器镜像覆盖两个平台
+
+「决策」中的容器镜像条目此前只由 amd64 runner 构建，发出去的是单平台镜像：`v0.2.1` 的 tag 解析为 amd64 的 image manifest，arm64 主机只能靠模拟运行，而 cargo-dist 早已发布 `aarch64-apple-darwin` 归档。该条目据此收敛为：
+
+- 同一 tag 下发布覆盖 `linux/amd64` 与 `linux/arm64` 的镜像索引。
+- amd64 在宿主平台上原生编译；arm64 由同一个宿主平台 builder 交叉编译（`gcc-aarch64-linux-gnu` + `libc6-dev-arm64-cross`），runtime 阶段仍在 QEMU 下安装 `ca-certificates`。不采用全量模拟：本机实测同一 Dockerfile 的模拟构建超过 25 分钟仍未完成，交叉编译的编译步骤 263 秒，与原生 amd64 的 258 秒持平。
+- `release-extras` 在公告前断言该 tag 是同时覆盖两个平台的镜像索引，否则 fail closed；`v0.2.1` 及更早的 tag 保持单平台。
+
+原因：镜像与三平台归档并列发布，而用户侧的 arm64（Apple Silicon 上的 Docker、ARM 云主机）很常见；把额外成本放在交叉编译而不是模拟，能保住发布 job 的时长。
