@@ -200,6 +200,7 @@ upload_max_bytes = 20971520  # 20 MiB，只计 part content
 - GitHub issue #51：v1 文件能力的父 spec，锁定 `upload_max_bytes` 的数据预算语义与 framing overhead 的表述。
 - GitHub issue #56：`server: bound request body read time`，解析期读取期限（`server.request_timeout_ms`）；它与本文的字节分层是两个独立约束，不能互相替代。
 - 相邻 convention：`docs/solutions/conventions/host-boundary-fail-closed-input-classification.md`，其中已预测 T12 会检验“缺失、畸形、超限不可压平”的边界。
+- 同一批 multipart 夹具的测试侧规则：[hold-upload-temp-dir-with-unfinished-request-body.md](../test-failures/hold-upload-temp-dir-with-unfinished-request-body.md) —— 请求级上传临时目录如何被确定性地观察；本文负责字节分层，那篇负责测试同步。
 - 配置契约：`docs/contracts/config.md:30`、`docs/contracts/config.md:80`。
 - `ctx` 契约：`docs/contracts/ctx-api.md:71-73`（非 multipart 暴露 `[]`，非文件字段仍计入 `files.upload_max_bytes`）。
 - 安全边界：`SECURITY.md:23`，明确“整个 multipart body stream，including framing，受 `upload_max_bytes` 加 1 MiB allowance 约束，数据预算不含 framing，流式账目为权威”。
