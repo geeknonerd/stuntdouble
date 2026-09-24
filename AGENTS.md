@@ -68,7 +68,7 @@ Stunt Double 是 Rust 实现的 Mock Server，面向对接真实外部依赖的�
 - 只允许 squash merge；PR 标题使用英文 Conventional Commits。
 - 每个 commit 必须 `git commit -s`（DCO）。
 - CI 硬门槛：`fmt`、`clippy`、`test`、`docs`、`docs-links`、`deny`、`audit`、`msrv`、`pr-title`、`dco`。
-- CodeQL 作为并行安全扫描运行，不加入分支保护的 required checks。
+- CodeQL 不加入 required checks；由 ruleset 在分析未完成或引入 high/critical 告警时阻止合并。
 - 版本号遵循 SemVer，tag 为 `vMAJOR.MINOR.PATCH`。
 - 发布由 `release-plz` + `cargo-dist` 驱动；详细规则见 [docs/development.md](docs/development.md)。
 - 不要直接 push、force push 或删除 `main`。

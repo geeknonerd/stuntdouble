@@ -22,6 +22,8 @@
 - 与 `main` 保持同步
 - 每个 commit 带 DCO 签名（`git commit -s`）；release-plz 生成的 release PR 是唯一例外（见「发布流程」）
 
+CodeQL 不是 required status check，而是由仓库 ruleset「CodeQL merge protection」参与合并判定：CodeQL 对 PR 的分析尚未完成、工具未配置，或 PR 引入 high 及以上安全告警时都会阻止合并（`alerts_threshold = none`、`security_alerts_threshold = high_or_higher`，target 为默认分支）。误报在 Security 标签页 dismiss 并写明理由；需要临时绕过时调整或停用该 ruleset，不要把 CodeQL 加进 required checks。
+
 项目只有一位维护者时，所需批准数为 0，CI 是硬门槛。第二位维护者加入后批准数变为 1，由 CODEOWNERS 负责评审路由。
 
 ## 提交信息
@@ -180,7 +182,7 @@ lychee --offline --no-progress --exclude-path target --exclude-path .git './**/*
 - `.github/workflows/release.yml`：由 `dist-workspace.toml` 生成；改配置后运行 `dist generate`，不要手工编辑该文件。
 - `.github/workflows/release-extras.yml`：cargo-dist 的 post-announce job，负责 SBOM、GHCR 镜像、digest，以及二进制、容器与必需 Release 资产的验证。
 - `.github/release-build-setup.yml`：cargo-dist 注入到每个构建 job 的步骤，拒绝非 tag 或其他 ref 的发布构建。
-- `.github/workflows/codeql.yml`：Rust 高级代码扫描，在 `main`、pull request 与每周计划任务上运行；它作为并行安全扫描，不加入分支保护的 required checks。
+- `.github/workflows/codeql.yml`：Rust 高级代码扫描，在 `main`、pull request 与每周计划任务上运行；它不加入 required checks，改由 ruleset「CodeQL merge protection」参与合并判定（阈值与误报处置见「Pull request」）。
 - 仓库必须允许 GitHub Actions 创建 pull request（Settings → Actions → General → Workflow permissions）。
 - crates.io 发布默认关闭（`release-plz.toml` 的 `publish = false`）。启用时把 `publish` 改为 `true`，并在 `release-plz.yml` 的 release job 中提供 `CARGO_REGISTRY_TOKEN`。
 - `RELEASE_PLZ_TOKEN`（推荐）：细粒度 PAT，权限为 `Contents: Read and write` 与 `Pull requests: Read and write`。它供 release-plz 创建 tag、分支和 release PR，使 PAT 创建的 release PR 自动触发 CI；PAT 不需要 `Actions: write`，触发 `release.yml` 使用 job 内 `GITHUB_TOKEN` 的 `actions: write`。
