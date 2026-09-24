@@ -75,6 +75,7 @@ gh attestation verify stuntdouble-x86_64-unknown-linux-gnu.tar.gz --repo geeknon
 ## 文档
 
 - [快速开始](docs/guide/getting-started.zh-CN.md)
+- [Mock 场景示例](docs/guide/mock-recipes.zh-CN.md)
 - [产品功能定义](plans/product-definition.md)
 - [公开演示场景](plans/demo-document-catalog.md)
 - [演示夹具](demo/README.zh-CN.md)

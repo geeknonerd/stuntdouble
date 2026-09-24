@@ -6,6 +6,7 @@
 
 - [开发与发布流程](development.md) — Git 工作流、CI、版本号、发布流程、MSRV 与依赖政策。
 - [快速开始](guide/) — 安装、第一个 Route 与上游调用（英文 + 中文译本）。
+- [Mock 场景示例](guide/mock-recipes.zh-CN.md) — JSON、上游、文件、上传与 CI 的任务型示例（英文 + 中文译本）。
 - [公开契约](contracts/) — 配置、`ctx` API 与 CLI 契约。
 - [Agent 文档](agents/) — issue tracker、triage labels 与领域文档消费规则。
 - [GitHub Pages 首页](index.md) — 对外入口页。

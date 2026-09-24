@@ -20,6 +20,7 @@ T1–T13 切片已实现：T1–T7 实现运行时，T8 冻结 v1 配置、CLI �
 
 - [README](https://github.com/geeknonerd/stuntdouble/blob/main/README.md) — 项目概览与当前状态。
 - [快速开始](https://github.com/geeknonerd/stuntdouble/blob/main/docs/guide/getting-started.zh-CN.md) — 最小可用配置与第一个路由。
+- [Mock 场景示例](https://github.com/geeknonerd/stuntdouble/blob/main/docs/guide/mock-recipes.zh-CN.md) — JSON、上游、文件、上传与 CI 的任务型示例。
 - [公开契约](https://github.com/geeknonerd/stuntdouble/tree/main/docs/contracts) — 配置、`ctx` API 与 CLI。
 - [演示夹具](https://github.com/geeknonerd/stuntdouble/blob/main/demo/README.zh-CN.md) — 可运行的清单与 PDF 下载场景。
 - [`ctx` API 类型定义](https://github.com/geeknonerd/stuntdouble/blob/main/types/ctx-api-v1.d.ts) — `apiVersion` 1 源码类型。
