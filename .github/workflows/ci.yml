@@ -116,10 +116,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: cargo
         run: echo "exists=$([ -f Cargo.toml ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      # rustsec/audit-check has no release newer than v2.0.0 and still targets
+      # Node.js 20, so the job installs a pinned cargo-audit directly (#32).
       - if: steps.cargo.outputs.exists == 'true'
-        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - if: steps.cargo.outputs.exists == 'true'
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - if: steps.cargo.outputs.exists == 'true'
+        run: cargo audit
 
   msrv:
     name: msrv

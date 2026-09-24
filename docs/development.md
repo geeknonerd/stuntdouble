@@ -179,6 +179,7 @@ lychee --offline --no-progress --exclude-path target --exclude-path .git './**/*
 
 ## 发布自动化配置
 
+- `.github/workflows/ci.yml`：`fmt`、`clippy`、`test`、`docs`、`docs-links`、`deny`、`audit`、`msrv` 八个 job，全部 action 按 SHA 固定。`audit` job 不依赖 Node.js action：先 `cargo install cargo-audit --version 0.22.2 --locked`，再跑 `cargo audit`，有漏洞即以非 0 退出使 job 失败，且不创建 issue。升级 `cargo-audit` 需人工改 workflow，且每次运行都要现场编译（2026-09-24 实测整个 `audit` job 3 分 02 秒，与替换前持平）。tradeoff: 现状是零额外 action、只走 crates.io；天花板是每次 CI 多花几分钟；CI 时长成为瓶颈时改用预编译二进制或缓存安装结果。原因、运行时核查方法与仍属外部的注解见 [solutions/ci/node20-deprecation-annotations-only-cover-node20-actions.md](solutions/ci/node20-deprecation-annotations-only-cover-node20-actions.md)。
 - `.github/workflows/release-plz.yml`：release PR、tag 与 cargo-dist 触发。
 - `.github/workflows/release.yml`：由 `dist-workspace.toml` 生成；改配置后运行 `dist generate`，不要手工编辑该文件。
 - `.github/workflows/release-extras.yml`：cargo-dist 的 post-announce job，负责 SBOM、GHCR 镜像、digest，以及二进制、容器与必需 Release 资产的验证。
@@ -199,7 +200,6 @@ lychee --offline --no-progress --exclude-path target --exclude-path .git './**/*
 - [#41](https://github.com/geeknonerd/stuntdouble/issues/41) 发布原子性：当前 `release-extras` 失败时把 Release 回退为 draft；等 cargo-dist 支持完整 draft 编排或项目自管 Release 生命周期后升级。
 - [#43](https://github.com/geeknonerd/stuntdouble/issues/43) 必需资产清单单一来源：出现第二个受支持 `apiVersion` 或新资产类型时，从 dist manifest 派生校验清单。
 - [#44](https://github.com/geeknonerd/stuntdouble/issues/44) cargo-dist 权限与 installer 摘要：上游提供按 job 权限或摘要校验能力，或项目决定承担 `allow-dirty = ["ci"]` 代价时处理。
-- [#45](https://github.com/geeknonerd/stuntdouble/issues/45) CodeQL 合并保护：首次发布后评估 required check 或 code scanning merge protection，并记录最终决策。
 
 ## 构建说明
 
