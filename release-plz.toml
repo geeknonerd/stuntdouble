@@ -11,3 +11,8 @@ git_tag_enable = true
 # upstream), so prerelease tags are invisible and must never be used as
 # release markers; keep Cargo.toml versions plain `MAJOR.MINOR.PATCH`.
 git_only = true
+# Only commits that change what we ship (or its dependencies) trigger a
+# version PR: the listed commit types, any `deps` scope, and any breaking
+# change. docs/ci/test/chore merges land in the changelog of the next real
+# release instead of cutting a patch release of their own.
+release_commits = '^(feat|fix|perf|refactor|security|build)(\(.+\))?!?:|^[a-z]+\(deps[^)]*\)!?:|^[a-z]+(\(.+\))?!:'

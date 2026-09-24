@@ -60,7 +60,7 @@ docs: describe the release process
 
 1. 把已完成的改动合并进 `main`。这次 push 触发 `.github/workflows/release-plz.yml`。
 2. `release-plz release` 根据 `release-plz.toml` 的 `git_only = true` 从 git tag 判断未发布版本；需要发布时创建 tag，并在同一 job 中用 `gh workflow run release.yml -f tag=<tag>` 触发产物流水线。
-3. `release-plz release-pr` 按 Conventional Commits 计算下一版本，打开或更新 release PR；PR 包含 `Cargo.toml` 与 `CHANGELOG.md` 改动。
+3. `release-plz release-pr` 按 Conventional Commits 计算下一版本，打开或更新 release PR；PR 包含 `Cargo.toml` 与 `CHANGELOG.md` 改动。只有命中 `release_commits` 的提交才触发版本 PR（`feat`/`fix`/`perf`/`refactor`/`security`/`build`、任意 `deps` scope，或任何带 `!` 的破坏性变更）；`docs`/`ci`/`test`/`chore` 合并不单独发版，它们的条目随下一个真实版本进入 CHANGELOG。
 4. 核对 release PR 的版本号、`CHANGELOG.md`、release notes 与 B 层文档的中文译本。release PR 的 commit 由 release-plz 生成、不含 `Signed-off-by`，`dco` 工作流因此对来自本仓库 `release-plz-*` 分支的 PR 跳过检查（跳过的 job 记为 success）；人类提交仍需 `git commit -s`。
 5. 合并 release PR；下一次 `release-plz release` 会为合并后的版本创建 tag，并触发产物流水线。
 6. `.github/workflows/release.yml` 由 `cargo-dist` 从 `dist-workspace.toml` 生成，只接受 `workflow_dispatch` 的 tag 输入；`.github/release-build-setup.yml` 会在构建前断言 ref 就是 `vMAJOR.MINOR.PATCH` 形式的输入 tag（正则仍接受旧式后缀，供历史 tag 使用），且 tag commit 可从 `origin/main` 到达，绝不直接发布 `main`。它构建 Linux x86_64、macOS arm64、Windows x86_64 的 `.tar.gz`/`.zip`、逐文件 `.sha256`、`sha256.sum`、源码归档与 `types/ctx-api-v1.d.ts`，生成 GitHub artifact attestation，并创建 GitHub Release。
