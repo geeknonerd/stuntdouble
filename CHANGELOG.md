@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- *(sandbox)* bound concurrent script workers ([#82](https://github.com/geeknonerd/stuntdouble/pull/82))
+- *(sandbox)* bound concurrent script workers and fail fast when the limit is reached ([#82](https://github.com/geeknonerd/stuntdouble/pull/82), [#29](https://github.com/geeknonerd/stuntdouble/issues/29))
 
 ### Other
 
@@ -28,10 +28,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(ci)* record the CodeQL merge protection decision ([#71](https://github.com/geeknonerd/stuntdouble/pull/71))
 - *(cli)* keep fixture values out of the redaction assertion message ([#70](https://github.com/geeknonerd/stuntdouble/pull/70))
 - *(dist)* record GHCR package visibility inheritance ([#68](https://github.com/geeknonerd/stuntdouble/pull/68))
-
-### Added
-
-- *(sandbox)* bound concurrent script workers and fail fast when the limit is reached ([#29](https://github.com/geeknonerd/stuntdouble/issues/29))
 
 ## [0.2.1](https://github.com/geeknonerd/stuntdouble/compare/v0.2.0...v0.2.1) - 2026-09-23
 
