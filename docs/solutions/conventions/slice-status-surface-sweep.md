@@ -35,7 +35,7 @@ T13（issue #54，分支 `feat/offline-document-demo`；截至本文写作时尚
 | `docs/index.md` + `docs/index.zh-CN.md` 的状态段 | 同一叙事（GitHub Pages 首页） | PR #55、#57 各自更新 |
 | `CONTRIBUTING.md` 的 Project status | 同一叙事 | PR #55、#57 各自更新 |
 | `CHANGELOG.md` 的 `## [Unreleased]` → `### Added` | 每条切片一条英文 bullet，带 issue 链接 | PR #55 加了 #52 条目，PR #57 加了 #53 条目 |
-| `AGENTS.md` 的「项目快照」 | 一行切片子句 | PR #55、#57 各只改了这一行 |
+| `AGENTS.md` | 不写切片状态；只保留会改变 agent 行为的持久规则，并把状态指向 `README.md`、`CONTRIBUTING.md` 与 `CHANGELOG.md` | n/a（不再是状态版面；见下方修订） |
 | 描述该区域现状的 learning 文档与指南 | 只改与本次变化冲突的段落 | T13 同步了 demo 夹具段落与 `docs/guide/getting-started.md` 的「下一步」 |
 
 最省事的机械做法：开 PR 前用上一个切片号与对应 issue/PR 号（例如 `T12`、`#57`）全仓 grep 一次，对命中处逐条判断它是「历史记录」还是「现状描述」。
@@ -44,7 +44,7 @@ T13（issue #54，分支 `feat/offline-document-demo`；截至本文写作时尚
 
 `docs-links` 门槛只做两件事：`lychee --offline` 检查全部 Markdown 的本地链接，以及校验每个 `.zh-CN.md` 都有同名英文文件、两页都含语言切换链接（`.github/workflows/ci.yml` 的 `docs-links` job）。`docs/development.md` 明确写着 “外链与译文漂移不做自动检查”。因此状态句子过期、漏掉一个版面、中文译本内容没跟上，全部门禁照常通过——只有人工或 agent review 才会发现，而能否发现取决于 review 是否恰好扫到那一处。
 
-状态版面还是新 agent 的第一入口：`AGENTS.md` 的项目快照与 `CONTRIBUTING.md` 的项目状态决定了后来者认为 “什么已实现”，读错会让后续工作建立在不存在的现状上。
+状态版面还是新 agent 的第一入口：`README.md`、`CONTRIBUTING.md` 与 `CHANGELOG.md` 决定了后来者认为 “什么已实现”，读错会让后续工作建立在不存在的现状上。`AGENTS.md` 不复制这些状态，只指向它们，维护规则见 `~/.codex/AGENTS-OPTIMIZATION.md`。
 
 ## 何时适用
 
@@ -57,13 +57,19 @@ T13（issue #54，分支 `feat/offline-document-demo`；截至本文写作时尚
 
 T13 的实际证据：
 
-- 漏更（同步前）：`README.md` 已宣告 T13，而 `docs/index.md`、`docs/index.zh-CN.md`、`CONTRIBUTING.md` 仍停在 T1–T12，`CHANGELOG.md` 的 `## [Unreleased]` 缺本次条目；修复把四处与 `AGENTS.md` 一起同步。
+- 漏更（同步前）：`README.md` 已宣告 T13，而 `docs/index.md`、`docs/index.zh-CN.md`、`CONTRIBUTING.md` 仍停在 T1–T12，`CHANGELOG.md` 的 `## [Unreleased]` 缺本次条目；按当时的约定，修复把四处与 `AGENTS.md` 一起同步。
 - 过时现状段落：`docs/solutions/conventions/script-owned-upstream-error-mapping.md` 的 demo 段落改为 “T5 时该目录只靠 `.gitkeep` 存在，T13 起目录内是真实夹具（`metadata.json` 与两张公开 PDF）”，并补上离线路由不读 `METADATA_API_URL`。
 - 不要动的历史记录：`CHANGELOG.md` 已发布的 `0.1.0-alpha.1` 小节、`docs/solutions/` 中以会话日期叙述的探查过程、`docs/development.md` 里针对当时工具链的版本说明——它们是历史，不是现状描述。
+
+## 修订（2026-09-26）：AGENTS.md 不再是状态版面
+
+`AGENTS.md` 的维护遵循 `~/.codex/AGENTS-OPTIMIZATION.md`：只保留会改变 agent 行为的持久规则，不承载切片状态、版本号或环境状态。agent 需要现状时，从 `README.md`、`CONTRIBUTING.md` 与 `CHANGELOG.md` 读取，而不是从 `AGENTS.md` 复制。
+
+PR #55/#57 同步 `AGENTS.md` 项目快照是当时的做法，保留为历史例证，不再作为当前清单要求。若发现 `AGENTS.md` 仍含过期状态，应另开一次 AGENTS.md 优化，按全局指南删除或改为指向现状文档，不在切片文档同步 PR 中顺手重写。
 
 ## 相关
 
 - `docs/development.md` —— 文档语言分层、本地检查与 docs-links 门槛的权威说明
 - `.github/workflows/ci.yml` —— `docs-links` job 的实际检查范围
-- `AGENTS.md` —— 项目快照与「先读」清单
+- `AGENTS.md` —— 持久行为规则与「先读」清单；切片状态不在此维护
 - `CONTRIBUTING.md` —— 面向贡献者的项目状态入口

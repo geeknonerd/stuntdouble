@@ -1,7 +1,7 @@
 ---
 title: "A second shutdown signal is only guaranteed after the first one is observed"
 date: 2026-09-22
-last_updated: 2026-09-24
+last_updated: 2026-09-26
 category: conventions
 module: serve shutdown lifecycle
 problem_type: convention
@@ -19,7 +19,7 @@ tags: [shutdown, signals, sigint, sigterm, ctrl-c, exit-codes, end-to-end-tests,
 
 ## 背景
 
-T10（issue #33，分支 `feat/graceful-shutdown`）为 `serve` 增加信号驱动的 graceful shutdown。信号安装留在进程边界：`src/main.rs:86-90` 创建 shutdown future 后把它交给 `server::run`；`src/server.rs` 的 390 行起的 `serve_connections` 把该 future 接在自己的连接循环上：首个信号后停止 accept，通知每个在途连接调用 `Connection::graceful_shutdown`，再等待所有连接任务结束（该循环在 #56 中从 `axum::serve` 换成 hyper 的 HTTP/1 builder）。Unix 同时预注册 SIGINT/SIGTERM 两个信号流，`recv_shutdown_signal` 用 `tokio::select!` 接收第一个通知，首次信号触发正常 drain，后台任务继续等待第二个，并在观测到后按 128+signal 立即退出（`src/main.rs:124-152`）。Windows 使用预注册的 `tokio::signal::windows::ctrl_c()` 流，第二次 Ctrl-C 退出 `130`（`src/main.rs:155-167`）。
+T10（issue #33，分支 `feat/graceful-shutdown`）为 `serve` 增加信号驱动的 graceful shutdown。信号安装留在进程边界：`src/main.rs:86-90` 创建 shutdown future 后把它交给 `server::run`；`src/server.rs` 的 406 行起的 `serve_connections` 把该 future 接在自己的连接循环上：首个信号后停止 accept，通知每个在途连接调用 `Connection::graceful_shutdown`，再等待所有连接任务结束（该循环在 #56 中从 `axum::serve` 换成 hyper 的 HTTP/1 builder）。Unix 同时预注册 SIGINT/SIGTERM 两个信号流，`recv_shutdown_signal` 用 `tokio::select!` 接收第一个通知，首次信号触发正常 drain，后台任务继续等待第二个，并在观测到后按 128+signal 立即退出（`src/main.rs:124-152`）。Windows 使用预注册的 `tokio::signal::windows::ctrl_c()` 流，第二次 Ctrl-C 退出 `130`（`src/main.rs:155-167`）。
 
 公开契约是：第一个信号停止接受新连接、排空在途请求并以 `0` 返回；只有在第一次关闭信号被观测后再次观测到第二个信号，才保证放弃排空并立即退出，SIGINT/Ctrl-C 为 `130`，SIGTERM 为 `143`（`docs/contracts/cli.md:43-45`；`plans/adr/0011-contract-compatibility.md:45-46`）。
 
@@ -41,7 +41,7 @@ T10（issue #33，分支 `feat/graceful-shutdown`）为 `serve` 增加信号驱�
 
 ### 2. 继续把进程信号留在 CLI 边界
 
-宿主信号、平台 Ctrl-C 和强制退出码属于 CLI；`server::run` 只接收一个 shutdown future 并负责连接排空（`src/main.rs:86-90`、`src/server.rs` 的 390 行起）。这不是形式划分：它让服务库不依赖操作系统信号 API，也允许测试或其他调用方提供不同的关闭触发器。新增“第几个信号”的逻辑不应漏进路由、请求处理或脚本层。
+宿主信号、平台 Ctrl-C 和强制退出码属于 CLI；`server::run` 只接收一个 shutdown future 并负责连接排空（`src/main.rs:86-90`、`src/server.rs` 的 406 行起）。这不是形式划分：它让服务库不依赖操作系统信号 API，也允许测试或其他调用方提供不同的关闭触发器。新增“第几个信号”的逻辑不应漏进路由、请求处理或脚本层。
 
 ### 3. 保证路径等待状态，退化路径单独测试
 
@@ -49,7 +49,7 @@ T10（issue #33，分支 `feat/graceful-shutdown`）为 `serve` 增加信号驱�
 
 背靠背投递是独立的退化契约：连续发送两个 SIGTERM 后，在有限期限内接受 `0` 或 `143`（当前回归只覆盖 SIGTERM；两个 SIGINT/Ctrl-C 的对应码是 `0` 或 `130`）。`0` 表示系统合并通知并完成正常 drain；`143` 表示第二次通知被观测并强制退出。两者都符合契约；进程必须在有限期限内以 `0` 或 `143` 退出，超时、其它退出码或信号终止都不符合契约。
 
-当前测试工具已经体现了这两个层次：`wait_for_log` 轮询带超时，`assert_second_signal_forces_exit` 用 30 秒在途请求和保持的客户端连接建立排空场景，`back_to_back_sigterm_signals_still_exit` 则接受 `0 | 143`（`tests/cli.rs:4987-5001`、`tests/cli.rs:5066-5094`、`tests/cli.rs:5111-5127`）。
+当前测试工具已经体现了这两个层次：`wait_for_log` 轮询带超时，`assert_second_signal_forces_exit` 用 30 秒在途请求和保持的客户端连接建立排空场景，`back_to_back_sigterm_signals_still_exit` 则接受 `0 | 143`（`tests/cli.rs:5137-5151`、`tests/cli.rs:5216-5244`、`tests/cli.rs:5261-5277`）。
 
 ### 4. 不为不可兑现的保证增加复杂度
 
@@ -87,7 +87,7 @@ let status = wait_for_exit(&mut fixture.child, Duration::from_secs(5));
 assert_eq!(status.code(), Some(143));
 ```
 
-这段模式来自 `assert_second_signal_forces_exit`（`tests/cli.rs:5066-5094`）。日志只用于内部同步，不是公开输出契约；关键是第二次信号发送前，已有证据表明第一次已经进入 shutdown，且进程尚未退出。
+这段模式来自 `assert_second_signal_forces_exit`（`tests/cli.rs:5216-5244`）。日志只用于内部同步，不是公开输出契约；关键是第二次信号发送前，已有证据表明第一次已经进入 shutdown，且进程尚未退出。
 
 反模式是先把“背靠背”变成“有明显间隔”：
 
@@ -109,7 +109,7 @@ let status = wait_for_exit(&mut fixture.child, Duration::from_secs(5));
 assert!(matches!(status.code(), Some(0 | 143)));
 ```
 
-`0` 是第一次信号完成正常 drain，`143` 是第二次信号被观测后强制退出；测试只要求进程在期限内结束，避免把 OS 调度结果固化成错误断言（`tests/cli.rs:5111-5127`）。现有 Unix 回归还分别覆盖首次 SIGINT/SIGTERM 退出 `0`、SIGINT/SIGTERM 排空在途请求、第二次 SIGINT 退出 `130`、第二次 SIGTERM 退出 `143`（`tests/cli.rs:5003-5127`）。
+`0` 是第一次信号完成正常 drain，`143` 是第二次信号被观测后强制退出；测试只要求进程在期限内结束，避免把 OS 调度结果固化成错误断言（`tests/cli.rs:5261-5277`）。现有 Unix 回归还分别覆盖首次 SIGINT/SIGTERM 退出 `0`、SIGINT/SIGTERM 排空在途请求、第二次 SIGINT 退出 `130`、第二次 SIGTERM 退出 `143`（`tests/cli.rs:5153-5277`）。
 
 ## 相关
 
@@ -118,3 +118,4 @@ assert!(matches!(status.code(), Some(0 | 143)));
 - 回归测试：`tests/cli.rs` 中 SIGINT/SIGTERM 首次信号、在途排空、第二次信号与背靠背用例
 - issue：[#33](https://github.com/geeknonerd/stuntdouble/issues/33)
 - 同一反模式的另一个实例（用固定等待代替同步点，代价是对 1 MiB 响应体作了错误假设）：[../test-failures/hold-upload-temp-dir-with-unfinished-request-body.md](../test-failures/hold-upload-temp-dir-with-unfinished-request-body.md)
+- 同一「先观察状态转变再走后续分支」模式在 worker 容量测试上的实例：[script-worker-contract-max-and-post-deadline-held-slot-tests.md](script-worker-contract-max-and-post-deadline-held-slot-tests.md)

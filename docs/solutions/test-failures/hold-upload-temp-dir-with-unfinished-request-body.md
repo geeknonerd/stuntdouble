@@ -43,11 +43,11 @@ tags: [flaky-test, integration-test, async-timing, request-scoped-temp-dir, mult
 
 修复是 PR #77（2026-09-24 合并到 main），只动 `tests/cli.rs`，生产代码不变：
 
-1. **客户端只发一半请求体，然后握着不放。** 写请求头加 multipart body 的开头（file part 头 + 4096 字节数据），不再靠响应阶段决定观察时机（`tests/cli.rs:2453-2473`）。切分点是 part 头之后第一个 `\r\n\r\n` 再加 4 字节，保证解析器能走到「创建文件」这一步（`tests/cli.rs:2453-2459`）。
-2. **把观察窗口挪进解析阶段。** `parse_multipart()` 在读 body 之前就调用 `create_upload_dir()`（`src/files.rs:325`），随后在 `field.chunk()` 循环里逐块落盘（`src/files.rs:356-373`）；请求体读不完它就不会返回，所以 body 未完成期间目录的存在由解析器自己持有，而不是由定时器保证。
+1. **客户端只发一半请求体，然后握着不放。** 写请求头加 multipart body 的开头（file part 头 + 4096 字节数据），不再靠响应阶段决定观察时机（`tests/cli.rs:2603-2623`）。切分点是 part 头之后第一个 `\r\n\r\n` 再加 4 字节，保证解析器能走到「创建文件」这一步（`tests/cli.rs:2603-2609`）。
+2. **把观察窗口挪进解析阶段。** `parse_multipart()` 在读 body 之前就调用 `create_upload_dir()`（`src/files.rs:325`），随后在 `field.chunk()` 循环里逐块落盘（`src/files.rs:355-372`）；请求体读不完它就不会返回，所以 body 未完成期间目录的存在由解析器自己持有，而不是由定时器保证。
 3. **等待助手只用于 fixture 主动持有的状态。** `wait_for_temp_entries` 改名为 `wait_for_entries(root, what)`（`tests/cli.rs:562-576`），同一套收敛等待同时覆盖目录和目录内的文件；它的 doc comment 就是这条规则的落点：`Only use this for a state the fixture holds open (an unfinished request body, for example); a state that can come and go needs a synchronization point instead.`（`tests/cli.rs:559-561`）
-4. **安全断言全部保留。** 等待到的目录必须恰好一个；Unix 上 mode 必须是 `0o700`（`tests/cli.rs:2476-2487`）；目录内文件名必须是不透明数字串，且不等于 `forbidden-client-name.bin`（`tests/cli.rs:2488-2499`）；stderr 不得出现客户端文件名或临时根路径（`tests/cli.rs:2516-2523`）。
-5. **观察完仍走正常路径。** 断言之后补发 body 剩余部分，脚本 `ctx.respond(200, {}, ctx.request.files[0].stream())` 流式返回文件，断言 200，再用 `wait_for_empty_temp` 确认清理（`tests/cli.rs:2503-2513`）——清理断言本身是收敛的，不受本次改动影响。
+4. **安全断言全部保留。** 等待到的目录必须恰好一个；Unix 上 mode 必须是 `0o700`（`tests/cli.rs:2626-2637`）；目录内文件名必须是不透明数字串，且不等于 `forbidden-client-name.bin`（`tests/cli.rs:2638-2649`）；stderr 不得出现客户端文件名或临时根路径（`tests/cli.rs:2666-2673`）。
+5. **观察完仍走正常路径。** 断言之后补发 body 剩余部分，脚本 `ctx.respond(200, {}, ctx.request.files[0].stream())` 流式返回文件，断言 200，再用 `wait_for_empty_temp` 确认清理（`tests/cli.rs:2653-2663`）——清理断言本身是收敛的，不受本次改动影响。
 6. **删掉同步残骸。** 客户端线程、mpsc 握手、2 秒 sleep 全部删除；测试从 2.10 s 降到 0.13 s。
 
 ## 为什么这样可行
@@ -56,7 +56,7 @@ tags: [flaky-test, integration-test, async-timing, request-scoped-temp-dir, mult
 
 - `create_upload_dir()` 返回 `TempDir`，Unix 下构造时把权限固定成 `0o700`（`src/files.rs:406-413`）。
 - 解析期间它先是 `parse_multipart()` 的局部变量；解析成功后才移进 `UploadStore { dir: Mutex<Option<TempDir>>, .. }`，而该类型的注释写明它就是「在最后一个持有者 drop 时删除随机临时目录」的守卫（`src/files.rs:191-198`、`src/files.rs:397-401`）。
-- 脚本用 `ctx.request.files[0].stream()` 返回文件时，流式响应的 `FileBody` 持有该守卫（`src/files.rs:944-946`），中继函数把它留在函数体内直到返回（`src/server.rs:941-943`）。但这只把生命周期延长到「中继结束」，而中继结束并不要求客户端读过数据：本次实测中 1 MiB 响应在约 53 ms 内就写完了发送路径（`src/server.rs:957-986`），函数返回守卫释放，目录随即被删除。客户端的 sleep 从来没有让服务器卡住。
+- 脚本用 `ctx.request.files[0].stream()` 返回文件时，流式响应的 `FileBody` 持有该守卫（`src/files.rs:944-946`），中继函数把它留在函数体内直到返回（`src/server.rs:959-962`）。但这只把生命周期延长到「中继结束」，而中继结束并不要求客户端读过数据：本次实测中 1 MiB 响应在约 53 ms 内就写完了发送路径（`src/server.rs:975-1004`），函数返回守卫释放，目录随即被删除。客户端的 sleep 从来没有让服务器卡住。
 
 所以旧测试观察的「响应阶段」是典型的会来又会走的状态；新测试改成观察「解析阶段」：要删掉目录，必须等 `parse_multipart()` 把请求体读完，而请求体的最后一段正握在测试自己手里。`wait_for_entries` 等的事件由测试自身的动作驱动，必然发生，不再需要猜时机。
 
@@ -72,8 +72,9 @@ tags: [flaky-test, integration-test, async-timing, request-scoped-temp-dir, mult
 ## 相关
 
 - GitHub issue #76：flake 报告，含两次 CI run 与「加长超时只是掩盖竞态」的判断；PR #77：修复并合并（2026-09-24），提交信息记录了 50 次连续运行、全量本地门禁与 CI 转绿。
-- 回归测试：`tests/cli.rs:2418-2524`（本测试）、`tests/cli.rs:559-591`（`wait_for_entries` 与 `wait_for_empty_temp`）。
+- 回归测试：`tests/cli.rs:2568-2674`（本测试）、`tests/cli.rs:559-591`（`wait_for_entries` 与 `wait_for_empty_temp`）。
 - 同一根因的另一半（响应完成不等于客户端读完）：[blocking-upstream-body-to-async-stream-bridge.md](../architecture-patterns/blocking-upstream-body-to-async-stream-bridge.md)。
+- 同一同步原则在 worker-pool 饱和场景的实例：[script-worker-contract-max-and-post-deadline-held-slot-tests.md](../conventions/script-worker-contract-max-and-post-deadline-held-slot-tests.md) —— capacity 信号驱动的饱和窗口观察与 permit 生命周期断言。
 - 同类「用固定 sleep 代替同步」的既有教训：[serve-shutdown-second-signal-semantics.md](../conventions/serve-shutdown-second-signal-semantics.md)。
 - 相邻的请求体截止与 multipart 清理边界：[request-read-deadline-at-the-connection-layer.md](../conventions/request-read-deadline-at-the-connection-layer.md)、[separate-multipart-data-budget-from-raw-body-limit.md](../conventions/separate-multipart-data-budget-from-raw-body-limit.md)、[host-boundary-fail-closed-input-classification.md](../conventions/host-boundary-fail-closed-input-classification.md)。
 - 更早的 E2E 稳定化先例：issue #35 与 PR #38（把端口启动竞态换成可观察的就绪证据）。
