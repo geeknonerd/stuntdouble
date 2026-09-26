@@ -1786,6 +1786,156 @@ script = "scripts/ok.js"
     assert_eq!(error_class(&second.body).as_deref(), Some("script_error"));
 }
 
+/// The ctx-api contract allows at most 16 script worker slots, so 17
+/// concurrent runaway requests independently prove the cap: an unbounded pool
+/// would let all of them run and reject none.
+const SCRIPT_WORKER_CONTRACT_MAX: usize = 16;
+const SATURATING_SCRIPT_REQUESTS: usize = SCRIPT_WORKER_CONTRACT_MAX + 1;
+
+fn saturate_script_workers(port: u16) -> (Duration, Vec<Response>, Response, Response) {
+    let started = Instant::now();
+    let (capacity_tx, capacity_rx) = std::sync::mpsc::channel();
+    let (responses, missing) = std::thread::scope(|scope| {
+        let handles = (0..SATURATING_SCRIPT_REQUESTS)
+            .map(|_| {
+                let capacity_tx = capacity_tx.clone();
+                scope.spawn(move || {
+                    let response = request(port, "GET", "/runaway", &[]);
+                    if response.body.contains("script worker capacity exhausted") {
+                        let _ = capacity_tx.send(());
+                    }
+                    response
+                })
+            })
+            .collect::<Vec<_>>();
+        drop(capacity_tx);
+        capacity_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("no capacity fast-fail while the pool was saturated");
+        // A 404 does not need a script slot, so this proves the HTTP
+        // surface still answers while every worker slot is held.
+        let missing = request(port, "GET", "/not-found", &[]);
+        let responses = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("runaway request"))
+            .collect::<Vec<_>>();
+        (responses, missing)
+    });
+    // The abandoned workers must still hold their permits after the reply
+    // deadline. A released permit would run this request and answer with a
+    // timeout instead of a capacity error.
+    let held = request(port, "GET", "/runaway", &[]);
+    (started.elapsed(), responses, missing, held)
+}
+
+#[test]
+fn saturated_script_workers_fail_fast_and_keep_http_healthy() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("files")).expect("files dir");
+    std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
+    std::fs::write(dir.path().join("scripts/runaway.js"), "while (true) {}").expect("runaway");
+    let config = dir.path().join("stuntdouble.toml");
+    let probes = SATURATING_SCRIPT_REQUESTS;
+
+    let (result, stderr) = serve_and_run(
+        |port| {
+            std::fs::write(
+                &config,
+                format!(
+                    r#"config_version = "1"
+
+[server]
+bind = "127.0.0.1"
+port = {port}
+
+[sandbox]
+script_timeout_ms = 100
+
+[files]
+root = "./files"
+
+[[routes]]
+name = "runaway"
+method = "GET"
+path = "/runaway"
+script = "scripts/runaway.js"
+
+"#
+                ),
+            )
+            .expect("config");
+            config.clone()
+        },
+        &[],
+        &["--verbose"],
+        saturate_script_workers,
+    );
+    let (elapsed, responses, missing, held) = result;
+
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "runaway requests did not settle in time: {elapsed:?}"
+    );
+    assert_eq!(responses.len(), probes);
+    for response in &responses {
+        assert_eq!(
+            response.status, 500,
+            "body: {} stderr: {stderr}",
+            response.body
+        );
+        assert_eq!(
+            error_class(&response.body).as_deref(),
+            Some("script_error"),
+            "body: {} stderr: {stderr}",
+            response.body
+        );
+        assert!(
+            json_string(&response.body, "request_id")
+                .as_deref()
+                .is_some_and(|request_id| !request_id.is_empty()),
+            "missing request_id: body: {} stderr: {stderr}",
+            response.body
+        );
+    }
+    assert!(
+        responses
+            .iter()
+            .any(|response| response.body.contains("script worker capacity exhausted")),
+        "no request hit the capacity fast-fail: stderr: {stderr}"
+    );
+    assert!(
+        responses.iter().any(|response| response
+            .body
+            .contains("script exceeded the configured timeout")),
+        "no running worker reached the configured timeout: stderr: {stderr}"
+    );
+    assert_eq!(
+        missing.status, 404,
+        "body: {} stderr: {stderr}",
+        missing.body
+    );
+    assert_eq!(error_class(&missing.body).as_deref(), Some("not_found"));
+    assert_eq!(held.status, 500, "body: {} stderr: {stderr}", held.body);
+    assert_eq!(
+        error_class(&held.body).as_deref(),
+        Some("script_error"),
+        "body: {} stderr: {stderr}",
+        held.body
+    );
+    assert!(
+        held.body.contains("script worker capacity exhausted"),
+        "a timed-out worker released its slot before finishing: body: {} stderr: {stderr}",
+        held.body
+    );
+    assert!(
+        json_string(&held.body, "request_id")
+            .as_deref()
+            .is_some_and(|request_id| !request_id.is_empty()),
+        "missing request_id: body: {} stderr: {stderr}",
+        held.body
+    );
+}
+
 #[test]
 fn script_logs_reach_server_logs_but_not_the_client() {
     let script = r#"

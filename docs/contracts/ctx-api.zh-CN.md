@@ -78,6 +78,7 @@
 - `ctx.env` 是进程环境变量快照。不加载 `.env` 文件。
 - `ctx.log.info` / `warn` / `error` 只写入服务端日志，绝不进客户端 Response。消息不会被脱敏或过滤：脚本作者必须确保消息中不含请求／响应 body、Token、Cookie 或其他机密。宿主自身不会自动记录 body。
 - 脚本抛错、超过 `sandbox.script_timeout_ms`（默认 10000）或加载失败时返回 500 `script_error`；脚本结束却没有产生 Response 时返回 500 `script_no_response`；未捕获的上游传输层失败返回 502 `upstream_unreachable`。三者都带 `request_id`。
+- 脚本在宿主拥有的 worker 池中运行，槽位数为按可用并行度推导的 4–16 个。命中 Route 的脚本拿不到槽位时不会运行，而是快速失败：500 `script_error`；`--verbose` 附加稳定 detail `script worker capacity exhausted`。被 `sandbox.script_timeout_ms` 放弃的 worker 会一直持有槽位，直到循环次数兜底真正结束该 worker，因此持续超时不会让 worker 数量无界增长。
 
 ## Pending 能力
 
@@ -93,6 +94,7 @@
 脚本拿不到裸 `fetch`、`fs`、`os`、`subprocess` 或 `socket`。所有外部能力都来自宿主函数，并受以下约束：
 
 - 脚本应答时限（`sandbox.script_timeout_ms`），到点向客户端返回 500 `script_error`
+- 脚本 worker 并发上限（按可用并行度取 4–16 个槽位），槽满时快速失败
 - 网络 allowlist
 - `ctx.file` 的静态文件根限制
 - 请求级 multipart 临时存储：`files.upload_max_bytes`、流式计数、8 MiB 缓冲上传读取与 guard 清理

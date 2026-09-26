@@ -54,6 +54,14 @@ pub struct AppState {
     host: String,
     verbose: bool,
     sequence: AtomicU64,
+    script_workers: Arc<tokio::sync::Semaphore>,
+}
+
+/// Default number of script workers allowed to run at the same time. The floor
+/// keeps low-core CI hosts usable; the ceiling bounds Boa's per-worker memory
+/// on many-core hosts. The formula is part of the ctx-api contract.
+fn script_worker_limit() -> usize {
+    std::thread::available_parallelism().map_or(4, |parallelism| parallelism.get().clamp(4, 16))
 }
 
 impl AppState {
@@ -64,6 +72,7 @@ impl AppState {
             host,
             verbose,
             sequence: AtomicU64::new(0),
+            script_workers: Arc::new(tokio::sync::Semaphore::new(script_worker_limit())),
         }
     }
 
@@ -252,15 +261,24 @@ impl AppState {
         let outcome = match std::fs::read_to_string(&route.script) {
             Ok(source) => {
                 let timeout = Duration::from_millis(self.config.sandbox.script_timeout_ms);
-                script::execute(
-                    source,
-                    snapshot,
-                    timeout,
-                    self.config.upstream.clone(),
-                    self.config.files.clone(),
-                    uploads,
-                )
-                .await
+                // Fail fast instead of queueing: queued scripts would spend
+                // their own deadline behind the workers already holding a
+                // slot, including workers abandoned at the reply deadline.
+                match Arc::clone(&self.script_workers).try_acquire_owned() {
+                    Ok(slot) => {
+                        script::execute(
+                            source,
+                            snapshot,
+                            timeout,
+                            self.config.upstream.clone(),
+                            self.config.files.clone(),
+                            uploads,
+                            slot,
+                        )
+                        .await
+                    }
+                    Err(_) => script::Outcome::failed(script::Error::CapacityExceeded),
+                }
             }
             // The path was validated at load time; losing the file now is a
             // runtime failure, not a silent 404.
