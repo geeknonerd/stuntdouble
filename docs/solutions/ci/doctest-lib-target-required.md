@@ -61,7 +61,7 @@ cargo test                    # ✅ 17 passed
 cargo test --doc              # ✅ 0 passed (no errors)
 ```
 
-对应 commit：`6ffb80a fix: split src/main.rs into src/lib.rs + src/main.rs to enable cargo test --doc`。
+对应修复：PR #13（squash 合并为 `ea180c1`，其中包含把 `src/main.rs` 拆成 `src/lib.rs` + `src/main.rs` 以启用 `cargo test --doc` 的改动）。
 
 ## 为什么这样可行
 
@@ -82,6 +82,6 @@ Rust 的 `cargo test --doc` 在 **library target** 中运行 doctest。纯 bin c
 
 ## 相关
 
-- GitHub PR #13 通过 commit `6ffb80a` 解决了该问题（合并确认变绿）。
+- GitHub PR #13（squash 合并为 `ea180c1`）解决了该问题（合并确认变绿）。
 - CLI 契约文档见 `docs/contracts/cli.md`，在本次修复中同步更新。
 - CI 要求（含 `cargo test --doc` 门禁）见 `docs/development.md`。
