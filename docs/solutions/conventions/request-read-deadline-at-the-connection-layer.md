@@ -1,7 +1,7 @@
 ---
 title: "Arm an inbound read deadline on the protocol builder, not the auto-detecting wrapper"
 date: 2026-09-23
-last_updated: 2026-09-24
+last_updated: 2026-09-26
 category: conventions
 module: server inbound request deadlines
 problem_type: convention
@@ -24,10 +24,10 @@ tags: [hyper, hyper-util, axum, header-read-timeout, request-timeout, http1, htt
 
 issue #56 要求 `serve` 用一个期限同时覆盖请求头与请求体（`server.request_timeout_ms`）。实现前有两件事必须读源码才能确认：
 
-1. **默认值存在 ≠ 默认值生效。** hyper 1.11 的 `http1::Builder` 自带 30 秒 `header_read_timeout` 默认值，但它只在注册了 timer 之后才生效；`axum::serve` 搭建连接循环时既不设期限也不设 timer，所以这个默认值一直是惰性的。这也是「`serve` 没有请求读取期限」的直接原因（本仓库 `src/server.rs` 的 383 行起记录了这段推理）。
+1. **默认值存在 ≠ 默认值生效。** hyper 1.11 的 `http1::Builder` 自带 30 秒 `header_read_timeout` 默认值，但它只在注册了 timer 之后才生效；`axum::serve` 搭建连接循环时既不设期限也不设 timer，所以这个默认值一直是惰性的。这也是「`serve` 没有请求读取期限」的直接原因（本仓库 `src/server.rs` 的 399 行起记录了这段推理）。
 2. **自动探测的包装层会把期限挡在外面。** 用 hyper-util 的 `auto::Builder`（axum 内部用的那个）可以拿到该 builder，但代价有两个：`server-auto` feature 会启用 `http2`，把 `h2` 拉进依赖树，而 v1 只承诺 HTTP/1.1；更隐蔽的是 auto 在建立 HTTP/1 连接前会先跑 `read_version`，无期限地最多读 24 字节判断 HTTP/2 preface——短于此长度的半写请求头完全不受 `header_read_timeout` 约束。
 
-第 2 点被两轴 review 独立指出，而当时的回归（发送约 50 字节的半写请求头）恰好通过：它已经越过 24 字节嗅探窗口。回归现已改为只发 1 字节（本仓库 `tests/cli.rs:4849-4919` 的 `slow_request_head_is_closed_at_the_deadline`，写入在 4859 行）。
+第 2 点被两轴 review 独立指出，而当时的回归（发送约 50 字节的半写请求头）恰好通过：它已经越过 24 字节嗅探窗口。回归现已改为只发 1 字节（本仓库 `tests/cli.rs:4999-5033` 的 `slow_request_head_is_closed_at_the_deadline`，写入在 5009 行）。
 
 ## 指南
 
@@ -40,7 +40,7 @@ builder
     .header_read_timeout(Some(head_deadline));
 ```
 
-  连接借用 builder，所以连接任务持有 builder 的克隆（`Builder: Clone`）并在任务内构造连接；graceful shutdown 仍通过对在途连接调用 `Connection::graceful_shutdown` 保持排空语义（本仓库 `src/server.rs` 的 390 行起）。
+  连接借用 builder，所以连接任务持有 builder 的克隆（`Builder: Clone`）并在任务内构造连接；graceful shutdown 仍通过对在途连接调用 `Connection::graceful_shutdown` 保持排空语义（本仓库 `src/server.rs` 的 406 行起）。
 
 - hyper-util 只保留 `TokioIo`、`TokioTimer`、`TowerToHyperService` 所需的最小 feature；本仓库收敛为 `["service", "tokio"]`（`Cargo.toml`）。`axum::Router` 本身实现了 `Service<Request<B>>`，其中 `B` 可以是 `hyper::body::Incoming`，所以它可以直接交给 `TowerToHyperService`，不需要额外适配层，也不需要把 `tower` 变成直接依赖。
 - 不要把期限挂在自动探测层上；任何在协议判定阶段先读字节的包装层都会让期限只覆盖判定之后的连接。
@@ -61,7 +61,7 @@ builder
 ## 示例
 
 - 错误做法与它的绿色测试：auto builder + 约 50 字节半写请求头 —— 测试通过，但只发 1 字节的客户端仍可无限占用连接。
-- 正确做法与回归：`tests/cli.rs:4849-4919` 断言 1 字节请求头在期限后收到连接关闭且日志出现 `request_head_timeout`；`tests/cli.rs:4772-4810` 与 `tests/cli.rs:4812-4848` 覆盖慢请求体，包含 408 envelope、请求日志类别、announced `Content-Length` 与上传临时目录的清理。
+- 正确做法与回归：`tests/cli.rs:4999-5033` 断言 1 字节请求头在期限后收到连接关闭且日志出现 `request_head_timeout`；`tests/cli.rs:4922-4949` 与 `tests/cli.rs:4954-4998` 覆盖慢请求体，包含 408 envelope、请求日志类别、announced `Content-Length` 与上传临时目录的清理。
 
 ## 相关
 
@@ -69,4 +69,5 @@ builder
 - `Cargo.toml` —— hyper / hyper-util 的 feature 选择
 - `docs/contracts/config.md`、`docs/contracts/cli.md`、`SECURITY.md` —— 期限与错误/日志类别的公开契约
 - 期限对上传临时目录生命周期的约束，以及测试如何确定性地观察它：[../test-failures/hold-upload-temp-dir-with-unfinished-request-body.md](../test-failures/hold-upload-temp-dir-with-unfinished-request-body.md)
+- 「绿色回归没有跨过应保护的契约边界」在 worker 容量测试上的实例：[script-worker-contract-max-and-post-deadline-held-slot-tests.md](script-worker-contract-max-and-post-deadline-held-slot-tests.md)
 - issue #56（`server: bound request body read time`）—— 本文的实现来源，随 PR #59 合并进 `main`（2026-09-23，issue 已关闭）
