@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.1](https://github.com/geeknonerd/stuntdouble/compare/v0.2.0...v0.2.1) - 2026-09-23
 
+### Added
+
+- *(sandbox)* bound concurrent script workers and fail fast when the limit is reached ([#29](https://github.com/geeknonerd/stuntdouble/issues/29))
+
 ### Other
 
 - exempt release-plz pull requests from the DCO check ([#66](https://github.com/geeknonerd/stuntdouble/pull/66))

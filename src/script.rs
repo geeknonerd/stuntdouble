@@ -158,6 +158,9 @@ pub enum Error {
     Failed(String),
     /// Wall-clock deadline exceeded.
     TimedOut,
+    /// Every script worker slot is busy; the host failed fast instead of
+    /// letting queued scripts wait behind workers abandoned at the deadline.
+    CapacityExceeded,
     /// Script finished without calling `ctx.respond`.
     NoResponse,
     /// An uncaught transport failure from `ctx.http.get` or `ctx.http.pipe`.
@@ -174,7 +177,7 @@ impl Error {
     pub fn class(&self) -> &'static str {
         match self {
             Self::NoResponse => "script_no_response",
-            Self::Failed(_) | Self::TimedOut => "script_error",
+            Self::Failed(_) | Self::TimedOut | Self::CapacityExceeded => "script_error",
             Self::UpstreamUnreachable { .. } => "upstream_unreachable",
         }
     }
@@ -184,7 +187,7 @@ impl Error {
     pub fn status(&self) -> StatusCode {
         match self {
             Self::UpstreamUnreachable { .. } => StatusCode::BAD_GATEWAY,
-            Self::Failed(_) | Self::TimedOut | Self::NoResponse => {
+            Self::Failed(_) | Self::TimedOut | Self::CapacityExceeded | Self::NoResponse => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
         }
@@ -197,6 +200,7 @@ impl Error {
         match self {
             Self::Failed(_) => "script execution failed",
             Self::TimedOut => "script exceeded the configured timeout",
+            Self::CapacityExceeded => "script worker capacity exhausted",
             Self::NoResponse => "script finished without calling ctx.respond",
             Self::UpstreamUnreachable { kind, .. } => match *kind {
                 "timeout" => "upstream transport failure: timeout",
@@ -1144,6 +1148,7 @@ pub async fn execute(
     upstream: UpstreamConfig,
     files_config: FilesConfig,
     uploads: Option<Arc<files::UploadStore>>,
+    worker_slot: tokio::sync::OwnedSemaphorePermit,
 ) -> Outcome {
     // tradeoff: `spawn_blocking` cannot be cancelled, so on timeout the host
     // answers immediately and the worker stops at `LOOP_ITERATION_LIMIT`.
@@ -1161,6 +1166,9 @@ pub async fn execute(
         uploads,
     };
     let worker = tokio::task::spawn_blocking(move || {
+        // Hold the slot for the worker's whole lifetime: a worker abandoned at
+        // the reply deadline keeps running until the loop backstop trips.
+        let _slot = worker_slot;
         evaluate(&source, &request, &upstream, hosts, deadline, worker_calls)
     });
     let mut outcome = match tokio::time::timeout(timeout, worker).await {
@@ -1248,5 +1256,10 @@ mod tests {
         assert_eq!(Error::NoResponse.class(), "script_no_response");
         assert_eq!(Error::TimedOut.class(), "script_error");
         assert_eq!(Error::Failed("boom".into()).class(), "script_error");
+        assert_eq!(Error::CapacityExceeded.class(), "script_error");
+        assert_eq!(
+            Error::CapacityExceeded.detail(),
+            "script worker capacity exhausted"
+        );
     }
 }

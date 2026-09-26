@@ -76,6 +76,7 @@ Within one `apiVersion`:
 - `ctx.env` is the process environment snapshot. No `.env` file is loaded.
 - `ctx.log.info` / `warn` / `error` write to server logs only and never to the client Response. Messages are not redacted or filtered: the script author must keep request/Response bodies, tokens, cookies, and other secrets out of them. The host itself never logs bodies automatically.
 - A script that throws, exceeds `sandbox.script_timeout_ms` (default 10000), or fails to load returns 500 `script_error`; a script that finishes without producing a Response returns 500 `script_no_response`; an uncaught upstream transport failure returns 502 `upstream_unreachable`. All three carry a `request_id`.
+- Scripts run in a host-owned worker pool of 4–16 slots derived from available parallelism. A matched Route whose script cannot get a slot fails fast without running it: 500 `script_error`, and `--verbose` adds the stable detail `script worker capacity exhausted`. A worker abandoned at `sandbox.script_timeout_ms` keeps its slot until the loop-iteration backstop actually ends the worker, so sustained timeouts cannot grow the worker count without bound.
 
 ## Pending capabilities
 
@@ -91,6 +92,7 @@ The following capabilities are part of the longer v1 plan but are not implemente
 Scripts receive no raw `fetch`, `fs`, `os`, `subprocess`, or `socket`. All external capabilities come from host functions and are subject to:
 
 - script deadline (`sandbox.script_timeout_ms`) that answers the client with 500 `script_error`
+- script-worker concurrency cap (4–16 slots derived from available parallelism) with fail-fast when saturated
 - network allowlist
 - static file root confinement for `ctx.file`
 - request-scoped multipart temporary storage with `files.upload_max_bytes`, streaming accounting, 8 MiB buffered upload reads, and guard-based cleanup

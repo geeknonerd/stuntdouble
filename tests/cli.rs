@@ -1786,6 +1786,109 @@ script = "scripts/ok.js"
     assert_eq!(error_class(&second.body).as_deref(), Some("script_error"));
 }
 
+/// The server's default script-worker slot count. Keep the formula in sync
+/// with docs/contracts/ctx-api.md; this E2E suite talks to the binary only.
+fn default_script_worker_limit() -> usize {
+    std::thread::available_parallelism().map_or(4, |parallelism| parallelism.get().clamp(4, 16))
+}
+
+#[test]
+fn saturated_script_workers_fail_fast_and_keep_http_healthy() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("files")).expect("files dir");
+    std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
+    std::fs::write(dir.path().join("scripts/runaway.js"), "while (true) {}").expect("runaway");
+    let config = dir.path().join("stuntdouble.toml");
+    let probes = default_script_worker_limit() + 1;
+
+    let (result, stderr) = serve_and_run(
+        |port| {
+            std::fs::write(
+                &config,
+                format!(
+                    r#"config_version = "1"
+
+[server]
+bind = "127.0.0.1"
+port = {port}
+
+[sandbox]
+script_timeout_ms = 1000
+
+[files]
+root = "./files"
+
+[[routes]]
+name = "runaway"
+method = "GET"
+path = "/runaway"
+script = "scripts/runaway.js"
+
+"#
+                ),
+            )
+            .expect("config");
+            config.clone()
+        },
+        &[],
+        &["--verbose"],
+        move |port| {
+            let started = Instant::now();
+            let responses = std::thread::scope(|scope| {
+                let handles = (0..probes)
+                    .map(|_| scope.spawn(|| request(port, "GET", "/runaway", &[])))
+                    .collect::<Vec<_>>();
+                handles
+                    .into_iter()
+                    .map(|handle| handle.join().expect("runaway request"))
+                    .collect::<Vec<_>>()
+            });
+            // A 404 does not need a script slot, so this proves the HTTP
+            // surface still answers while every worker slot is held.
+            let missing = request(port, "GET", "/not-found", &[]);
+            (started.elapsed(), responses, missing)
+        },
+    );
+    let (elapsed, responses, missing) = result;
+
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "runaway requests did not settle in time: {elapsed:?}"
+    );
+    assert_eq!(responses.len(), probes);
+    for response in &responses {
+        assert_eq!(
+            response.status, 500,
+            "body: {} stderr: {stderr}",
+            response.body
+        );
+        assert_eq!(
+            error_class(&response.body).as_deref(),
+            Some("script_error"),
+            "body: {} stderr: {stderr}",
+            response.body
+        );
+    }
+    assert!(
+        responses
+            .iter()
+            .any(|response| response.body.contains("script worker capacity exhausted")),
+        "no request hit the capacity fast-fail: stderr: {stderr}"
+    );
+    assert!(
+        responses.iter().any(|response| response
+            .body
+            .contains("script exceeded the configured timeout")),
+        "no running worker reached the configured timeout: stderr: {stderr}"
+    );
+    assert_eq!(
+        missing.status, 404,
+        "body: {} stderr: {stderr}",
+        missing.body
+    );
+    assert_eq!(error_class(&missing.body).as_deref(), Some("not_found"));
+}
+
 #[test]
 fn script_logs_reach_server_logs_but_not_the_client() {
     let script = r#"
