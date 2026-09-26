@@ -1786,10 +1786,46 @@ script = "scripts/ok.js"
     assert_eq!(error_class(&second.body).as_deref(), Some("script_error"));
 }
 
-/// The server's default script-worker slot count. Keep the formula in sync
-/// with docs/contracts/ctx-api.md; this E2E suite talks to the binary only.
-fn default_script_worker_limit() -> usize {
-    std::thread::available_parallelism().map_or(4, |parallelism| parallelism.get().clamp(4, 16))
+/// The ctx-api contract allows at most 16 script worker slots, so 17
+/// concurrent runaway requests independently prove the cap: an unbounded pool
+/// would let all of them run and reject none.
+const SCRIPT_WORKER_CONTRACT_MAX: usize = 16;
+const SATURATING_SCRIPT_REQUESTS: usize = SCRIPT_WORKER_CONTRACT_MAX + 1;
+
+fn saturate_script_workers(port: u16) -> (Duration, Vec<Response>, Response, Response) {
+    let started = Instant::now();
+    let (capacity_tx, capacity_rx) = std::sync::mpsc::channel();
+    let (responses, missing) = std::thread::scope(|scope| {
+        let handles = (0..SATURATING_SCRIPT_REQUESTS)
+            .map(|_| {
+                let capacity_tx = capacity_tx.clone();
+                scope.spawn(move || {
+                    let response = request(port, "GET", "/runaway", &[]);
+                    if response.body.contains("script worker capacity exhausted") {
+                        let _ = capacity_tx.send(());
+                    }
+                    response
+                })
+            })
+            .collect::<Vec<_>>();
+        drop(capacity_tx);
+        capacity_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("no capacity fast-fail while the pool was saturated");
+        // A 404 does not need a script slot, so this proves the HTTP
+        // surface still answers while every worker slot is held.
+        let missing = request(port, "GET", "/not-found", &[]);
+        let responses = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("runaway request"))
+            .collect::<Vec<_>>();
+        (responses, missing)
+    });
+    // The abandoned workers must still hold their permits after the reply
+    // deadline. A released permit would run this request and answer with a
+    // timeout instead of a capacity error.
+    let held = request(port, "GET", "/runaway", &[]);
+    (started.elapsed(), responses, missing, held)
 }
 
 #[test]
@@ -1799,7 +1835,7 @@ fn saturated_script_workers_fail_fast_and_keep_http_healthy() {
     std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
     std::fs::write(dir.path().join("scripts/runaway.js"), "while (true) {}").expect("runaway");
     let config = dir.path().join("stuntdouble.toml");
-    let probes = default_script_worker_limit() + 1;
+    let probes = SATURATING_SCRIPT_REQUESTS;
 
     let (result, stderr) = serve_and_run(
         |port| {
@@ -1813,7 +1849,7 @@ bind = "127.0.0.1"
 port = {port}
 
 [sandbox]
-script_timeout_ms = 1000
+script_timeout_ms = 100
 
 [files]
 root = "./files"
@@ -1832,24 +1868,9 @@ script = "scripts/runaway.js"
         },
         &[],
         &["--verbose"],
-        move |port| {
-            let started = Instant::now();
-            let responses = std::thread::scope(|scope| {
-                let handles = (0..probes)
-                    .map(|_| scope.spawn(|| request(port, "GET", "/runaway", &[])))
-                    .collect::<Vec<_>>();
-                handles
-                    .into_iter()
-                    .map(|handle| handle.join().expect("runaway request"))
-                    .collect::<Vec<_>>()
-            });
-            // A 404 does not need a script slot, so this proves the HTTP
-            // surface still answers while every worker slot is held.
-            let missing = request(port, "GET", "/not-found", &[]);
-            (started.elapsed(), responses, missing)
-        },
+        saturate_script_workers,
     );
-    let (elapsed, responses, missing) = result;
+    let (elapsed, responses, missing, held) = result;
 
     assert!(
         elapsed < Duration::from_secs(10),
@@ -1866,6 +1887,13 @@ script = "scripts/runaway.js"
             error_class(&response.body).as_deref(),
             Some("script_error"),
             "body: {} stderr: {stderr}",
+            response.body
+        );
+        assert!(
+            json_string(&response.body, "request_id")
+                .as_deref()
+                .is_some_and(|request_id| !request_id.is_empty()),
+            "missing request_id: body: {} stderr: {stderr}",
             response.body
         );
     }
@@ -1887,6 +1915,25 @@ script = "scripts/runaway.js"
         missing.body
     );
     assert_eq!(error_class(&missing.body).as_deref(), Some("not_found"));
+    assert_eq!(held.status, 500, "body: {} stderr: {stderr}", held.body);
+    assert_eq!(
+        error_class(&held.body).as_deref(),
+        Some("script_error"),
+        "body: {} stderr: {stderr}",
+        held.body
+    );
+    assert!(
+        held.body.contains("script worker capacity exhausted"),
+        "a timed-out worker released its slot before finishing: body: {} stderr: {stderr}",
+        held.body
+    );
+    assert!(
+        json_string(&held.body, "request_id")
+            .as_deref()
+            .is_some_and(|request_id| !request_id.is_empty()),
+        "missing request_id: body: {} stderr: {stderr}",
+        held.body
+    );
 }
 
 #[test]
