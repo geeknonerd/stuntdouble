@@ -1,7 +1,7 @@
 ---
 title: "A second shutdown signal is only guaranteed after the first one is observed"
 date: 2026-09-22
-last_updated: 2026-09-24
+last_updated: 2026-09-26
 category: conventions
 module: serve shutdown lifecycle
 problem_type: convention
