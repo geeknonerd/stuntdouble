@@ -7,9 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/geeknonerd/stuntdouble/compare/v0.2.1...v0.3.0) - 2026-09-26
+
 ### Added
 
-- *(sandbox)* bound concurrent script workers and fail fast when the limit is reached ([#29](https://github.com/geeknonerd/stuntdouble/issues/29))
+- *(sandbox)* bound concurrent script workers and fail fast when the limit is reached ([#82](https://github.com/geeknonerd/stuntdouble/pull/82), [#29](https://github.com/geeknonerd/stuntdouble/issues/29))
+
+### Other
+
+- refresh learnings and sync script worker contract ([#84](https://github.com/geeknonerd/stuntdouble/pull/84))
+- *(release)* publish the container image for linux/amd64 and linux/arm64 ([#81](https://github.com/geeknonerd/stuntdouble/pull/81))
+- *(solutions)* link the multipart budget learning to the test lesson ([#80](https://github.com/geeknonerd/stuntdouble/pull/80))
+- *(solutions)* refresh the learnings the new test lesson points at ([#79](https://github.com/geeknonerd/stuntdouble/pull/79))
+- *(solutions)* record the transient upload temp dir test lesson ([#78](https://github.com/geeknonerd/stuntdouble/pull/78))
+- *(files)* hold the upload temp dir with an unfinished request body ([#77](https://github.com/geeknonerd/stuntdouble/pull/77))
+- *(ci)* correct the node20 audit notes after review ([#75](https://github.com/geeknonerd/stuntdouble/pull/75))
+- *(audit)* replace the node20 audit action with a pinned cargo-audit ([#74](https://github.com/geeknonerd/stuntdouble/pull/74))
+- add task-oriented mock recipes ([#73](https://github.com/geeknonerd/stuntdouble/pull/73))
+- *(release)* filter the commits that trigger a release ([#72](https://github.com/geeknonerd/stuntdouble/pull/72))
+- *(ci)* record the CodeQL merge protection decision ([#71](https://github.com/geeknonerd/stuntdouble/pull/71))
+- *(cli)* keep fixture values out of the redaction assertion message ([#70](https://github.com/geeknonerd/stuntdouble/pull/70))
+- *(dist)* record GHCR package visibility inheritance ([#68](https://github.com/geeknonerd/stuntdouble/pull/68))
 
 ## [0.2.1](https://github.com/geeknonerd/stuntdouble/compare/v0.2.0...v0.2.1) - 2026-09-23
 
