@@ -119,7 +119,7 @@ issue #28 的目标：用 OS 级机制给出硬内存（~64MB）与硬超时边�
 
 | 路线 | 硬内存 | 硬超时/崩溃隔离 | 迁移量 | 新依赖 | unsafe | 结论 |
 | --- | --- | --- | --- | --- | --- | --- |
-| 进程隔离（D1–D13） | 有（Linux/macOS 64 MiB RLIMIT_AS） | 有 | 中等（+600–900 行） | +rlimit（1 个，极轻） | 零 | **推荐** |
+| 进程隔离（D1–D13） | 有（Linux 64 MiB RLIMIT_AS；macOS 无硬限，见 5.3 结果） | 有 | 中等（+600–900 行） | +rlimit（1 个，极轻） | 零 | **推荐** |
 | 换 rquickjs | 部分（仅引擎分配） | 有（轮询中断） | 中高（宿主桥重写） | +C 工具链 + rquickjs | 零（高层 API） | 备选 |
 | 升级 Boa | 无 | 无 | — | — | — | 不可行 |
 | deno_core/V8 | 有 | 有 | 高（事件循环/op 模型） | V8 重依赖 | 零（高层） | 排除 |
@@ -130,7 +130,7 @@ issue #28 的目标：用 OS 级机制给出硬内存（~64MB）与硬超时边�
 
 1. **维持进程隔离路线**（D1–D13）。它是对 issue 目标达成度最高、总代价最小的路线：不改引擎、不改宿主业务逻辑、只新增一层边界；零 unsafe（Windows 延后）；新增依赖仅 rlimit 一项。
 2. **本方案不需要任何 IPC 框架或进程管理框架**：手写 JSONL（约 50 行）+ tokio 现有能力 + rlimit 封装即为最小实现；调研确认没有能显著省工的现成库。
-3. **若 macOS 验证失败**（见 5.3），备选路径是：macOS 降级为"进程隔离 + 超时强杀 + 无硬内存限"（与 Windows 一致），或在后续单独评估 rquickjs 换引擎路线；不必现在决策。
+3. **macOS 验证已确认失败（S1，2026-09-27，#89）**：macOS 降级为"进程隔离 + 超时强杀 + 无硬内存限"，与 Windows 一致；"调高默认值后重测"分支经实测排除（64 GiB 仍 `EINVAL`）。rquickjs 换引擎不再作为本期备选，只在未来需要 macOS 硬内存限时重新评估。
 4. 用户约束确认：Windows 内存硬限与 unsafe FFI 不在本期范围（D7）。
 
 ### 5.3 实现前的前置验证（spike 清单）
@@ -141,8 +141,16 @@ issue #28 的目标：用 OS 级机制给出硬内存（~64MB）与硬超时边�
 | S2 | 子进程启动开销基准（spawn + Boa 初始化 vs 现状线程） | 量化每请求 exec 成本；确认 mock 场景可接受 | 若不可接受，重新评估进程池（D2 升级路径） |
 | S3 | 最终 runner 形态下的 64 MiB 预算复测（含 IPC、serde_json、协议缓冲） | 确认余量（当前基线仅 Boa + 简单脚本，15.2 MiB VMS） | 调高默认上限或压缩缓冲 |
 
+**结果（2026-09-27，#89）**：一次性探针位于分支 `ci/89-process-isolation-probes`（不合并 `main`），完整命令与原始数据见 [#89 评论](https://github.com/geeknonerd/stuntdouble/issues/89#issuecomment-5856621521) 与 [CI 运行](https://github.com/geeknonerd/stuntdouble/actions/runs/36324984631)。
+
+- **S1 → NO-GO（macOS arm64）**：GitHub `macos-15`（Apple M1 Virtual，macOS 15.7.9）上，`setrlimit(RLIMIT_AS)` 在 64 MiB、512 MiB、64 GiB 三档均为 `EINVAL`；进程启动后 VM map 约 391.6 GiB，限制必须高于当前 VM map 才被接受（512 GiB 可设但无意义）。峰值 RSS 11–12 MiB。触发降级对策：macOS 无内存硬限。
+- **S2 → GO**：release 构建、各 100 次测量（开发机 Linux 与 CI `ubuntu-24.04`），spawn 往返相对进程内路径的配对延迟中位数 3.0–3.9 ms、p95 3.5–4.4 ms；占默认 `script_timeout_ms = 10000` 的 0.11% 以下。不做进程池。该数值是最终 runner 形态到来前的估计。
+- **S3 → 待最终 runner 形态复测**（由收尾票 #93 执行）。
+
 ### 5.4 后续步骤（本评估通过后）
 
 1. 起草 ADR 0014（固化 D1–D13 + 本评估结论 + S1–S3 验证义务）。
 2. 更新 CONTEXT.md 术语（script worker 的进程语义）。
 3. 走 `/to-spec` → `/to-tickets`（tracer-bullet 切分，含 S1–S3 spike ticket）。
+
+截至 2026-09-27：ADR 0014 已合并（#87），CONTEXT.md 术语已更新，spec #88 与 ticket #89–#93 已发布。

@@ -29,7 +29,7 @@ PR #82 的初版 E2E 回归覆盖了错误映射，却留下三个观测缺口�
 - 它先 join 全部 runaway Response，再发 404 liveness probe；这只证明请求结算后服务仍活着，没有在槽满期间观察 HTTP。
 - 它只断言批量 Response 中「出现过一次」capacity detail，没有再证明 timeout 后 permit 仍被持有。
 
-后续修复把这些观察拆成几条独立的不变量，以公开契约而不是生产公式作为 oracle。PR #82 已 squash merge；并发 worker 问题 #29 已关闭，单 worker 的 Boa 堆硬上限仍由 #28 跟踪（`plans/adr/0003-script-first-multi-runtime.md:87`）。
+后续修复把这些观察拆成几条独立的不变量，以公开契约而不是生产公式作为 oracle。PR #82 已 squash merge；并发 worker 问题 #29 已关闭，单 worker 的内存硬边界仍由 #28 的进程隔离方案跟踪（`plans/adr/0003-script-first-multi-runtime.md:87`）。
 
 ## 指南
 
@@ -89,7 +89,7 @@ assert!(
 - **「事后仍活着」不等于「饱和期间仍活着」。** join 后发 404 只证明最后一个 worker 答复后服务没有死；它无法发现请求处理循环在槽满时被阻塞、只等某个 worker 释放后才读取非脚本 Route 的问题。channel 把观察点钉在 capacity 信号之后、请求结算之前，覆盖的正是风险窗口。
 - **一次 capacity detail 只证明拒绝路径存在，不证明资源生命周期。** 错误映射测试回答「取不到槽会怎样」，permit 测试回答「timeout 后槽是否仍被占用」。两者由不同实现分支控制，必须有不同的反事实失败模式。
 - **deadline 的语义容易被误读。** `spawn_blocking` 不可取消，permit 又被送进 worker 闭包；如果把 `script_timeout_ms` 当成 worker 终止点，就会设计出只看 timeout Response 的测试，并在实现提前释放 permit 时保持绿色。测试必须按文档化生命周期观察，而不是按 API 名字猜测。
-- **E2E 的证据边界也要写清。** 这套测试通过真实 HTTP 观察公开容量上限与 permit 生命周期，不直接数线程，也不测内存。ADR 0003 明确说这不是单 worker 的内存硬边界；硬内存/CPU 边界仍由 #28 的进程隔离方案跟踪（`plans/adr/0003-script-first-multi-runtime.md:83-87`）。把当前测试解释成「内存已经封顶」会制造错误安全感。
+- **E2E 的证据边界也要写清。** 这套测试通过真实 HTTP 观察公开容量上限与 permit 生命周期，不直接数线程，也不测内存。ADR 0003 明确说这不是单 worker 的内存硬边界；#28 的进程隔离方案现已收敛为：Linux 用 `RLIMIT_AS` 建立硬内存上界，macOS 因 XNU 拒绝低于现有 VM map 的限制而只保留进程隔离与 deadline 强杀、没有硬内存上界（ADR 0014 D6/D7；实测见 [macOS 无法用 `RLIMIT_AS` 建立有用的硬内存上界](../architecture-patterns/macos-rlimit-as-cannot-enforce-useful-memory-bound.md)）。把当前测试解释成「内存已经封顶」会制造错误安全感。
 
 ## 何时适用
 
