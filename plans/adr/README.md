@@ -17,6 +17,7 @@
 | [0011](0011-contract-compatibility.md) | 配置、`ctx` API 与 CLI 各自独立兼容契约 | 已接受 |
 | [0012](0012-release-artifacts-and-supply-chain.md) | 可验证的发布产物与供应链基线 | 已接受 |
 | [0013](0013-documentation-language-and-bilingual-structure.md) | 文档语言分层与双语结构 | 已接受 |
+| [0014](0014-process-isolated-script-runner.md) | 进程隔离脚本执行：每请求子进程 + OS 级硬限制 | 已接受 |
 
 ## 如何新增 ADR
 

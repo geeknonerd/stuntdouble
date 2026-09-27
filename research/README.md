@@ -9,6 +9,8 @@
 | [脚本运行时选型](script-runtime-selection.md) | Boa 与 RustPython 评估，以及被否决的替代方案。 |
 | [架构设计最佳实践](architecture-best-practices.md) | 静态配置、热重载与 Admin API 的取舍。 |
 | [开源仓库基线](open-source-repo-baseline.md) | 同类项目的许可证、资金来源与社区文件约定。 |
+| [进程隔离外部事实](process-isolation-external-facts.md) | 核查 rlimit、Windows Job Object、macOS RLIMIT_AS、cargo-dist 多 binary 与父进程退出联动事实。 |
+| [进程隔离方案评估](process-isolation-assessment.md) | 整理已定决策与改造量级评估，记录轻量替代方案检索结论（引擎路线、进程库、Wasm/VM、最佳实践）。 |
 
 ## 调研规则
 
