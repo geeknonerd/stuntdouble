@@ -42,7 +42,7 @@ When a decision is hard to reverse (e.g., runtime choice, security boundaries, f
 ...
 ```
 
-We maintain 13 ADRs so far. Add additional ones when needed.
+We maintain 14 ADRs so far. Add additional ones when needed.
 
 ## Development workflow
 
