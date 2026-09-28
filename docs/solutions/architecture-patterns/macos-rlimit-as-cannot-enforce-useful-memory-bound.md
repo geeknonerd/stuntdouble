@@ -32,7 +32,7 @@ tags: [macos, rlimit-as, setrlimit, process-isolation, script-worker, memory-lim
 
 1. **先做逐平台探针，再写「硬限制」承诺。** 对任何跨平台 sandbox 资源边界，在 ADR、config、SECURITY 或 README 承诺之前，先在每个目标 OS/架构上实际调用该 primitive；成功标准是系统调用成功且边界确实生效，不是子进程还能跑完。
 2. **macOS 上不能用 `RLIMIT_AS` 获得有用的硬内存上界。** 限制必须高于子进程启动后已有的 VM map；几十 MiB 到 64 GiB 都低于该 map，被 XNU 以 `EINVAL`（errno 22）拒绝。不要靠调高默认值绕过：64 GiB 仍失败；在已测四档中仅 512 GiB 可设置，但已不构成有效边界。macOS 的脚本内存故事是「进程隔离 + deadline 强杀」，并显式记录「无硬内存上界」的平台差异（ADR 0014 D6/D7，`plans/adr/0014-process-isolated-script-runner.md:25`、`plans/adr/0014-process-isolated-script-runner.md:54`）。Linux 继续使用 `RLIMIT_AS`。
-3. **若未来 macOS 必须要有内存上界，再评估引擎级限制。** ADR 保留的 rquickjs `set_memory_limit` 只能约束解释器分配，不覆盖 Rust 侧缓冲，是降级方案而不是等价物（`plans/adr/0014-process-isolated-script-runner.md:59`）。实现票 #91 应只承诺 Linux 硬限，最终契约同步由 #93 处理；在它们完成前不要宣称 `sandbox.script_memory_limit_mb` 已可用。票面已对齐：spec #88 与实现票 #91 都写明硬限仅 Linux、macOS 保持「进程隔离 + deadline 强杀」，不再有 macOS 假保证。
+3. **若未来 macOS 必须要有内存上界，再评估引擎级限制。** ADR 保留的 rquickjs `set_memory_limit` 只能约束解释器分配，不覆盖 Rust 侧缓冲，是降级方案而不是等价物（`plans/adr/0014-process-isolated-script-runner.md:59`）。实现票 #91 应只承诺 Linux 硬限，最终契约同步由 #93 处理；在它们完成前不要宣称 `sandbox.script_memory_limit_mb` 已可用。票面已对齐：spec #88 与实现票 #91 都写明硬限仅 Linux、macOS 保持「进程隔离 + deadline 强杀」，不再有 macOS 假保证。（实现后记：#91 按仓库规则已同步公开契约；最终预算证据与验收归档由 #93 完成。）
 4. **复现时从进程外测量，并记录失败原因。** 子进程先初始化生产同形的脚本运行时，再尽早调用 `setrlimit(RLIMIT_AS)`；父进程每隔约 2 ms 用 `ps -o vsz=,rss= -p <pid>` 采样，同时记录 `setrlimit` 返回值、errno 与峰值 VSZ/RSS，并按 64 MiB → 512 MiB → 64 GiB → 512 GiB 逐档放大，分别判断「能否设置」与「是否形成有用边界」。
 
 ## 为什么重要

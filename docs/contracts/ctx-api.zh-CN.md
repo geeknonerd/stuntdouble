@@ -79,7 +79,7 @@
 - `ctx.log.info` / `warn` / `error` 只写入服务端日志，绝不进客户端 Response。消息不会被脱敏或过滤：脚本作者必须确保消息中不含请求／响应 body、Token、Cookie 或其他机密。宿主自身不会自动记录 body。
 - 脚本抛错、超过 `sandbox.script_timeout_ms`（默认 10000）、超过 Linux 内存上限或加载失败时返回 500 `script_error`；脚本结束却没有产生 Response 时返回 500 `script_no_response`；未捕获的上游传输层失败返回 502 `upstream_unreachable`。三者都带 `request_id`。
 - 脚本在全新的 worker 进程中运行；宿主拥有的并发槽位池为 4–16 个，数量按可用并行度推导。命中 Route 的脚本拿不到槽位时不会运行，而是快速失败：500 `script_error`；`--verbose` 附加稳定 detail `script worker capacity exhausted`。`sandbox.script_timeout_ms` 到期时，宿主立即杀死 worker 进程并释放其槽位。
-- Linux 上每个 worker 会在脚本代码运行前把 `sandbox.script_memory_limit_mb`（默认 64 MiB，最低 16）作为 `RLIMIT_AS` 应用到自身。该上限约束虚拟地址空间而非 RSS；因此停止的 worker 返回 500 `script_error`，`--verbose` 附加稳定 detail `script exceeded the configured memory limit`。本切片中 macOS 无法用 `RLIMIT_AS` 建立有用的上界，Windows 也尚无内存限制：两者保留进程隔离与 deadline，但没有硬内存上限。
+- Linux 上每个 worker 会在脚本代码运行前把 `sandbox.script_memory_limit_mb`（默认 256 MiB，最低 64）作为 `RLIMIT_AS` 应用到自身。该上限约束虚拟地址空间而非 RSS；因此停止的 worker 返回 500 `script_error`，`--verbose` 附加稳定 detail `script exceeded the configured memory limit`。本切片中 macOS 无法用 `RLIMIT_AS` 建立有用的上界，Windows 也尚无内存限制：两者保留进程隔离与 deadline，但没有硬内存上限。
 
 ## Pending 能力
 

@@ -4,7 +4,7 @@ use std::net::{AddrParseError, IpAddr};
 use std::path::{Path, PathBuf};
 
 const HTTP_METHODS: [&str; 7] = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"];
-pub(crate) const SCRIPT_MEMORY_LIMIT_FLOOR_MB: u64 = 16;
+pub(crate) const SCRIPT_MEMORY_LIMIT_FLOOR_MB: u64 = 64;
 
 #[derive(Debug, Clone)]
 // Field mirrors the public TOML key `config_version`; renaming it would break
@@ -724,7 +724,7 @@ fn default_script_timeout_ms() -> u64 {
 }
 
 fn default_script_memory_limit_mb() -> u64 {
-    64
+    256
 }
 
 fn default_upload_max_bytes() -> u64 {
@@ -778,16 +778,16 @@ script = "scripts/x.js"
     }
 
     #[test]
-    fn sandbox_memory_limit_defaults_to_64_mib() {
+    fn sandbox_memory_limit_defaults_to_256_mib() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = write_config(dir.path(), minimal());
         let config = load(&path).expect("load default");
-        assert_eq!(config.sandbox.script_memory_limit_mb, 64);
+        assert_eq!(config.sandbox.script_memory_limit_mb, 256);
     }
 
     #[test]
     fn sandbox_memory_limit_accepts_values_at_or_above_the_floor() {
-        for value in [16, 128] {
+        for value in [64, 128, 256] {
             let dir = tempfile::tempdir().expect("tempdir");
             let configured = minimal().replace(
                 "[files]",
@@ -800,7 +800,7 @@ script = "scripts/x.js"
 
     #[test]
     fn sandbox_memory_limit_rejects_non_positive_below_floor_and_non_integer_values() {
-        for value in ["0", "-1", "15", "1.5", "\"64\""] {
+        for value in ["0", "-1", "15", "16", "63", "1.5", "\"64\""] {
             let dir = tempfile::tempdir().expect("tempdir");
             let configured = minimal().replace(
                 "[files]",
@@ -809,7 +809,7 @@ script = "scripts/x.js"
             let error = load(&write_config(dir.path(), &configured)).expect_err("must fail");
             let message = error.to_string();
             assert!(
-                message.contains("sandbox.script_memory_limit_mb") && message.contains("16"),
+                message.contains("sandbox.script_memory_limit_mb") && message.contains("64"),
                 "value {value}: {message}"
             );
         }

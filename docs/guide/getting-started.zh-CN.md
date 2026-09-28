@@ -133,7 +133,7 @@ if (!file) {
 
 `server.request_timeout_ms`（默认 30000）限制客户端读入一个请求头与请求体的时间：请求头始终没有读完时关闭连接并记为 `request_head_timeout`；命中的 Route 没有读完请求体或解析完 multipart 时返回 408 `request_timeout`。它与 `sandbox.script_timeout_ms` 相互独立。
 
-`sandbox.script_timeout_ms` 限制脚本运行时长，默认 10000 ms。命中的脚本在全新的 worker 进程中运行；宿主拥有的并发槽位池为 4–16 个，数量按可用并行度推导；所有槽位都被占用时，新脚本不会运行，而是返回 500 `script_error`（加 `--verbose` 时附带 `script worker capacity exhausted` detail）。脚本还受循环次数兜底与递归/VM 栈上限约束，引擎 panic 返回 500 `script_error`；脚本 deadline 到期时，宿主杀死 worker 进程并释放其槽位。Linux 上每个 worker 会在脚本代码运行前把 `sandbox.script_memory_limit_mb`（默认 64 MiB，最低 16）作为 `RLIMIT_AS` 应用到自身；该上限约束虚拟地址空间，因此停止脚本时 `--verbose` 会报告 `script exceeded the configured memory limit`。Boa 0.22 不暴露堆指标或 interrupt 钩子；本切片中 macOS 与 Windows 保留进程隔离和 deadline 强杀，但没有硬内存上限——威胁模型见 [SECURITY.md](../../SECURITY.md)，平台边界见 [ADR 0014](../../plans/adr/0014-process-isolated-script-runner.md)。
+`sandbox.script_timeout_ms` 限制脚本运行时长，默认 10000 ms。命中的脚本在全新的 worker 进程中运行；宿主拥有的并发槽位池为 4–16 个，数量按可用并行度推导；所有槽位都被占用时，新脚本不会运行，而是返回 500 `script_error`（加 `--verbose` 时附带 `script worker capacity exhausted` detail）。脚本还受循环次数兜底与递归/VM 栈上限约束，引擎 panic 返回 500 `script_error`；脚本 deadline 到期时，宿主杀死 worker 进程并释放其槽位。Linux 上每个 worker 会在脚本代码运行前把 `sandbox.script_memory_limit_mb`（默认 256 MiB，最低 64）作为 `RLIMIT_AS` 应用到自身；该上限约束虚拟地址空间，因此停止脚本时 `--verbose` 会报告 `script exceeded the configured memory limit`。Boa 0.22 不暴露堆指标或 interrupt 钩子；本切片中 macOS 与 Windows 保留进程隔离和 deadline 强杀，但没有硬内存上限——威胁模型见 [SECURITY.md](../../SECURITY.md)，平台边界见 [ADR 0014](../../plans/adr/0014-process-isolated-script-runner.md)。
 
 诊断这些失败时，可以给 `serve` 加上 `--verbose`：
 

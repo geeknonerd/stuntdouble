@@ -816,7 +816,7 @@ fn evaluate_in_worker(source: &str, request: &Json) -> Result<Json, Error> {
                     message: error.to_string(),
                     kind,
                 }),
-                None if cfg!(target_os = "linux") && engine_allocation_failure(&error) => {
+                None if cfg!(target_os = "linux") && engine_out_of_memory(&error) => {
                     Err(Error::MemoryLimitExceeded)
                 }
                 None => Err(Error::Failed(error.to_string())),
@@ -831,16 +831,19 @@ fn evaluate_in_worker(source: &str, request: &Json) -> Result<Json, Error> {
         .map_err(|error| Error::Failed(format!("cannot read script state: {error}")))
 }
 
-/// Boa reports failed data-block reservations as native `RangeError`s. Match
-/// those engine-owned messages before the error is flattened for the parent.
-fn engine_allocation_failure(error: &JsError) -> bool {
+/// Boa 0.22 maps allocator failure from `AlignedVec` to this native
+/// `RangeError`; capacity overflow uses a different message and is a script
+/// error, not a configured memory-limit kill.
+fn engine_out_of_memory(error: &JsError) -> bool {
     error.as_native().is_some_and(|native| {
         matches!(native.kind(), JsNativeErrorKind::Range)
-            && (native
-                .message()
-                .starts_with("couldn't allocate the data block:")
-                || native.message().contains("while allocating data block"))
+            && native.message().starts_with("invalid layout ")
+            && native.message().ends_with(" while allocating data block")
     })
+}
+
+fn is_allocator_abort_line(line: &str) -> bool {
+    line.starts_with("memory allocation of ") && line.ends_with(" failed")
 }
 
 /// Per-request marker property for host-created transport errors. It is not a
@@ -1274,7 +1277,7 @@ async fn forward_worker_stderr(stderr: tokio::process::ChildStderr) -> WorkerDia
     let mut diagnostics = WorkerDiagnostics::default();
     let mut lines = BufReader::new(stderr).lines();
     while let Ok(Some(line)) = lines.next_line().await {
-        if line.starts_with("memory allocation of ") && line.ends_with(" failed") {
+        if is_allocator_abort_line(&line) {
             diagnostics.memory_allocation_failed = true;
         }
         eprintln!("{line}");
@@ -1669,16 +1672,43 @@ mod tests {
     }
 
     #[test]
-    fn engine_allocation_failures_are_classified_as_memory_limit_errors() {
+    fn engine_oom_errors_are_classified_as_memory_limit_errors() {
         let allocation_failure: JsError = JsNativeError::range()
-            .with_message("invalid layout while allocating data block")
+            .with_message(
+                "invalid layout Layout { size: 16777216, align: 1 } while allocating data block",
+            )
             .into();
-        assert!(engine_allocation_failure(&allocation_failure));
+        assert!(engine_out_of_memory(&allocation_failure));
+
+        let capacity_overflow: JsError = JsNativeError::range()
+            .with_message(
+                "capacity overflow for size 18446744073709551615 while allocating data block",
+            )
+            .into();
+        assert!(!engine_out_of_memory(&capacity_overflow));
+
+        let datum_conversion: JsError = JsNativeError::range()
+            .with_message("couldn't allocate the data block: out of range")
+            .into();
+        assert!(!engine_out_of_memory(&datum_conversion));
 
         let unrelated: JsError = JsNativeError::range()
             .with_message("unrelated range error")
             .into();
-        assert!(!engine_allocation_failure(&unrelated));
+        assert!(!engine_out_of_memory(&unrelated));
+    }
+
+    #[test]
+    fn allocator_abort_lines_are_recognized_exactly() {
+        assert!(is_allocator_abort_line(
+            "memory allocation of 16777216 bytes failed"
+        ));
+        assert!(!is_allocator_abort_line(
+            "prefix memory allocation of 16777216 bytes failed"
+        ));
+        assert!(!is_allocator_abort_line(
+            "memory allocation of 16777216 bytes failed suffix"
+        ));
     }
 
     #[cfg(target_os = "linux")]

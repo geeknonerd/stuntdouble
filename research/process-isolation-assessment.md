@@ -154,3 +154,5 @@ issue #28 的目标：用 OS 级机制给出硬内存（~64MB）与硬超时边�
 3. 走 `/to-spec` → `/to-tickets`（tracer-bullet 切分，含 S1–S3 spike ticket）。
 
 截至 2026-09-27：ADR 0014 已合并（#87），CONTEXT.md 术语已更新，spec #88 与 ticket #89–#93 已发布。
+
+> **后续修订（#91，2026-09-28）**：在最终 runner 形态上的初步实测显示，Linux 普通脚本最低约 debug 40 MiB / release 24 MiB，8 MiB `ctx.file.readText` 最低约 192 MiB（含 IPC、Boa 字符串与协议缓冲）。据此默认值调整为 256 MiB、下限调整为 64 MiB，公开契约与 ADR 0014 已同步。正式 S3 测量归档、默认值复核与 #28 验收报告由 #93 完成。本文档此前的 64 MiB 设计假设与 S1 证据保留为历史记录。

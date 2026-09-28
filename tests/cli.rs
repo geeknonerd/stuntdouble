@@ -1593,7 +1593,7 @@ fn validate_accepts_sandbox_memory_limit() {
     let config = fixture(
         dir.path(),
         3000,
-        &with_sandbox_bounds(good_config(), 250, 32),
+        &with_sandbox_bounds(good_config(), 250, 64),
     );
     let (code, _, stderr) = run(&["validate", "--config", config.to_str().unwrap()]);
     assert_eq!(code, 0, "stderr: {stderr}");
@@ -1601,7 +1601,7 @@ fn validate_accepts_sandbox_memory_limit() {
 
 #[test]
 fn validate_rejects_sandbox_memory_limit_below_the_floor() {
-    for memory_limit_mb in [0, 15] {
+    for memory_limit_mb in [0, 16, 63] {
         let dir = tempfile::tempdir().expect("tempdir");
         let config = fixture(
             dir.path(),
@@ -1611,7 +1611,7 @@ fn validate_rejects_sandbox_memory_limit_below_the_floor() {
         let (code, _, stderr) = run(&["validate", "--config", config.to_str().unwrap()]);
         assert_eq!(code, 2, "limit {memory_limit_mb}: stderr: {stderr}");
         assert!(
-            stderr.contains("sandbox.script_memory_limit_mb") && stderr.contains("16"),
+            stderr.contains("sandbox.script_memory_limit_mb") && stderr.contains("64"),
             "limit {memory_limit_mb}: stderr: {stderr}"
         );
     }
@@ -1837,9 +1837,23 @@ ctx.respond(200, {}, "allocated");
 
 #[cfg(target_os = "linux")]
 #[test]
+fn ordinary_script_runs_at_configured_memory_floor() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config_body = with_sandbox_bounds(good_config(), 10_000, 64);
+    let (response, _) = serve_and_run(
+        |port| fixture_with_script(dir.path(), port, &config_body, OK_SCRIPT),
+        &[],
+        &[],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 200, "body: {}", response.body);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn memory_bomb_is_stopped_and_reported_by_the_configured_limit() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let config_body = with_sandbox_bounds(good_config(), 10_000, 32);
+    let config_body = with_sandbox_bounds(good_config(), 10_000, 64);
     let (mut child, _log, port) = start_serve(
         |port| fixture_with_script(dir.path(), port, &config_body, MEMORY_BOMB_SCRIPT),
         &[],
@@ -1886,7 +1900,7 @@ fn memory_bomb_is_stopped_and_reported_by_the_configured_limit() {
 #[test]
 fn memory_limit_detail_is_hidden_without_verbose() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let config_body = with_sandbox_bounds(good_config(), 10_000, 32);
+    let config_body = with_sandbox_bounds(good_config(), 10_000, 64);
     let (response, _) = serve_and_run(
         |port| fixture_with_script(dir.path(), port, &config_body, MEMORY_BOMB_SCRIPT),
         &[],
@@ -3197,20 +3211,10 @@ try { ctx.file.readBytes("over-cap.bin"); out.overCapBytes = "no error"; }
 catch (error) { out.overCapBytes = error.code; }
 ctx.respond(200, {}, JSON.stringify(out));
 "#;
-    // An 8 MiB text read crosses JSON IPC and Boa, whose transient copies
-    // exceed the default worker budget; this test exercises only the file cap.
-    let config_body = with_sandbox_bounds(good_config(), 10_000, 256);
-    let (response, stderr) = serve_and_run(
-        |port| fixture_with_script(dir.path(), port, &config_body, script),
-        &[],
-        &[],
-        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
-    );
-    assert_eq!(
-        response.status, 200,
-        "body: {} stderr: {stderr}",
-        response.body
-    );
+    let (response, _) = serve_fixture_dir(dir.path(), script, |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 200, "body: {}", response.body);
     let json: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
     assert_eq!(json["atCap"], cap);
     assert_eq!(json["overCapText"], "file_too_large");

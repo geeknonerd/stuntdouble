@@ -42,7 +42,7 @@
 - **配置即事实源**：第一版以文件系统为唯一 SOT；若引入管理 API，应提供 `config save` 将运行态落盘并明确冲突策略。
 - **reload 入口统一**：热重载与管理 API 都应复用同一个 `reload()` 入口实现原子切换路由表。
 - **控制面隔离**：若暴露 Admin API，应使用独立端口或 `localhost`，并实施基础鉴权。
-- **脚本沙箱强制**：脚本能力默认开放，但必须有硬限制：超时（默认 10 秒，可配置）、脚本 worker 并发上限（4–16 槽位，槽满快速失败）、循环/递归/栈上限、网络白名单、文件目录限制、错误不向客户端回显堆栈。Linux 上每个脚本 worker 在运行前通过 `RLIMIT_AS` 施加 `sandbox.script_memory_limit_mb`（默认 64 MiB，下限 16 MiB；语义为虚拟地址空间而非 RSS）；macOS 无法施加有效 `RLIMIT_AS`，与 Windows 一样保留进程隔离和超时强杀但无内存硬限，见 [ADR 0014](adr/0014-process-isolated-script-runner.md)。
+- **脚本沙箱强制**：脚本能力默认开放，但必须有硬限制：超时（默认 10 秒，可配置）、脚本 worker 并发上限（4–16 槽位，槽满快速失败）、循环/递归/栈上限、网络白名单、文件目录限制、错误不向客户端回显堆栈。Linux 上每个脚本 worker 在运行前通过 `RLIMIT_AS` 施加 `sandbox.script_memory_limit_mb`（默认 256 MiB，下限 64 MiB；语义为虚拟地址空间而非 RSS）；macOS 无法施加有效 `RLIMIT_AS`，与 Windows 一样保留进程隔离和超时强杀但无内存硬限，见 [ADR 0014](adr/0014-process-isolated-script-runner.md)。
 - **OpenAPI 预设生成器是"批量生成普通路由"**，不是新增一个资源派生引擎。
 
 ## 4. 脚本 API 契约（半托管，已确认）
