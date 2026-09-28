@@ -43,3 +43,6 @@ missing_panics_doc = "allow"
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rlimit = "0.11"

@@ -77,8 +77,9 @@
   - 上传 stream 用作 Response body 时，遵循与 `ctx.file.stream` 相同的宿主 framing 与单 range 200/206/416 规则。
 - `ctx.env` 是进程环境变量快照。不加载 `.env` 文件。
 - `ctx.log.info` / `warn` / `error` 只写入服务端日志，绝不进客户端 Response。消息不会被脱敏或过滤：脚本作者必须确保消息中不含请求／响应 body、Token、Cookie 或其他机密。宿主自身不会自动记录 body。
-- 脚本抛错、超过 `sandbox.script_timeout_ms`（默认 10000）或加载失败时返回 500 `script_error`；脚本结束却没有产生 Response 时返回 500 `script_no_response`；未捕获的上游传输层失败返回 502 `upstream_unreachable`。三者都带 `request_id`。
+- 脚本抛错、超过 `sandbox.script_timeout_ms`（默认 10000）、超过 Linux 内存上限或加载失败时返回 500 `script_error`；脚本结束却没有产生 Response 时返回 500 `script_no_response`；未捕获的上游传输层失败返回 502 `upstream_unreachable`。三者都带 `request_id`。
 - 脚本在全新的 worker 进程中运行；宿主拥有的并发槽位池为 4–16 个，数量按可用并行度推导。命中 Route 的脚本拿不到槽位时不会运行，而是快速失败：500 `script_error`；`--verbose` 附加稳定 detail `script worker capacity exhausted`。`sandbox.script_timeout_ms` 到期时，宿主立即杀死 worker 进程并释放其槽位。
+- Linux 上每个 worker 会在脚本代码运行前把 `sandbox.script_memory_limit_mb`（默认 256 MiB，最低 64）作为 `RLIMIT_AS` 应用到自身。该上限约束虚拟地址空间而非 RSS；因此停止的 worker 返回 500 `script_error`，`--verbose` 附加稳定 detail `script exceeded the configured memory limit`。本切片中 macOS 无法用 `RLIMIT_AS` 建立有用的上界，Windows 也尚无内存限制：两者保留进程隔离与 deadline，但没有硬内存上限。
 
 ## Pending 能力
 
@@ -94,13 +95,14 @@
 脚本拿不到裸 `fetch`、`fs`、`os`、`subprocess` 或 `socket`。所有外部能力都来自宿主函数，并受以下约束：
 
 - 脚本应答时限（`sandbox.script_timeout_ms`），到点向客户端返回 500 `script_error` 并杀死 worker 进程
+- Linux 上按 worker 设置的虚拟地址空间上限（`sandbox.script_memory_limit_mb`），在脚本代码运行前以 `RLIMIT_AS` 应用；本切片中 macOS 与 Windows 不承诺硬内存上限
 - 脚本 worker 进程并发上限（按可用并行度取 4–16 个槽位），槽满时快速失败
 - 网络 allowlist
 - `ctx.file` 的静态文件根限制
 - 请求级 multipart 临时存储：`files.upload_max_bytes`、流式计数、8 MiB 缓冲上传读取与 guard 清理
 - 堆栈绝不返回给客户端
 
-Boa 0.22 不暴露堆指标、堆上限或 interrupt 钩子，因此没有硬内存上限；宿主通过杀死 worker 进程来终止超时脚本。该取舍与其余资源边界记录在 [ADR 0003](../../plans/adr/0003-script-first-multi-runtime.md) 的 T3 修订中。
+Boa 0.22 不暴露堆指标、堆上限或 interrupt 钩子。Linux 上的进程隔离 worker 改用操作系统强制的 `RLIMIT_AS` 上限；宿主仍通过杀死 worker 进程来终止超时脚本。macOS 与 Windows 在本切片中有进程隔离和 deadline，但没有硬内存上限。相关取舍与其余资源边界记录在 [ADR 0003](../../plans/adr/0003-script-first-multi-runtime.md) 的 T3 修订与 [ADR 0014](../../plans/adr/0014-process-isolated-script-runner.md) 中。
 
 ## 类型定义
 

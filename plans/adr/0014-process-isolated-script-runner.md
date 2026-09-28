@@ -22,7 +22,7 @@ Boa 0.22 没有 interrupt 钩子，也没有堆内存指标或上限（ADR 0003 
 ### 资源边界
 
 - **D5 到期强杀**：脚本超时后由主进程立即强杀（Unix `SIGKILL`、Windows `TerminateProcess`），无宽限期；槽位即时回收。不设 `RLIMIT_CPU`，CPU 时间由该 deadline 强杀兜底。
-- **D6 内存硬限**：Unix（Linux/macOS）由子进程在启动早期对自身设置 `RLIMIT_AS`（soft=hard），默认 64 MiB，可通过 `sandbox.script_memory_limit_mb` 配置，配置值设下限保护。该限制的语义是虚拟地址空间上限（非 RSS）。macOS 上该限制实测无法成立（S1，见「验证结果」），降级为不设内存硬限。
+- **D6 内存硬限**：Unix（Linux/macOS）由子进程在启动早期对自身设置 `RLIMIT_AS`（soft=hard），默认 256 MiB，可通过 `sandbox.script_memory_limit_mb` 配置，下限 64 MiB。该默认值与 floor 已按 #91 的最终 runner 实测调整（见「验证结果」）。该限制的语义是虚拟地址空间上限（非 RSS）。macOS 上该限制实测无法成立（S1，见「验证结果」），降级为不设内存硬限。
 - **D12 并发上限**：保留现有 `clamp(4, 16)` 槽位公式，语义为"同时运行的脚本进程数上限"；总内存天花板 = 单进程上限 × 槽位数。
 
 ### 通信
@@ -43,7 +43,7 @@ Unix 上父进程死亡不会连带结束子进程（子进程会被系统收养
 2. **脚本超时或异常**：主进程立即强杀，槽位即时回收。
 3. **主进程被 `SIGKILL`**（来不及做任何清理）：子进程内的哨兵线程每 1 秒检查一次 `std::os::unix::process::parent_id()`，一旦发现父 PID 变化（说明已被收养）就自行退出。哨兵线程独立于运行脚本的主线程，不受脚本死循环影响。
 
-不采用 `PR_SET_PDEATHSIG`：它仅 Linux 可用且需要 unsafe。轮询使用标准库安全 API，Linux/macOS 通用；最坏情况下孤儿进程多存活约 1 秒（Linux 上另有 64 MiB 内存硬限兜底，macOS 无内存硬限）。Windows 的对应机制是 Job Object kill-on-close，随 Windows 支持阶段处理。
+不采用 `PR_SET_PDEATHSIG`：它仅 Linux 可用且需要 unsafe。轮询使用标准库安全 API，Linux/macOS 通用；最坏情况下孤儿进程多存活约 1 秒（Linux 上另有 256 MiB 内存硬限兜底，macOS 无内存硬限）。Windows 的对应机制是 Job Object kill-on-close，随 Windows 支持阶段处理。
 
 ### 可观测性
 
@@ -67,15 +67,15 @@ Unix 上父进程死亡不会连带结束子进程（子进程会被系统收养
 | --- | --- | --- |
 | S1 | macOS（Apple Silicon）上对含 Boa 的子进程设置 `RLIMIT_AS=64 MiB` 的实测 | macOS 降级为无内存硬限，或调高默认值后重测 |
 | S2 | 子进程启动开销基准（spawn + Boa 初始化 vs 现状线程） | 若不可接受，重新评估进程池升级路径 |
-| S3 | 最终 runner 形态下的 64 MiB 预算复测（含 IPC、序列化与协议缓冲） | 调高默认上限或压缩缓冲 |
+| S3 | 最终 runner 形态下的预算复测（含 IPC、序列化与协议缓冲） | 调高默认值/floor 或压缩缓冲；#91 已据实测调整，正式证据由 #93 归档 |
 
-## 验证结果（S1/S2，issue #89）
+## 验证结果（S1/S2，issue #89；S3 初步，issue #91）
 
 S1、S2 已于 2026-09-27 在一次性探针上执行（分支 `ci/89-process-isolation-probes`，不合并 `main`；命令、原始数据与两处 go/no-go 见 [#89 评论](https://github.com/geeknonerd/stuntdouble/issues/89#issuecomment-5856621521)，运行记录见 [CI 运行](https://github.com/geeknonerd/stuntdouble/actions/runs/36324984631)）：
 
 - **S1 → NO-GO（macOS arm64）**：GitHub `macos-15`（Apple M1 Virtual）上，`setrlimit(RLIMIT_AS)` 在 64 MiB、512 MiB、64 GiB 三档均以 `EINVAL` 失败——进程启动后 VM map 已约 391.6 GiB，限制必须高于当前 VM map 才被接受（512 GiB 可设，但不构成有效边界）。因此触发上表预定的降级对策：**macOS 只获得进程隔离与超时强杀，不设内存硬限**；「调高默认值后重测」分支经实测排除。峰值 RSS 11–12 MiB，说明被拒的是虚拟地址空间口径的检查，不是物理内存压力。
 - **S2 → GO**：release 构建、每组 100 次测量（开发机 Linux 与 CI `ubuntu-24.04`）：spawn 往返相对进程内路径的配对延迟中位数 3.0–3.9 ms、p95 3.5–4.4 ms，占默认 `script_timeout_ms = 10000` 的 0.11% 以下，不触发进程池重评估；该数值是最终 runner 形态到来前的估计。
-- **S3 仍待执行**：由收尾票 #93 在最终 runner 形态（含 IPC、序列化与协议缓冲）上复测。
+- **S3 初步测量（#91，2026-09-28）**：Linux 本机 debug/release 下，普通脚本最低约 40/24 MiB，8 MiB `ctx.file.readText` 最低约 192 MiB（含 IPC、Boa 字符串与协议缓冲）。据此把默认值调整为 256 MiB、floor 调整为 64 MiB；正式测量归档、默认值复核与 #28 验收报告由 #93 补齐。
 
 本结果是既定降级分支的落地记录，D1–D13 的决策本身不变；D6/D7 的平台口径与备选说明按此结果收敛。评估文档的对应更新见 [方案评估](../../research/process-isolation-assessment.md) §5.3。
 

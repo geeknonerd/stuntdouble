@@ -19,12 +19,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use boa_engine::native_function::NativeFunction;
-use boa_engine::{js_string, Context, JsError, JsNativeError, JsString, JsValue, Source};
+use boa_engine::{
+    js_string, Context, JsError, JsNativeError, JsNativeErrorKind, JsString, JsValue, Source,
+};
 use serde_json::{json, Value as Json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 
-use crate::config::{FilesConfig, UpstreamConfig};
+use crate::config::{FilesConfig, SandboxConfig, UpstreamConfig, SCRIPT_MEMORY_LIMIT_FLOOR_MB};
 use crate::files;
 use crate::matcher::percent_decode;
 use crate::upstream;
@@ -42,10 +44,6 @@ pub const WORKER_SUBCOMMAND: &str = "__script-worker";
 const LOOP_ITERATION_LIMIT: u64 = 100_000_000;
 const RECURSION_LIMIT: usize = 512;
 const VM_STACK_SIZE_LIMIT: usize = 10_240;
-
-/// Failure payload shared by the host bridge and its panic-catching wrapper:
-/// an optional transport kind plus the operator-facing message.
-type BridgeError = (Option<&'static str>, String);
 
 /// Read-only view of one client request, frozen into `ctx.request`.
 #[derive(Debug, Clone)]
@@ -160,6 +158,8 @@ pub enum Error {
     Failed(String),
     /// Wall-clock deadline exceeded.
     TimedOut,
+    /// The worker exceeded the configured Linux virtual-address-space bound.
+    MemoryLimitExceeded,
     /// Every script worker slot is busy; the host failed fast instead of
     /// letting queued scripts wait behind running workers.
     CapacityExceeded,
@@ -181,9 +181,11 @@ impl Error {
     pub fn class(&self) -> &'static str {
         match self {
             Self::NoResponse => "script_no_response",
-            Self::Failed(_) | Self::TimedOut | Self::CapacityExceeded | Self::WorkerTerminated => {
-                "script_error"
-            }
+            Self::Failed(_)
+            | Self::TimedOut
+            | Self::MemoryLimitExceeded
+            | Self::CapacityExceeded
+            | Self::WorkerTerminated => "script_error",
             Self::UpstreamUnreachable { .. } => "upstream_unreachable",
         }
     }
@@ -195,6 +197,7 @@ impl Error {
             Self::UpstreamUnreachable { .. } => StatusCode::BAD_GATEWAY,
             Self::Failed(_)
             | Self::TimedOut
+            | Self::MemoryLimitExceeded
             | Self::CapacityExceeded
             | Self::WorkerTerminated
             | Self::NoResponse => StatusCode::INTERNAL_SERVER_ERROR,
@@ -208,6 +211,7 @@ impl Error {
         match self {
             Self::Failed(_) => "script execution failed",
             Self::TimedOut => "script exceeded the configured timeout",
+            Self::MemoryLimitExceeded => "script exceeded the configured memory limit",
             Self::CapacityExceeded => "script worker capacity exhausted",
             Self::WorkerTerminated => "script worker terminated unexpectedly",
             Self::NoResponse => "script finished without calling ctx.respond",
@@ -609,19 +613,23 @@ fn worker_host_call(name: &str, payload: &Json) -> boa_engine::JsResult<Json> {
     let line = line.ok_or_else(|| {
         JsNativeError::error().with_message(format!("{name}: host closed the pipe"))
     })?;
-    let message: Json = serde_json::from_str(&line).map_err(|error| {
+    let mut message: Json = serde_json::from_str(&line).map_err(|error| {
         JsNativeError::error().with_message(format!("{name}: invalid host response: {error}"))
     })?;
+    drop(line);
     if message.get("type").and_then(Json::as_str) != Some("host_result") {
         return Err(JsNativeError::error()
             .with_message(format!("{name}: expected host_result"))
             .into());
     }
-    message.get("result").cloned().ok_or_else(|| {
-        JsNativeError::error()
-            .with_message(format!("{name}: host_result is missing result"))
-            .into()
-    })
+    message
+        .get_mut("result")
+        .map(std::mem::take)
+        .ok_or_else(|| {
+            JsNativeError::error()
+                .with_message(format!("{name}: host_result is missing result"))
+                .into()
+        })
 }
 
 /// Decode one bridge argument, dispatch it to the parent, and encode the JSON
@@ -639,6 +647,7 @@ fn worker_bridge(name: &str, args: &[JsValue]) -> boa_engine::JsResult<JsValue> 
     let rendered = serde_json::to_string(&result).map_err(|error| {
         JsNativeError::error().with_message(format!("{name}: cannot encode result: {error}"))
     })?;
+    drop(result);
     Ok(JsValue::from(JsString::from(rendered)))
 }
 
@@ -755,42 +764,42 @@ fn evaluate_in_worker(source: &str, request: &Json) -> Result<Json, Error> {
     limits.set_stack_size_limit(VM_STACK_SIZE_LIMIT);
     // A Rust-side panic in the engine must not take the worker down without a
     // protocol result; it is mapped to the same script failure as before.
-    let staged = guard_engine(|| -> Result<String, BridgeError> {
+    let staged = guard_engine(|| -> Result<String, Error> {
         context
             .register_global_builtin_callable(
                 js_string!("__sd_http_get"),
                 1,
                 NativeFunction::from_fn_ptr(worker_http_get),
             )
-            .map_err(|error| (None, error.to_string()))?;
+            .map_err(|error| Error::Failed(error.to_string()))?;
         context
             .register_global_builtin_callable(
                 js_string!("__sd_http_pipe"),
                 1,
                 NativeFunction::from_fn_ptr(worker_http_pipe),
             )
-            .map_err(|error| (None, error.to_string()))?;
+            .map_err(|error| Error::Failed(error.to_string()))?;
         context
             .register_global_builtin_callable(
                 js_string!("__sd_validate_headers"),
                 1,
                 NativeFunction::from_fn_ptr(worker_validate_headers),
             )
-            .map_err(|error| (None, error.to_string()))?;
+            .map_err(|error| Error::Failed(error.to_string()))?;
         context
             .register_global_builtin_callable(
                 js_string!("__sd_file"),
                 1,
                 NativeFunction::from_fn_ptr(worker_file),
             )
-            .map_err(|error| (None, error.to_string()))?;
+            .map_err(|error| Error::Failed(error.to_string()))?;
         context
             .register_global_builtin_callable(
                 js_string!("__sd_upload"),
                 1,
                 NativeFunction::from_fn_ptr(worker_upload),
             )
-            .map_err(|error| (None, error.to_string()))?;
+            .map_err(|error| Error::Failed(error.to_string()))?;
         let evaluated = (|| -> Result<String, JsError> {
             context.eval(Source::from_bytes(&prelude))?;
             context.eval(Source::from_bytes(source))?;
@@ -802,22 +811,39 @@ fn evaluate_in_worker(source: &str, request: &Json) -> Result<Json, Error> {
         })();
         match evaluated {
             Ok(dump) => Ok(dump),
-            Err(error) => {
-                let kind = upstream_unreachable_kind(&error, &upstream_marker, &mut context);
-                Err((kind, error.to_string()))
-            }
+            Err(error) => match upstream_unreachable_kind(&error, &upstream_marker, &mut context) {
+                Some(kind) => Err(Error::UpstreamUnreachable {
+                    message: error.to_string(),
+                    kind,
+                }),
+                None if cfg!(target_os = "linux") && engine_out_of_memory(&error) => {
+                    Err(Error::MemoryLimitExceeded)
+                }
+                None => Err(Error::Failed(error.to_string())),
+            },
         }
     });
     let dump = match staged {
-        Err(error) => return Err(error),
-        Ok(Err((Some(kind), message))) => {
-            return Err(Error::UpstreamUnreachable { message, kind });
-        }
-        Ok(Err((None, message))) => return Err(Error::Failed(message)),
+        Err(error) | Ok(Err(error)) => return Err(error),
         Ok(Ok(dump)) => dump,
     };
     serde_json::from_str(&dump)
         .map_err(|error| Error::Failed(format!("cannot read script state: {error}")))
+}
+
+/// Boa 0.22 maps allocator failure from `AlignedVec` to this native
+/// `RangeError`; capacity overflow uses a different message and is a script
+/// error, not a configured memory-limit kill.
+fn engine_out_of_memory(error: &JsError) -> bool {
+    error.as_native().is_some_and(|native| {
+        matches!(native.kind(), JsNativeErrorKind::Range)
+            && native.message().starts_with("invalid layout ")
+            && native.message().ends_with(" while allocating data block")
+    })
+}
+
+fn is_allocator_abort_line(line: &str) -> bool {
+    line.starts_with("memory allocation of ") && line.ends_with(" failed")
 }
 
 /// Per-request marker property for host-created transport errors. It is not a
@@ -1240,12 +1266,30 @@ async fn exchange(
     }
 }
 
+#[derive(Default)]
+struct WorkerDiagnostics {
+    memory_allocation_failed: bool,
+}
+
 /// Drain worker stderr to the operator log. It never reaches the client, and a
 /// full pipe cannot block the worker because this task keeps reading.
-async fn forward_worker_stderr(stderr: tokio::process::ChildStderr) {
+async fn forward_worker_stderr(stderr: tokio::process::ChildStderr) -> WorkerDiagnostics {
+    let mut diagnostics = WorkerDiagnostics::default();
     let mut lines = BufReader::new(stderr).lines();
     while let Ok(Some(line)) = lines.next_line().await {
+        if is_allocator_abort_line(&line) {
+            diagnostics.memory_allocation_failed = true;
+        }
         eprintln!("{line}");
+    }
+    diagnostics
+}
+
+fn unexpected_worker_error(diagnostics: &WorkerDiagnostics) -> Error {
+    if cfg!(target_os = "linux") && diagnostics.memory_allocation_failed {
+        Error::MemoryLimitExceeded
+    } else {
+        Error::WorkerTerminated
     }
 }
 
@@ -1253,6 +1297,7 @@ async fn forward_worker_stderr(stderr: tokio::process::ChildStderr) {
 /// wall-clock deadline. The child is killed and reaped on every other exit.
 async fn run_worker(
     job: Json,
+    memory_limit_mb: u64,
     host: Arc<Mutex<HostState>>,
     deadline: tokio::time::Instant,
 ) -> Outcome {
@@ -1262,6 +1307,8 @@ async fn run_worker(
     let mut command = Command::new(executable);
     command
         .arg(WORKER_SUBCOMMAND)
+        .arg("--memory-limit-mb")
+        .arg(memory_limit_mb.to_string())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1310,8 +1357,8 @@ async fn run_worker(
         }
         WorkerReply::Unexpected => {
             terminate(&mut child).await;
-            let _ = stderr_task.await;
-            Outcome::failed(Error::WorkerTerminated)
+            let diagnostics = stderr_task.await.unwrap_or_default();
+            Outcome::failed(unexpected_worker_error(&diagnostics))
         }
         WorkerReply::Final(message) => {
             // The deadline still covers process teardown. A complete result is
@@ -1323,8 +1370,8 @@ async fn run_worker(
                     finish_outcome(&message, &host)
                 }
                 Ok(Ok(_)) => {
-                    let _ = stderr_task.await;
-                    Outcome::failed(Error::WorkerTerminated)
+                    let diagnostics = stderr_task.await.unwrap_or_default();
+                    Outcome::failed(unexpected_worker_error(&diagnostics))
                 }
                 Ok(Err(_)) => {
                     terminate(&mut child).await;
@@ -1368,6 +1415,7 @@ fn finish_outcome(message: &Json, host: &Arc<Mutex<HostState>>) -> Outcome {
                 return Outcome::failed(Error::WorkerTerminated);
             };
             let error = match error.get("kind").and_then(Json::as_str) {
+                Some("memory_limit") => Error::MemoryLimitExceeded,
                 Some("timeout") => Error::UpstreamUnreachable {
                     message: text.to_string(),
                     kind: "timeout",
@@ -1396,13 +1444,14 @@ fn finish_outcome(message: &Json, host: &Arc<Mutex<HostState>>) -> Outcome {
 pub async fn execute(
     source: String,
     request: RequestSnapshot,
-    timeout: Duration,
+    sandbox: SandboxConfig,
     upstream: UpstreamConfig,
     files_config: FilesConfig,
     uploads: Option<Arc<files::UploadStore>>,
     worker_slot: tokio::sync::OwnedSemaphorePermit,
 ) -> Outcome {
     let _slot = worker_slot;
+    let timeout = Duration::from_millis(sandbox.script_timeout_ms);
     let script_deadline = Instant::now()
         .checked_add(timeout)
         .unwrap_or_else(Instant::now);
@@ -1428,7 +1477,13 @@ pub async fn execute(
         "script": source,
         "request": request.to_json(),
     });
-    let mut outcome = run_worker(job, Arc::clone(&host), deadline).await;
+    let mut outcome = run_worker(
+        job,
+        sandbox.script_memory_limit_mb,
+        Arc::clone(&host),
+        deadline,
+    )
+    .await;
     if outcome.error.is_some() {
         // A failed run can leave a blocking host call holding the store; close
         // its contents now so temporary uploads do not leak on timeout or a
@@ -1444,8 +1499,8 @@ pub async fn execute(
 
 /// Hidden entry point run by a self-spawned script worker.
 #[must_use]
-pub fn run_worker_process() -> i32 {
-    match worker_main() {
+pub fn run_worker_process(memory_limit_mb: u64) -> i32 {
+    match worker_main(memory_limit_mb) {
         Ok(()) => 0,
         Err(error) => {
             eprintln!("script worker: {error}");
@@ -1454,7 +1509,18 @@ pub fn run_worker_process() -> i32 {
     }
 }
 
-fn worker_main() -> std::io::Result<()> {
+fn worker_main(memory_limit_mb: u64) -> std::io::Result<()> {
+    if memory_limit_mb < SCRIPT_MEMORY_LIMIT_FLOOR_MB {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "memory limit is below the compiled-in floor",
+        ));
+    }
+    // Apply the Linux bound before reading the job. Parsing a large script or
+    // request snapshot is itself a meaningful allocation.
+    // Other platforms deliberately keep process isolation and deadline kill
+    // without claiming a hard memory bound.
+    apply_worker_memory_limit(memory_limit_mb)?;
     let Some(line) = read_protocol_line()? else {
         return Err(std::io::Error::new(
             std::io::ErrorKind::UnexpectedEof,
@@ -1493,6 +1559,14 @@ fn worker_main() -> std::io::Result<()> {
             "ok": false,
             "error": { "message": message }
         }),
+        Err(Error::MemoryLimitExceeded) => json!({
+            "type": "final_result",
+            "ok": false,
+            "error": {
+                "kind": "memory_limit",
+                "message": Error::MemoryLimitExceeded.detail()
+            }
+        }),
         Err(error) => json!({
             "type": "final_result",
             "ok": false,
@@ -1500,6 +1574,21 @@ fn worker_main() -> std::io::Result<()> {
         }),
     };
     write_protocol_line(&message)
+}
+
+#[cfg(target_os = "linux")]
+fn apply_worker_memory_limit(memory_limit_mb: u64) -> std::io::Result<()> {
+    use rlimit::{setrlimit, Resource};
+
+    let bytes = memory_limit_mb.checked_mul(1024 * 1024).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "memory limit too large")
+    })?;
+    setrlimit(Resource::AS, bytes, bytes)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn apply_worker_memory_limit(_memory_limit_mb: u64) -> std::io::Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1569,11 +1658,72 @@ mod tests {
     fn error_classes_are_stable() {
         assert_eq!(Error::NoResponse.class(), "script_no_response");
         assert_eq!(Error::TimedOut.class(), "script_error");
+        assert_eq!(Error::MemoryLimitExceeded.class(), "script_error");
+        assert_eq!(
+            Error::MemoryLimitExceeded.detail(),
+            "script exceeded the configured memory limit"
+        );
         assert_eq!(Error::Failed("boom".into()).class(), "script_error");
         assert_eq!(Error::CapacityExceeded.class(), "script_error");
         assert_eq!(
             Error::CapacityExceeded.detail(),
             "script worker capacity exhausted"
         );
+    }
+
+    #[test]
+    fn engine_oom_errors_are_classified_as_memory_limit_errors() {
+        let allocation_failure: JsError = JsNativeError::range()
+            .with_message(
+                "invalid layout Layout { size: 16777216, align: 1 } while allocating data block",
+            )
+            .into();
+        assert!(engine_out_of_memory(&allocation_failure));
+
+        let capacity_overflow: JsError = JsNativeError::range()
+            .with_message(
+                "capacity overflow for size 18446744073709551615 while allocating data block",
+            )
+            .into();
+        assert!(!engine_out_of_memory(&capacity_overflow));
+
+        let datum_conversion: JsError = JsNativeError::range()
+            .with_message("couldn't allocate the data block: out of range")
+            .into();
+        assert!(!engine_out_of_memory(&datum_conversion));
+
+        let unrelated: JsError = JsNativeError::range()
+            .with_message("unrelated range error")
+            .into();
+        assert!(!engine_out_of_memory(&unrelated));
+    }
+
+    #[test]
+    fn allocator_abort_lines_are_recognized_exactly() {
+        assert!(is_allocator_abort_line(
+            "memory allocation of 16777216 bytes failed"
+        ));
+        assert!(!is_allocator_abort_line(
+            "prefix memory allocation of 16777216 bytes failed"
+        ));
+        assert!(!is_allocator_abort_line(
+            "memory allocation of 16777216 bytes failed suffix"
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn allocation_abort_is_attributed_to_the_memory_limit() {
+        let diagnostics = WorkerDiagnostics {
+            memory_allocation_failed: true,
+        };
+        assert!(matches!(
+            unexpected_worker_error(&diagnostics),
+            Error::MemoryLimitExceeded
+        ));
+        assert!(matches!(
+            unexpected_worker_error(&WorkerDiagnostics::default()),
+            Error::WorkerTerminated
+        ));
     }
 }

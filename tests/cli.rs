@@ -74,6 +74,16 @@ fn with_sandbox(body: &str, timeout_ms: u64) -> String {
     )
 }
 
+/// Insert a `[sandbox]` table with both configured bounds.
+fn with_sandbox_bounds(body: &str, timeout_ms: u64, memory_limit_mb: u64) -> String {
+    body.replace(
+        "[files]",
+        &format!(
+            "[sandbox]\nscript_timeout_ms = {timeout_ms}\nscript_memory_limit_mb = {memory_limit_mb}\n\n[files]"
+        ),
+    )
+}
+
 /// Fixture ports are allocated explicitly instead of asking the kernel for an
 /// ephemeral one: `bind(127.0.0.1:0)` draws from the same range as client
 /// sockets, so a concurrent test could take a port another test just proved
@@ -1578,6 +1588,36 @@ fn validate_rejects_non_positive_sandbox_timeout() {
 }
 
 #[test]
+fn validate_accepts_sandbox_memory_limit() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = fixture(
+        dir.path(),
+        3000,
+        &with_sandbox_bounds(good_config(), 250, 64),
+    );
+    let (code, _, stderr) = run(&["validate", "--config", config.to_str().unwrap()]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+}
+
+#[test]
+fn validate_rejects_sandbox_memory_limit_below_the_floor() {
+    for memory_limit_mb in [0, 16, 63] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = fixture(
+            dir.path(),
+            3000,
+            &with_sandbox_bounds(good_config(), 250, memory_limit_mb),
+        );
+        let (code, _, stderr) = run(&["validate", "--config", config.to_str().unwrap()]);
+        assert_eq!(code, 2, "limit {memory_limit_mb}: stderr: {stderr}");
+        assert!(
+            stderr.contains("sandbox.script_memory_limit_mb") && stderr.contains("64"),
+            "limit {memory_limit_mb}: stderr: {stderr}"
+        );
+    }
+}
+
+#[test]
 fn script_reads_the_ctx_request_snapshot() {
     let script = r#"
 ctx.respond(200, { "Content-Type": "application/json" }, JSON.stringify({
@@ -1784,6 +1824,102 @@ fn script_deadline_kills_the_worker_process() {
     );
     wait_for_child_count(parent_pid, false);
     stop(&mut child);
+}
+
+#[cfg(target_os = "linux")]
+const MEMORY_BOMB_SCRIPT: &str = r#"
+var buffers = [];
+for (var i = 0; i < 128; i++) {
+  buffers.push(new ArrayBuffer(1024 * 1024));
+}
+ctx.respond(200, {}, "allocated");
+"#;
+
+#[cfg(target_os = "linux")]
+#[test]
+fn ordinary_script_runs_at_configured_memory_floor() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config_body = with_sandbox_bounds(good_config(), 10_000, 64);
+    let (response, _) = serve_and_run(
+        |port| fixture_with_script(dir.path(), port, &config_body, OK_SCRIPT),
+        &[],
+        &[],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 200, "body: {}", response.body);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn memory_bomb_is_stopped_and_reported_by_the_configured_limit() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config_body = with_sandbox_bounds(good_config(), 10_000, 64);
+    let (mut child, _log, port) = start_serve(
+        |port| fixture_with_script(dir.path(), port, &config_body, MEMORY_BOMB_SCRIPT),
+        &[],
+        &["--verbose"],
+    );
+    let parent_pid = child.id();
+    let started = Instant::now();
+    let response = request(port, "GET", "/demo/documents/manifest/group-a", &[]);
+    assert_eq!(response.status, 500, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("script_error"),
+        "body: {}",
+        response.body
+    );
+    assert_eq!(
+        json_string(&response.body, "detail").as_deref(),
+        Some("script exceeded the configured memory limit"),
+        "body: {}",
+        response.body
+    );
+    assert!(
+        json_string(&response.body, "request_id")
+            .as_deref()
+            .is_some_and(|request_id| !request_id.is_empty()),
+        "missing request_id: body: {}",
+        response.body
+    );
+    assert!(
+        !response.body.contains("allocated") && !response.body.contains("ArrayBuffer"),
+        "script text leaked into the response: {}",
+        response.body
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "memory bomb was not stopped in bounded time: {:?}",
+        started.elapsed()
+    );
+    wait_for_child_count(parent_pid, false);
+    stop(&mut child);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn memory_limit_detail_is_hidden_without_verbose() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config_body = with_sandbox_bounds(good_config(), 10_000, 64);
+    let (response, _) = serve_and_run(
+        |port| fixture_with_script(dir.path(), port, &config_body, MEMORY_BOMB_SCRIPT),
+        &[],
+        &[],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 500, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("script_error"),
+        "body: {}",
+        response.body
+    );
+    assert_eq!(json_string(&response.body, "detail"), None);
+    assert!(
+        !response.body.contains("allocated") && !response.body.contains("ArrayBuffer"),
+        "script text leaked into the response: {}",
+        response.body
+    );
 }
 
 #[cfg(unix)]

@@ -28,14 +28,17 @@ Every valid configuration is a TOML table. Unknown keys, unknown `config_version
 | `files` | yes | table | — | only `{root, upload_max_bytes}` is accepted |
 | `files.root` | yes | string | — | existing directory, resolved relative to the configuration file |
 | `files.upload_max_bytes` | no | integer | `20971520` | positive integer (0 and negative values are rejected); maximum data bytes accepted in one multipart request |
-| `sandbox` | no | table | — | only `{script_timeout_ms}` is accepted |
+| `sandbox` | no | table | — | only `{script_timeout_ms, script_memory_limit_mb}` is accepted |
 | `sandbox.script_timeout_ms` | no | integer | `10000` | positive integer (0 is rejected) |
+| `sandbox.script_memory_limit_mb` | no | integer | `256` | integer `>= 64`; enforced as Linux `RLIMIT_AS` virtual address space, with no hard memory bound on macOS or Windows |
 | `upstream` | no | table | — | only `{allow_hosts, timeout_ms}` is accepted |
 | `upstream.allow_hosts` | no | array of strings | `[]` | URL host syntax; entries carry no scheme or port, and the default denies every host |
 | `upstream.timeout_ms` | no | integer | `15000` | positive integer (0 is rejected) |
 | `routes` | yes | array of tables | — | must contain at least one Route table; `routes = []` is invalid |
 
 Domains in `upstream.allow_hosts` are lowercased/punycoded. IPv6 literals are written in brackets (`"[::1]"`) and normalized to their unbracketed form at load time. Hosts are matched case-insensitively without the port, and IP literals and `localhost` must be listed explicitly.
+
+`sandbox.script_memory_limit_mb` is accepted and validated on every platform. On Linux the script worker applies it to itself as `RLIMIT_AS` (soft = hard) before script code runs; the limit therefore bounds the whole process's virtual address space, not resident set size, and IPC buffers and buffered file reads count against it. The default leaves headroom for the documented 8 MiB buffered reads; the floor covers ordinary worker startup. macOS cannot enforce a useful `RLIMIT_AS` bound in this slice, and Windows has no implemented memory limit yet: both platforms keep process isolation and the script deadline, but have no hard memory bound.
 
 ### Route schema
 
@@ -63,6 +66,7 @@ upload_max_bytes = 20971520   # positive integer; default 20 MiB
 
 [sandbox]                 # optional table
 script_timeout_ms = 10000 # positive integer; default 10000
+script_memory_limit_mb = 256 # integer >= 64; Linux RLIMIT_AS; default 256
 
 [upstream]                # optional table
 allow_hosts = ["metadata.example.com"] # exact host allowlist; default []
@@ -95,7 +99,7 @@ Routes follow the single pipeline: `match → source → transform → response`
 - the expected shape and actual value
 - line and column when the TOML parser provides them
 
-Validation fails closed on unknown keys at every table level. It also rejects an unknown `config_version`, a non-IP `server.bind`, an empty `routes` array, non-positive timeout values, a non-positive `files.upload_max_bytes`, and a missing or non-directory `files.root`. `validate` never opens sockets and never reads Route scripts.
+Validation fails closed on unknown keys at every table level. It also rejects an unknown `config_version`, a non-IP `server.bind`, an empty `routes` array, non-positive timeout values, a `sandbox.script_memory_limit_mb` below 64, a non-positive `files.upload_max_bytes`, and a missing or non-directory `files.root`. `validate` never opens sockets and never reads Route scripts.
 
 Configuration errors exit with code `2`.
 

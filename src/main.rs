@@ -34,7 +34,11 @@ enum Commands {
     Validate,
     /// Internal entry point for a per-request script worker.
     #[command(name = stuntdouble::script::WORKER_SUBCOMMAND, hide = true)]
-    ScriptWorker,
+    ScriptWorker {
+        /// Linux virtual-address-space bound in MiB.
+        #[arg(long, hide = true)]
+        memory_limit_mb: u64,
+    },
 }
 
 fn main() {
@@ -43,7 +47,9 @@ fn main() {
     let code = match cli.command {
         Commands::Serve { verbose } => serve(path, verbose),
         Commands::Validate => validate(path),
-        Commands::ScriptWorker => stuntdouble::script::run_worker_process(),
+        Commands::ScriptWorker { memory_limit_mb } => {
+            stuntdouble::script::run_worker_process(memory_limit_mb)
+        }
     };
     std::process::exit(code);
 }
