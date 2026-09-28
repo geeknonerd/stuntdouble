@@ -4,6 +4,7 @@ use std::net::{AddrParseError, IpAddr};
 use std::path::{Path, PathBuf};
 
 const HTTP_METHODS: [&str; 7] = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"];
+pub(crate) const SCRIPT_MEMORY_LIMIT_FLOOR_MB: u64 = 16;
 
 #[derive(Debug, Clone)]
 // Field mirrors the public TOML key `config_version`; renaming it would break
@@ -23,6 +24,7 @@ pub struct Config {
 #[derive(Debug, Clone)]
 pub struct SandboxConfig {
     pub script_timeout_ms: u64,
+    pub script_memory_limit_mb: u64,
 }
 
 /// Upstream HTTP access limits for `ctx.http.get`.
@@ -285,11 +287,17 @@ fn validate_config_version(value: Option<&str>, out: &mut Vec<Violation>) {
 fn parse_sandbox(root: &Table, v: &mut Vec<Violation>) -> SandboxConfig {
     let defaults = SandboxConfig {
         script_timeout_ms: default_script_timeout_ms(),
+        script_memory_limit_mb: default_script_memory_limit_mb(),
     };
     match root.get("sandbox") {
         None => defaults,
         Some(toml::Value::Table(t)) => {
-            reject_unknown(t, &["script_timeout_ms"], "sandbox", v);
+            reject_unknown(
+                t,
+                &["script_timeout_ms", "script_memory_limit_mb"],
+                "sandbox",
+                v,
+            );
             SandboxConfig {
                 script_timeout_ms: opt_duration_ms(
                     t,
@@ -298,6 +306,8 @@ fn parse_sandbox(root: &Table, v: &mut Vec<Violation>) -> SandboxConfig {
                     v,
                 )
                 .unwrap_or_else(default_script_timeout_ms),
+                script_memory_limit_mb: opt_memory_limit_mb(t, "sandbox.script_memory_limit_mb", v)
+                    .unwrap_or_else(default_script_memory_limit_mb),
             }
         }
         Some(other) => {
@@ -633,6 +643,32 @@ fn opt_duration_ms(table: &Table, key: &str, field: &str, out: &mut Vec<Violatio
     }
 }
 
+/// Positive MiB value used by `sandbox.script_memory_limit_mb`.
+fn opt_memory_limit_mb(table: &Table, field: &str, out: &mut Vec<Violation>) -> Option<u64> {
+    match table.get("script_memory_limit_mb") {
+        None => None,
+        Some(toml::Value::Integer(n)) => match u64::try_from(*n) {
+            Ok(mb) if mb >= SCRIPT_MEMORY_LIMIT_FLOOR_MB => Some(mb),
+            Ok(_) | Err(_) => {
+                out.push(Violation {
+                    field: field.into(),
+                    expected: format!("integer number of MiB >= {SCRIPT_MEMORY_LIMIT_FLOOR_MB}"),
+                    actual: n.to_string(),
+                });
+                None
+            }
+        },
+        Some(other) => {
+            out.push(bad(
+                field,
+                &format!("integer number of MiB >= {SCRIPT_MEMORY_LIMIT_FLOOR_MB}"),
+                other,
+            ));
+            None
+        }
+    }
+}
+
 fn missing(field: &str, expected: &str) -> Violation {
     Violation {
         field: field.into(),
@@ -687,6 +723,10 @@ fn default_script_timeout_ms() -> u64 {
     10_000
 }
 
+fn default_script_memory_limit_mb() -> u64 {
+    64
+}
+
 fn default_upload_max_bytes() -> u64 {
     20 * 1024 * 1024
 }
@@ -735,6 +775,44 @@ script = "scripts/x.js"
         );
         let config = load(&write_config(dir.path(), &configured)).expect("load explicit");
         assert_eq!(config.files.upload_max_bytes, 1024);
+    }
+
+    #[test]
+    fn sandbox_memory_limit_defaults_to_64_mib() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_config(dir.path(), minimal());
+        let config = load(&path).expect("load default");
+        assert_eq!(config.sandbox.script_memory_limit_mb, 64);
+    }
+
+    #[test]
+    fn sandbox_memory_limit_accepts_values_at_or_above_the_floor() {
+        for value in [16, 128] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let configured = minimal().replace(
+                "[files]",
+                &format!("[sandbox]\nscript_memory_limit_mb = {value}\n\n[files]"),
+            );
+            let config = load(&write_config(dir.path(), &configured)).expect("load explicit");
+            assert_eq!(config.sandbox.script_memory_limit_mb, value);
+        }
+    }
+
+    #[test]
+    fn sandbox_memory_limit_rejects_non_positive_below_floor_and_non_integer_values() {
+        for value in ["0", "-1", "15", "1.5", "\"64\""] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let configured = minimal().replace(
+                "[files]",
+                &format!("[sandbox]\nscript_memory_limit_mb = {value}\n\n[files]"),
+            );
+            let error = load(&write_config(dir.path(), &configured)).expect_err("must fail");
+            let message = error.to_string();
+            assert!(
+                message.contains("sandbox.script_memory_limit_mb") && message.contains("16"),
+                "value {value}: {message}"
+            );
+        }
     }
 
     #[test]

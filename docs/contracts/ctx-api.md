@@ -75,8 +75,9 @@ Within one `apiVersion`:
   - An upload stream used as a Response body follows the same host-owned framing and single-range 200/206/416 rules as `ctx.file.stream`.
 - `ctx.env` is the process environment snapshot. No `.env` file is loaded.
 - `ctx.log.info` / `warn` / `error` write to server logs only and never to the client Response. Messages are not redacted or filtered: the script author must keep request/Response bodies, tokens, cookies, and other secrets out of them. The host itself never logs bodies automatically.
-- A script that throws, exceeds `sandbox.script_timeout_ms` (default 10000), or fails to load returns 500 `script_error`; a script that finishes without producing a Response returns 500 `script_no_response`; an uncaught upstream transport failure returns 502 `upstream_unreachable`. All three carry a `request_id`.
+- A script that throws, exceeds `sandbox.script_timeout_ms` (default 10000), exceeds the configured Linux memory bound, or fails to load returns 500 `script_error`; a script that finishes without producing a Response returns 500 `script_no_response`; an uncaught upstream transport failure returns 502 `upstream_unreachable`. All three carry a `request_id`.
 - Scripts run in fresh worker processes under a host-owned pool of 4–16 concurrent slots derived from available parallelism. A matched Route whose script cannot get a slot fails fast without running it: 500 `script_error`, and `--verbose` adds the stable detail `script worker capacity exhausted`. When `sandbox.script_timeout_ms` expires, the host kills the worker process immediately and releases its slot.
+- On Linux, each worker applies `sandbox.script_memory_limit_mb` (default 64 MiB, minimum 16) as `RLIMIT_AS` on itself before script code runs. The bound is virtual address space, not RSS; a worker stopped by it answers 500 `script_error`, and `--verbose` adds the stable detail `script exceeded the configured memory limit`. macOS cannot enforce a useful `RLIMIT_AS` bound in this slice, and Windows has no memory limit yet: both keep process isolation and the deadline but have no hard memory bound.
 
 ## Pending capabilities
 
@@ -92,13 +93,14 @@ The following capabilities are part of the longer v1 plan but are not implemente
 Scripts receive no raw `fetch`, `fs`, `os`, `subprocess`, or `socket`. All external capabilities come from host functions and are subject to:
 
 - script deadline (`sandbox.script_timeout_ms`) that answers the client with 500 `script_error` and kills the worker process
+- on Linux, a per-worker virtual-address-space bound (`sandbox.script_memory_limit_mb`) applied as `RLIMIT_AS` before script code runs; macOS and Windows do not claim a hard memory bound in this slice
 - script-worker process concurrency cap (4–16 slots derived from available parallelism) with fail-fast when saturated
 - network allowlist
 - static file root confinement for `ctx.file`
 - request-scoped multipart temporary storage with `files.upload_max_bytes`, streaming accounting, 8 MiB buffered upload reads, and guard-based cleanup
 - stack traces never returned to clients
 
-Boa 0.22 exposes no heap metric, heap limit, or interrupt hook, so no hard memory bound is enforced; the host stops a timed-out script by killing its worker process. The T3 amendment to [ADR 0003](../../plans/adr/0003-script-first-multi-runtime.md) records that tradeoff and the remaining resource bounds.
+Boa 0.22 exposes no heap metric, heap limit, or interrupt hook. On Linux the process-isolated worker instead relies on the OS-enforced `RLIMIT_AS` bound; the host still stops a timed-out script by killing its worker process. macOS and Windows have process isolation and the deadline but no hard memory bound in this slice. The T3 amendment to [ADR 0003](../../plans/adr/0003-script-first-multi-runtime.md) and [ADR 0014](../../plans/adr/0014-process-isolated-script-runner.md) record the tradeoffs and remaining resource bounds.
 
 ## Type definitions
 

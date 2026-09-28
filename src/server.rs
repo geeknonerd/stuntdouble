@@ -260,7 +260,6 @@ impl AppState {
         let script_started = Instant::now();
         let outcome = match std::fs::read_to_string(&route.script) {
             Ok(source) => {
-                let timeout = Duration::from_millis(self.config.sandbox.script_timeout_ms);
                 // Fail fast instead of queueing: queued scripts would spend
                 // their own deadline behind the workers already holding a slot.
                 match Arc::clone(&self.script_workers).try_acquire_owned() {
@@ -268,7 +267,7 @@ impl AppState {
                         script::execute(
                             source,
                             snapshot,
-                            timeout,
+                            self.config.sandbox.clone(),
                             self.config.upstream.clone(),
                             self.config.files.clone(),
                             uploads,

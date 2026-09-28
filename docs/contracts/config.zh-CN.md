@@ -30,14 +30,17 @@ v1 不接受 YAML 与 JSON。
 | `files` | 是 | table | — | 只接受 `{root, upload_max_bytes}` |
 | `files.root` | 是 | string | — | 必须已存在的目录，相对配置文件解析 |
 | `files.upload_max_bytes` | 否 | integer | `20971520` | 正整数（0 与负数被拒绝）；单个 multipart 请求可接受的数据字节上限 |
-| `sandbox` | 否 | table | — | 只接受 `{script_timeout_ms}` |
+| `sandbox` | 否 | table | — | 只接受 `{script_timeout_ms, script_memory_limit_mb}` |
 | `sandbox.script_timeout_ms` | 否 | integer | `10000` | 正整数（0 被拒绝） |
+| `sandbox.script_memory_limit_mb` | 否 | integer | `64` | 整数 `>= 16`；在 Linux 上作为 `RLIMIT_AS` 虚拟地址空间上限执行，macOS 与 Windows 没有硬内存上限 |
 | `upstream` | 否 | table | — | 只接受 `{allow_hosts, timeout_ms}` |
 | `upstream.allow_hosts` | 否 | string 数组 | `[]` | 使用 URL host 语法；条目不带 scheme 与端口，默认拒绝所有 host |
 | `upstream.timeout_ms` | 否 | integer | `15000` | 正整数（0 被拒绝） |
 | `routes` | 是 | table 数组 | — | 至少包含一个 Route table；`routes = []` 非法 |
 
 `upstream.allow_hosts` 中的域名会被小写化／punycode 化。IPv6 字面量写成方括号形式（`"[::1]"`），加载时归一化为不带方括号的形式。Host 匹配大小写不敏感且不含端口，IP 字面量与 `localhost` 必须显式列出。
+
+`sandbox.script_memory_limit_mb` 在所有平台都会接受并校验。Linux 上的脚本 worker 会在脚本代码运行前把它作为 `RLIMIT_AS`（soft = hard）应用到自身，因此限制的是整个进程的虚拟地址空间而不是常驻内存，IPC 缓冲与缓冲式文件读取也计入其中。本切片中 macOS 无法用 `RLIMIT_AS` 建立有用的上界，Windows 也尚未实现内存限制：两者保留进程隔离与脚本 deadline，但没有硬内存上限。
 
 ### Route schema
 
@@ -65,6 +68,7 @@ upload_max_bytes = 20971520   # 正整数；默认 20 MiB
 
 [sandbox]                 # 可选表
 script_timeout_ms = 10000 # 正整数；默认 10000
+script_memory_limit_mb = 64 # 整数 >= 16；Linux RLIMIT_AS；默认 64
 
 [upstream]                # 可选表
 allow_hosts = ["metadata.example.com"] # 精确 host allowlist；默认 []
@@ -97,7 +101,7 @@ Route 遵循唯一流水线：`match → source → transform → response`。�
 - 期望形状与实际值
 - TOML 解析器能提供时给出行列号
 
-校验在每一层 table 上对未知键 fail-closed。它还会拒绝未知 `config_version`、非 IP 的 `server.bind`、空 `routes` 数组、非正数 timeout、非正数 `files.upload_max_bytes`，以及缺失或不是目录的 `files.root`。`validate` 不打开 socket，也不读取 Route 脚本。
+校验在每一层 table 上对未知键 fail-closed。它还会拒绝未知 `config_version`、非 IP 的 `server.bind`、空 `routes` 数组、非正数 timeout、低于 16 的 `sandbox.script_memory_limit_mb`、非正数 `files.upload_max_bytes`，以及缺失或不是目录的 `files.root`。`validate` 不打开 socket，也不读取 Route 脚本。
 
 配置错误以退出码 `2` 结束。
 

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(sandbox)* enforce `sandbox.script_memory_limit_mb` as a Linux `RLIMIT_AS` bound with a 64 MiB default, 16 MiB floor, and stable verbose memory-limit detail
+
 ## [0.4.0](https://github.com/geeknonerd/stuntdouble/compare/v0.3.1...v0.4.0) - 2026-09-28
 
 ### Added
