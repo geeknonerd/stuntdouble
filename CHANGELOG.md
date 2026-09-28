@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/geeknonerd/stuntdouble/compare/v0.4.0...v0.5.0) - 2026-09-28
+
+### Added
+
+- *(sandbox)* enforce a hard memory bound on Linux script workers ([#98](https://github.com/geeknonerd/stuntdouble/pull/98))
+
 ### Added
 
 - *(sandbox)* enforce `sandbox.script_memory_limit_mb` as a Linux `RLIMIT_AS` bound with a 256 MiB default, 64 MiB floor, and stable verbose memory-limit detail
