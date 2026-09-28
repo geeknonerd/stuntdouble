@@ -1,16 +1,18 @@
-// Script execution: run one route script in Boa with a host-injected `ctx`.
-// Contracts: docs/contracts/ctx-api.md (subset implemented by slices T2–T4).
+// Script execution: run one route script in a fresh worker process with a
+// host-injected `ctx`. The parent owns every host capability and speaks a
+// strict JSON Lines protocol with the worker over stdin/stdout.
 //
 // The crate denies `unsafe`. Boa 0.22 only exposes native closures through
 // `unsafe fn NativeFunction::from_closure`, so the only Rust callback is a safe
-// `NativeFunction::from_fn_ptr` bridge with per-request state in a thread-local.
+// `NativeFunction::from_fn_ptr` bridge that forwards host calls to the parent.
 // The prelude builds `ctx` in the realm from JSON snapshots and reads the
 // produced response back with `JSON.stringify`. Scripts still see nothing but
 // `ctx`: the realm has no `fetch`, `fs`, `process`, or `require`, and the raw
 // bridge global is deleted before the route script runs.
-use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
+use std::io::Write as _;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -19,6 +21,8 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use boa_engine::native_function::NativeFunction;
 use boa_engine::{js_string, Context, JsError, JsNativeError, JsString, JsValue, Source};
 use serde_json::{json, Value as Json};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, Command};
 
 use crate::config::{FilesConfig, UpstreamConfig};
 use crate::files;
@@ -28,16 +32,13 @@ use crate::upstream;
 /// Value of `ctx.apiVersion`; see docs/contracts/ctx-api.md.
 pub const API_VERSION: &str = "1";
 
+/// Hidden subcommand that turns the server binary into one script worker.
+pub const WORKER_SUBCOMMAND: &str = "__script-worker";
+
 // One script run gets a fixed resource envelope. Boa 0.22 exposes no interrupt
-// hook and no heap metric or limit (see the T3 amendment in
-// plans/adr/0003-script-first-multi-runtime.md), so the enforceable bounds are
-// the wall-clock deadline that answers the client, the loop-iteration backstop
-// that eventually stops the orphaned worker, and the VM recursion/stack limits
-// that keep runaway recursion from exhausting the host stack.
-// tradeoff: a worker abandoned at the deadline keeps running until the
-// iteration backstop trips; a true heap cap needs a future Boa observation
-// point or process isolation. Upgrade path: use the engine's interrupter and
-// heap metrics once the pinned release exposes them.
+// hook and no heap metric or limit, so the parent's wall-clock deadline and
+// process kill are the enforced bound; the iteration limit, recursion limit,
+// and VM stack limit remain defense in depth inside the disposable worker.
 const LOOP_ITERATION_LIMIT: u64 = 100_000_000;
 const RECURSION_LIMIT: usize = 512;
 const VM_STACK_SIZE_LIMIT: usize = 10_240;
@@ -159,8 +160,10 @@ pub enum Error {
     /// Wall-clock deadline exceeded.
     TimedOut,
     /// Every script worker slot is busy; the host failed fast instead of
-    /// letting queued scripts wait behind workers abandoned at the deadline.
+    /// letting queued scripts wait behind running workers.
     CapacityExceeded,
+    /// The worker process ended before delivering a complete final result.
+    WorkerTerminated,
     /// Script finished without calling `ctx.respond`.
     NoResponse,
     /// An uncaught transport failure from `ctx.http.get` or `ctx.http.pipe`.
@@ -177,7 +180,9 @@ impl Error {
     pub fn class(&self) -> &'static str {
         match self {
             Self::NoResponse => "script_no_response",
-            Self::Failed(_) | Self::TimedOut | Self::CapacityExceeded => "script_error",
+            Self::Failed(_) | Self::TimedOut | Self::CapacityExceeded | Self::WorkerTerminated => {
+                "script_error"
+            }
             Self::UpstreamUnreachable { .. } => "upstream_unreachable",
         }
     }
@@ -187,9 +192,11 @@ impl Error {
     pub fn status(&self) -> StatusCode {
         match self {
             Self::UpstreamUnreachable { .. } => StatusCode::BAD_GATEWAY,
-            Self::Failed(_) | Self::TimedOut | Self::CapacityExceeded | Self::NoResponse => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            Self::Failed(_)
+            | Self::TimedOut
+            | Self::CapacityExceeded
+            | Self::WorkerTerminated
+            | Self::NoResponse => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
@@ -201,6 +208,7 @@ impl Error {
             Self::Failed(_) => "script execution failed",
             Self::TimedOut => "script exceeded the configured timeout",
             Self::CapacityExceeded => "script worker capacity exhausted",
+            Self::WorkerTerminated => "script worker terminated unexpectedly",
             Self::NoResponse => "script finished without calling ctx.respond",
             Self::UpstreamUnreachable { kind, .. } => match *kind {
                 "timeout" => "upstream transport failure: timeout",
@@ -572,30 +580,52 @@ fn js_literal(value: &Json) -> String {
         .replace('\u{2029}', "\\u2029")
 }
 
-thread_local! {
-    /// Per-request bridge used by the `__sd_http_get` and `__sd_http_pipe`
-    /// native callbacks.
-    static HTTP_HOST: RefCell<Option<upstream::UpstreamAccess>> = const { RefCell::new(None) };
-
-    /// Per-request piped body captured by `__sd_http_pipe` and claimed by
-    /// `parse_host_record` once the script finishes.
-    static PIPE_STREAM: RefCell<Option<upstream::PipeBody>> = const { RefCell::new(None) };
-
-    /// Per-request file access installed before the route script runs.
-    static FILE_HOST: RefCell<Option<files::FileAccess>> = const { RefCell::new(None) };
-
-    /// Per-request uploaded-file access installed before the route script runs.
-    static UPLOAD_HOST: RefCell<Option<files::UploadAccess>> = const { RefCell::new(None) };
+/// Write one JSON Lines protocol message to the parent.
+fn write_protocol_line(value: &Json) -> std::io::Result<()> {
+    let stdout = std::io::stdout();
+    let mut stdout = stdout.lock();
+    serde_json::to_writer(&mut stdout, value).map_err(std::io::Error::other)?;
+    stdout.write_all(b"\n")?;
+    stdout.flush()
 }
 
-/// Decode one host-bridge argument and encode the JSON result for the script.
-/// Every native callback shares this wrapper so the fail-closed argument and
-/// error shapes cannot drift.
-fn host_bridge(
-    name: &str,
-    args: &[JsValue],
-    call: impl FnOnce(&Json) -> Json,
-) -> boa_engine::JsResult<JsValue> {
+/// Read one protocol line from the parent. `None` is EOF before any line.
+fn read_protocol_line() -> std::io::Result<Option<String>> {
+    let mut line = String::new();
+    let read = std::io::stdin().read_line(&mut line)?;
+    Ok((read > 0).then_some(line))
+}
+
+/// Send one host call and wait for the parent's exactly-one result.
+fn worker_host_call(name: &str, payload: &Json) -> boa_engine::JsResult<Json> {
+    let call = json!({ "type": "host_call", "name": name, "payload": payload });
+    write_protocol_line(&call).map_err(|error| {
+        JsNativeError::error().with_message(format!("{name}: cannot reach host: {error}"))
+    })?;
+    let line = read_protocol_line().map_err(|error| {
+        JsNativeError::error().with_message(format!("{name}: host read failed: {error}"))
+    })?;
+    let line = line.ok_or_else(|| {
+        JsNativeError::error().with_message(format!("{name}: host closed the pipe"))
+    })?;
+    let message: Json = serde_json::from_str(&line).map_err(|error| {
+        JsNativeError::error().with_message(format!("{name}: invalid host response: {error}"))
+    })?;
+    if message.get("type").and_then(Json::as_str) != Some("host_result") {
+        return Err(JsNativeError::error()
+            .with_message(format!("{name}: expected host_result"))
+            .into());
+    }
+    message.get("result").cloned().ok_or_else(|| {
+        JsNativeError::error()
+            .with_message(format!("{name}: host_result is missing result"))
+            .into()
+    })
+}
+
+/// Decode one bridge argument, dispatch it to the parent, and encode the JSON
+/// string the script prelude expects.
+fn worker_bridge(name: &str, args: &[JsValue]) -> boa_engine::JsResult<JsValue> {
     let Some(raw) = args.first().and_then(JsValue::as_string) else {
         return Err(JsNativeError::typ()
             .with_message(format!("{name}: expected a JSON string"))
@@ -604,147 +634,51 @@ fn host_bridge(
     let payload: Json = serde_json::from_str(&raw.to_std_string_escaped()).map_err(|error| {
         JsNativeError::typ().with_message(format!("{name}: invalid payload: {error}"))
     })?;
-    let result = call(&payload);
+    let result = worker_host_call(name, &payload)?;
     let rendered = serde_json::to_string(&result).map_err(|error| {
         JsNativeError::error().with_message(format!("{name}: cannot encode result: {error}"))
     })?;
     Ok(JsValue::from(JsString::from(rendered)))
 }
 
-/// Run one host closure against a request-scoped thread-local, answering a
-/// fail-closed script error when a bridge is called outside a request.
-fn host_call<T>(
-    name: &str,
-    cell: &'static std::thread::LocalKey<RefCell<Option<T>>>,
-    payload: &Json,
-    run: impl FnOnce(&T, &Json) -> Json,
-) -> Json {
-    cell.with(|slot| {
-        let borrowed = slot.borrow();
-        borrowed.as_ref().map_or_else(
-            || {
-                json!({
-                    "ok": false,
-                    "code": "script_error",
-                    "message": format!("{name} called outside a script request")
-                })
-            },
-            |host| run(host, payload),
-        )
-    })
-}
-
-/// Native bridge behind `ctx.http.get`; all policy checks live in `upstream`.
-fn sd_http_get(
+fn worker_http_get(
     _this: &JsValue,
     args: &[JsValue],
     _context: &mut Context,
 ) -> boa_engine::JsResult<JsValue> {
-    host_bridge("__sd_http_get", args, |call| {
-        host_call("__sd_http_get", &HTTP_HOST, call, |host, call| {
-            match host.get(call) {
-                Ok(response) => {
-                    json!({ "ok": true, "response": upstream::response_json(response) })
-                }
-                Err(error) => json!({
-                    "ok": false,
-                    "code": error.code(),
-                    "kind": error.transport_kind(),
-                    "message": error.message()
-                }),
-            }
-        })
-    })
+    worker_bridge("__sd_http_get", args)
 }
 
-/// Native bridge behind `ctx.http.pipe`; all policy checks live in `upstream`.
-/// The streamed body stays in this thread-local until the script ends, so the
-/// JavaScript side only ever records the client status and headers.
-fn sd_http_pipe(
+fn worker_http_pipe(
     _this: &JsValue,
     args: &[JsValue],
     _context: &mut Context,
 ) -> boa_engine::JsResult<JsValue> {
-    host_bridge("__sd_http_pipe", args, |call| {
-        host_call(
-            "__sd_http_pipe",
-            &HTTP_HOST,
-            call,
-            |host, call| match host.pipe(call) {
-                Ok(response) => {
-                    PIPE_STREAM.with(|cell| {
-                        *cell.borrow_mut() = Some(response.body);
-                    });
-                    json!({
-                        "ok": true,
-                        "status": response.status,
-                        "headers": response
-                            .headers
-                            .iter()
-                            .map(|(name, value)| json!([name, value]))
-                            .collect::<Vec<_>>(),
-                    })
-                }
-                Err(error) => json!({
-                    "ok": false,
-                    "code": error.code(),
-                    "kind": error.transport_kind(),
-                    "message": error.message()
-                }),
-            },
-        )
-    })
+    worker_bridge("__sd_http_pipe", args)
 }
 
-/// Native bridge behind `ctx.file.*`; all confinement checks live in `files`.
-fn sd_file(
+fn worker_file(
     _this: &JsValue,
     args: &[JsValue],
     _context: &mut Context,
 ) -> boa_engine::JsResult<JsValue> {
-    host_bridge("__sd_file", args, |call| {
-        host_call("__sd_file", &FILE_HOST, call, files::FileAccess::call)
-    })
+    worker_bridge("__sd_file", args)
 }
 
-/// Native bridge behind `ctx.request.files`; temporary paths stay in `files`.
-fn sd_upload(
+fn worker_upload(
     _this: &JsValue,
     args: &[JsValue],
     _context: &mut Context,
 ) -> boa_engine::JsResult<JsValue> {
-    host_bridge("__sd_upload", args, |call| {
-        host_call("__sd_upload", &UPLOAD_HOST, call, files::UploadAccess::call)
-    })
+    worker_bridge("__sd_upload", args)
 }
 
-/// Native bridge used by the prelude to validate script-supplied response
-/// headers before `ctx.respond` stores them or `ctx.http.pipe` starts an
-/// upstream call. The script sees a catchable `script_error`.
-fn sd_validate_headers(
+fn worker_validate_headers(
     _this: &JsValue,
     args: &[JsValue],
     _context: &mut Context,
 ) -> boa_engine::JsResult<JsValue> {
-    let Some(raw) = args.first().and_then(JsValue::as_string) else {
-        return Err(JsNativeError::typ()
-            .with_message("__sd_validate_headers: expected a JSON string")
-            .into());
-    };
-    let pairs: Vec<(String, String)> =
-        serde_json::from_str(&raw.to_std_string_escaped()).map_err(|error| {
-            JsNativeError::typ()
-                .with_message(format!("__sd_validate_headers: invalid payload: {error}"))
-        })?;
-    let result = match validated_header_pairs(&pairs) {
-        Ok(_) => json!({ "ok": true }),
-        Err(message) => json!({
-            "ok": false,
-            "code": "script_error",
-            "message": message,
-        }),
-    };
-    Ok(JsValue::from(JsString::from(result.to_string())))
+    worker_bridge("__sd_validate_headers", args)
 }
 
 /// Validate script-supplied response headers with the HTTP grammar shared by
@@ -796,32 +730,11 @@ fn guard_engine<T>(run: impl FnOnce() -> T) -> Result<T, Error> {
         .map_err(|_| Error::Failed("script panicked in the engine".into()))
 }
 
-/// Request-scoped file hosts installed before one script evaluates.
-struct FileHosts {
-    root: std::path::PathBuf,
-    calls: files::CallLog,
-    uploads: Option<Arc<files::UploadStore>>,
-}
-
-/// Install rooted file access and uploaded-file access for the worker thread.
-fn install_file_hosts(hosts: FileHosts) {
-    let file_access = files::FileAccess::new(&hosts.root, Arc::clone(&hosts.calls));
-    let upload_access = hosts
-        .uploads
-        .map(|store| files::UploadAccess::new(store, hosts.calls));
-    FILE_HOST.with(|cell| {
-        *cell.borrow_mut() = Some(file_access);
-    });
-    UPLOAD_HOST.with(|cell| {
-        *cell.borrow_mut() = upload_access;
-    });
-}
-
 /// Serialize one request and environment snapshot into the script prelude.
-fn prelude_for_request(request: &RequestSnapshot, upstream_marker: &str) -> String {
+fn prelude_for_request(request: &Json, upstream_marker: &str) -> String {
     PRELUDE
         .replace("__SD_API_VERSION__", API_VERSION)
-        .replace("__SD_REQUEST__", &js_literal(&request.to_json()))
+        .replace("__SD_REQUEST__", &js_literal(request))
         .replace("__SD_ENV__", &js_literal(&env_json()))
         .replace(
             "__SD_UPSTREAM_MARKER__",
@@ -829,33 +742,9 @@ fn prelude_for_request(request: &RequestSnapshot, upstream_marker: &str) -> Stri
         )
 }
 
-/// Evaluate one request's script and read back its recorded state.
-fn evaluate(
-    source: &str,
-    request: &RequestSnapshot,
-    upstream: &UpstreamConfig,
-    hosts: FileHosts,
-    script_deadline: Instant,
-    calls: upstream::CallLog,
-) -> Outcome {
-    let client_range = request
-        .headers
-        .iter()
-        .find(|(name, _)| name == "range")
-        .map(|(_, value)| value.clone());
-    install_file_hosts(hosts);
-    HTTP_HOST.with(|cell| {
-        *cell.borrow_mut() = Some(upstream::UpstreamAccess::new(
-            upstream.allow_hosts.clone(),
-            Duration::from_millis(upstream.timeout_ms),
-            script_deadline,
-            client_range,
-            calls,
-        ));
-    });
-    PIPE_STREAM.with(|cell| {
-        *cell.borrow_mut() = None;
-    });
+/// Evaluate one script inside the worker process. Every host function is
+/// forwarded to the parent; upstream, file, and upload policy stay there.
+fn evaluate_in_worker(source: &str, request: &Json) -> Result<Json, Error> {
     let upstream_marker = upstream_marker();
     let prelude = prelude_for_request(request, &upstream_marker);
     let mut context = Context::default();
@@ -863,41 +752,42 @@ fn evaluate(
     limits.set_loop_iteration_limit(LOOP_ITERATION_LIMIT);
     limits.set_recursion_limit(RECURSION_LIMIT);
     limits.set_stack_size_limit(VM_STACK_SIZE_LIMIT);
-    // A Rust-side panic in the engine must not take the request thread down.
+    // A Rust-side panic in the engine must not take the worker down without a
+    // protocol result; it is mapped to the same script failure as before.
     let staged = guard_engine(|| -> Result<String, BridgeError> {
         context
             .register_global_builtin_callable(
                 js_string!("__sd_http_get"),
                 1,
-                NativeFunction::from_fn_ptr(sd_http_get),
+                NativeFunction::from_fn_ptr(worker_http_get),
             )
             .map_err(|error| (None, error.to_string()))?;
         context
             .register_global_builtin_callable(
                 js_string!("__sd_http_pipe"),
                 1,
-                NativeFunction::from_fn_ptr(sd_http_pipe),
+                NativeFunction::from_fn_ptr(worker_http_pipe),
             )
             .map_err(|error| (None, error.to_string()))?;
         context
             .register_global_builtin_callable(
                 js_string!("__sd_validate_headers"),
                 1,
-                NativeFunction::from_fn_ptr(sd_validate_headers),
+                NativeFunction::from_fn_ptr(worker_validate_headers),
             )
             .map_err(|error| (None, error.to_string()))?;
         context
             .register_global_builtin_callable(
                 js_string!("__sd_file"),
                 1,
-                NativeFunction::from_fn_ptr(sd_file),
+                NativeFunction::from_fn_ptr(worker_file),
             )
             .map_err(|error| (None, error.to_string()))?;
         context
             .register_global_builtin_callable(
                 js_string!("__sd_upload"),
                 1,
-                NativeFunction::from_fn_ptr(sd_upload),
+                NativeFunction::from_fn_ptr(worker_upload),
             )
             .map_err(|error| (None, error.to_string()))?;
         let evaluated = (|| -> Result<String, JsError> {
@@ -913,25 +803,20 @@ fn evaluate(
             Ok(dump) => Ok(dump),
             Err(error) => {
                 let kind = upstream_unreachable_kind(&error, &upstream_marker, &mut context);
-                let message = error.to_string();
-                Err((kind, message))
+                Err((kind, error.to_string()))
             }
         }
     });
-    let stream = PIPE_STREAM.with(|cell| cell.borrow_mut().take());
-    let file_host = FILE_HOST.with(|cell| cell.borrow_mut().take());
-    let upload_host = UPLOAD_HOST.with(|cell| cell.borrow_mut().take());
-    HTTP_HOST.with(|cell| {
-        cell.borrow_mut().take();
-    });
-    match staged {
-        Err(error) => Outcome::failed(error),
+    let dump = match staged {
+        Err(error) => return Err(error),
         Ok(Err((Some(kind), message))) => {
-            Outcome::failed(Error::UpstreamUnreachable { message, kind })
+            return Err(Error::UpstreamUnreachable { message, kind });
         }
-        Ok(Err((None, message))) => Outcome::failed(Error::Failed(message)),
-        Ok(Ok(dump)) => parse_host_record(&dump, stream, file_host, upload_host),
-    }
+        Ok(Err((None, message))) => return Err(Error::Failed(message)),
+        Ok(Ok(dump)) => dump,
+    };
+    serde_json::from_str(&dump)
+        .map_err(|error| Error::Failed(format!("cannot read script state: {error}")))
 }
 
 /// Per-request marker property for host-created transport errors. It is not a
@@ -985,18 +870,12 @@ fn upstream_unreachable_kind(
 /// carries only its status and headers through the realm; the body stream is
 /// handed back separately by the host bridge.
 fn parse_host_record(
-    raw: &str,
+    host: &Json,
     pipe_stream: Option<upstream::PipeBody>,
     file_host: Option<files::FileAccess>,
     upload_host: Option<files::UploadAccess>,
 ) -> Outcome {
-    let host: Json = match serde_json::from_str(raw) {
-        Ok(value) => value,
-        Err(error) => {
-            return Outcome::failed(Error::Failed(format!("cannot read script state: {error}")));
-        }
-    };
-    let logs = parse_script_logs(&host);
+    let logs = parse_script_logs(host);
     let Some(response) = host.get("response").filter(|value| !value.is_null()) else {
         return script_outcome(None, logs, Some(Error::NoResponse));
     };
@@ -1138,9 +1017,330 @@ fn parse_script_body(
     })
 }
 
-/// Run one script for one request with a wall-clock deadline.
+/// Parent-owned host capabilities and parent-held streams for one run.
+struct HostState {
+    upstream: Option<upstream::UpstreamAccess>,
+    files: Option<files::FileAccess>,
+    uploads: Option<files::UploadAccess>,
+    pipe: Option<upstream::PipeBody>,
+}
+
+impl HostState {
+    fn new(
+        upstream_config: &UpstreamConfig,
+        files_config: &FilesConfig,
+        uploads: Option<Arc<files::UploadStore>>,
+        script_deadline: Instant,
+        client_range: Option<String>,
+        calls: upstream::CallLog,
+        file_calls: files::CallLog,
+    ) -> Self {
+        let upstream = upstream::UpstreamAccess::new(
+            upstream_config.allow_hosts.clone(),
+            Duration::from_millis(upstream_config.timeout_ms),
+            script_deadline,
+            client_range,
+            calls,
+        );
+        let files = files::FileAccess::new(&files_config.root, Arc::clone(&file_calls));
+        let uploads = uploads.map(|store| files::UploadAccess::new(store, file_calls));
+        Self {
+            upstream: Some(upstream),
+            files: Some(files),
+            uploads,
+            pipe: None,
+        }
+    }
+
+    /// Handle one bridge call. `None` is an unknown bridge, which is a
+    /// parent/worker protocol mismatch rather than a script error.
+    fn dispatch(&mut self, name: &str, payload: &Json) -> Option<Json> {
+        match name {
+            "__sd_http_get" => {
+                let host = self.upstream.as_ref()?;
+                Some(match host.get(payload) {
+                    Ok(response) => {
+                        json!({ "ok": true, "response": upstream::response_json(response) })
+                    }
+                    Err(error) => upstream_error_json(&error),
+                })
+            }
+            "__sd_http_pipe" => {
+                let host = self.upstream.as_ref()?;
+                Some(match host.pipe(payload) {
+                    Ok(response) => {
+                        self.pipe = Some(response.body);
+                        json!({
+                            "ok": true,
+                            "status": response.status,
+                            "headers": response
+                                .headers
+                                .iter()
+                                .map(|(name, value)| json!([name, value]))
+                                .collect::<Vec<_>>(),
+                        })
+                    }
+                    Err(error) => upstream_error_json(&error),
+                })
+            }
+            "__sd_file" => Some(self.files.as_ref()?.call(payload)),
+            "__sd_upload" => Some(self.uploads.as_ref().map_or_else(
+                || {
+                    json!({
+                        "ok": false,
+                        "code": "script_error",
+                        "message": "__sd_upload called outside a script request"
+                    })
+                },
+                |host| host.call(payload),
+            )),
+            "__sd_validate_headers" => Some(validate_headers_json(payload)),
+            _ => None,
+        }
+    }
+
+    /// Move parent-held streams into the final response only after a complete
+    /// worker result. On any earlier exit they are dropped with the host.
+    fn take_streams(
+        &mut self,
+    ) -> (
+        Option<upstream::PipeBody>,
+        Option<files::FileAccess>,
+        Option<files::UploadAccess>,
+    ) {
+        (self.pipe.take(), self.files.take(), self.uploads.take())
+    }
+}
+
+/// Stable JSON shape for an upstream bridge failure.
+fn upstream_error_json(error: &upstream::Error) -> Json {
+    json!({
+        "ok": false,
+        "code": error.code(),
+        "kind": error.transport_kind(),
+        "message": error.message(),
+    })
+}
+
+/// Parent-side header validation bridge; the worker never owns this policy.
+fn validate_headers_json(payload: &Json) -> Json {
+    match serde_json::from_value::<Vec<(String, String)>>(payload.clone()) {
+        Ok(pairs) => match validated_header_pairs(&pairs) {
+            Ok(_) => json!({ "ok": true }),
+            Err(message) => json!({
+                "ok": false,
+                "code": "script_error",
+                "message": message,
+            }),
+        },
+        Err(_) => json!({
+            "ok": false,
+            "code": "script_error",
+            "message": "__sd_validate_headers: invalid payload",
+        }),
+    }
+}
+
+/// Run one blocking host call without stalling the async protocol loop. Calls
+/// are strictly serialized by ping-pong, so one mutex is sufficient.
+async fn dispatch_host(host: &Arc<Mutex<HostState>>, name: String, payload: Json) -> Option<Json> {
+    let host = Arc::clone(host);
+    tokio::task::spawn_blocking(move || {
+        let mut host = host
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        host.dispatch(&name, &payload)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Write one JSON Lines message to the worker.
+async fn write_json_line(
+    writer: &mut tokio::process::ChildStdin,
+    value: &Json,
+) -> std::io::Result<()> {
+    let mut line = serde_json::to_vec(value).map_err(std::io::Error::other)?;
+    line.push(b'\n');
+    writer.write_all(&line).await?;
+    writer.flush().await
+}
+
+enum WorkerReply {
+    /// The worker delivered its one complete final result.
+    Final(Json),
+    /// The wall-clock deadline expired.
+    TimedOut,
+    /// EOF, malformed output, an unknown bridge, or another protocol error.
+    Unexpected,
+}
+
+/// Pump the strict request/response protocol until `final_result`.
+async fn exchange(
+    mut stdin: tokio::process::ChildStdin,
+    stdout: tokio::process::ChildStdout,
+    host: &Arc<Mutex<HostState>>,
+    job: &Json,
+    deadline: tokio::time::Instant,
+) -> WorkerReply {
+    if write_json_line(&mut stdin, job).await.is_err() {
+        return WorkerReply::Unexpected;
+    }
+    let mut lines = BufReader::new(stdout).lines();
+    loop {
+        let line = match tokio::time::timeout_at(deadline, lines.next_line()).await {
+            Err(_) => return WorkerReply::TimedOut,
+            Ok(Err(_) | Ok(None)) => return WorkerReply::Unexpected,
+            Ok(Ok(Some(line))) => line,
+        };
+        let Ok(message) = serde_json::from_str::<Json>(&line) else {
+            return WorkerReply::Unexpected;
+        };
+        match message.get("type").and_then(Json::as_str) {
+            Some("host_call") => {
+                let Some(name) = message
+                    .get("name")
+                    .and_then(Json::as_str)
+                    .map(str::to_string)
+                else {
+                    return WorkerReply::Unexpected;
+                };
+                let Some(payload) = message.get("payload").cloned() else {
+                    return WorkerReply::Unexpected;
+                };
+                let result =
+                    match tokio::time::timeout_at(deadline, dispatch_host(host, name, payload))
+                        .await
+                    {
+                        Err(_) => return WorkerReply::TimedOut,
+                        Ok(None) => return WorkerReply::Unexpected,
+                        Ok(Some(result)) => result,
+                    };
+                let reply = json!({ "type": "host_result", "result": result });
+                match tokio::time::timeout_at(deadline, write_json_line(&mut stdin, &reply)).await {
+                    Err(_) => return WorkerReply::TimedOut,
+                    Ok(Err(_)) => return WorkerReply::Unexpected,
+                    Ok(Ok(())) => {}
+                }
+            }
+            Some("final_result") => return WorkerReply::Final(message),
+            _ => return WorkerReply::Unexpected,
+        }
+    }
+}
+
+/// Spawn one worker process and drive it until its final result or the shared
+/// wall-clock deadline. The child is killed and reaped on every other exit.
+async fn run_worker(
+    job: Json,
+    host: Arc<Mutex<HostState>>,
+    deadline: tokio::time::Instant,
+) -> Outcome {
+    let Ok(executable) = std::env::current_exe() else {
+        return Outcome::failed(Error::WorkerTerminated);
+    };
+    let mut command = Command::new(executable);
+    command
+        .arg(WORKER_SUBCOMMAND)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true);
+    let Ok(mut child) = command.spawn() else {
+        return Outcome::failed(Error::WorkerTerminated);
+    };
+    let Some(stdin) = child.stdin.take() else {
+        terminate(&mut child).await;
+        return Outcome::failed(Error::WorkerTerminated);
+    };
+    let Some(stdout) = child.stdout.take() else {
+        terminate(&mut child).await;
+        return Outcome::failed(Error::WorkerTerminated);
+    };
+    let reply = {
+        let exchange = exchange(stdin, stdout, &host, &job, deadline);
+        tokio::pin!(exchange);
+        tokio::select! {
+            biased;
+            reply = &mut exchange => reply,
+            () = tokio::time::sleep_until(deadline) => WorkerReply::TimedOut,
+        }
+    };
+    match reply {
+        WorkerReply::TimedOut => {
+            terminate(&mut child).await;
+            Outcome::failed(Error::TimedOut)
+        }
+        WorkerReply::Unexpected => {
+            terminate(&mut child).await;
+            Outcome::failed(Error::WorkerTerminated)
+        }
+        WorkerReply::Final(message) => {
+            // The result is complete, so no worker-held stream can be affected.
+            // Let the process exit within the same deadline; kill any lingerer.
+            if tokio::time::timeout_at(deadline, child.wait())
+                .await
+                .is_err()
+            {
+                terminate(&mut child).await;
+            }
+            finish_outcome(&message, &host)
+        }
+    }
+}
+
+/// Kill and reap a worker that did not reach a normal final result.
+async fn terminate(child: &mut Child) {
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+}
+
+/// Map one complete `final_result` onto the existing Outcome shape.
+fn finish_outcome(message: &Json, host: &Arc<Mutex<HostState>>) -> Outcome {
+    let (pipe, file_host, upload_host) = {
+        let mut host = host
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        host.take_streams()
+    };
+    match message.get("ok").and_then(Json::as_bool) {
+        Some(true) => match message.get("result") {
+            Some(result) => parse_host_record(result, pipe, file_host, upload_host),
+            None => Outcome::failed(Error::WorkerTerminated),
+        },
+        Some(false) => {
+            let Some(error) = message.get("error") else {
+                return Outcome::failed(Error::WorkerTerminated);
+            };
+            let Some(text) = error.get("message").and_then(Json::as_str) else {
+                return Outcome::failed(Error::WorkerTerminated);
+            };
+            let error = match error.get("kind").and_then(Json::as_str) {
+                Some("timeout") => Error::UpstreamUnreachable {
+                    message: text.to_string(),
+                    kind: "timeout",
+                },
+                Some("dns") => Error::UpstreamUnreachable {
+                    message: text.to_string(),
+                    kind: "dns",
+                },
+                Some(_) => Error::UpstreamUnreachable {
+                    message: text.to_string(),
+                    kind: "transport",
+                },
+                None => Error::Failed(text.to_string()),
+            };
+            Outcome::failed(error)
+        }
+        None => Outcome::failed(Error::WorkerTerminated),
+    }
+}
+
+/// Run one script for one request in a fresh worker process.
 ///
-/// Must use result: an unreachable engine is reported, never a silent success.
+/// Must use result: a dead or unreachable worker is reported, never a silent
+/// success. The semaphore permit is held for the whole worker lifetime.
 pub async fn execute(
     source: String,
     request: RequestSnapshot,
@@ -1150,42 +1350,104 @@ pub async fn execute(
     uploads: Option<Arc<files::UploadStore>>,
     worker_slot: tokio::sync::OwnedSemaphorePermit,
 ) -> Outcome {
-    // tradeoff: `spawn_blocking` cannot be cancelled, so on timeout the host
-    // answers immediately and the worker stops at `LOOP_ITERATION_LIMIT`.
-    let deadline = Instant::now()
+    let _slot = worker_slot;
+    let script_deadline = Instant::now()
         .checked_add(timeout)
         .unwrap_or_else(Instant::now);
+    let deadline = tokio::time::Instant::from_std(script_deadline);
     let calls: upstream::CallLog = Arc::new(Mutex::new(Vec::new()));
-    let worker_calls = Arc::clone(&calls);
     let file_calls: files::CallLog = Arc::new(Mutex::new(Vec::new()));
-    let worker_file_calls = Arc::clone(&file_calls);
-    let timeout_uploads = uploads.clone();
-    let hosts = FileHosts {
-        root: files_config.root,
-        calls: worker_file_calls,
-        uploads,
-    };
-    let worker = tokio::task::spawn_blocking(move || {
-        // Hold the slot for the worker's whole lifetime: a worker abandoned at
-        // the reply deadline keeps running until the loop backstop trips.
-        let _slot = worker_slot;
-        evaluate(&source, &request, &upstream, hosts, deadline, worker_calls)
+    let client_range = request
+        .headers
+        .iter()
+        .find(|(name, _)| name == "range")
+        .map(|(_, value)| value.clone());
+    let host = Arc::new(Mutex::new(HostState::new(
+        &upstream,
+        &files_config,
+        uploads.clone(),
+        script_deadline,
+        client_range,
+        Arc::clone(&calls),
+        Arc::clone(&file_calls),
+    )));
+    let job = json!({
+        "type": "job",
+        "script": source,
+        "request": request.to_json(),
     });
-    let mut outcome = match tokio::time::timeout(timeout, worker).await {
-        Err(_) => {
-            // The abandoned worker may still hold an Arc; remove its upload
-            // storage now so a client timeout cannot leak temporary files.
-            if let Some(store) = &timeout_uploads {
-                store.close();
-            }
-            Outcome::failed(Error::TimedOut)
+    let mut outcome = run_worker(job, Arc::clone(&host), deadline).await;
+    if outcome.error.is_some() {
+        // A failed run can leave a blocking host call holding the store; close
+        // its contents now so temporary uploads do not leak on timeout or a
+        // worker crash.
+        if let Some(store) = &uploads {
+            store.close();
         }
-        Ok(Err(_)) => Outcome::failed(Error::Failed("script worker panicked".into())),
-        Ok(Ok(outcome)) => outcome,
-    };
+    }
     outcome.upstream_calls = upstream::calls_json(&calls);
     outcome.file_calls = file_calls;
     outcome
+}
+
+/// Hidden entry point run by a self-spawned script worker.
+#[must_use]
+pub fn run_worker_process() -> i32 {
+    match worker_main() {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("script worker: {error}");
+            1
+        }
+    }
+}
+
+fn worker_main() -> std::io::Result<()> {
+    let Some(line) = read_protocol_line()? else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "missing job line",
+        ));
+    };
+    let job: Json = serde_json::from_str(&line)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    if job.get("type").and_then(Json::as_str) != Some("job") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "expected a job line",
+        ));
+    }
+    let Some(script) = job.get("script").and_then(Json::as_str) else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "job script missing",
+        ));
+    };
+    let Some(request) = job.get("request") else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "job request missing",
+        ));
+    };
+    let message = match evaluate_in_worker(script, request) {
+        Ok(result) => json!({ "type": "final_result", "ok": true, "result": result }),
+        Err(Error::UpstreamUnreachable { message, kind }) => json!({
+            "type": "final_result",
+            "ok": false,
+            "error": { "kind": kind, "message": message }
+        }),
+        Err(Error::Failed(message)) => json!({
+            "type": "final_result",
+            "ok": false,
+            "error": { "message": message }
+        }),
+        Err(error) => json!({
+            "type": "final_result",
+            "ok": false,
+            "error": { "message": error.detail() }
+        }),
+    };
+    write_protocol_line(&message)
 }
 
 #[cfg(test)]
