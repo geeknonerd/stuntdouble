@@ -1188,12 +1188,21 @@ async fn exchange(
         return WorkerReply::Unexpected;
     }
     let mut lines = BufReader::new(stdout).lines();
+    let mut final_result = None;
     loop {
         let line = match tokio::time::timeout_at(deadline, lines.next_line()).await {
             Err(_) => return WorkerReply::TimedOut,
-            Ok(Err(_) | Ok(None)) => return WorkerReply::Unexpected,
-            Ok(Ok(Some(line))) => line,
+            Ok(Err(_)) => return WorkerReply::Unexpected,
+            Ok(Ok(line)) => line,
         };
+        let Some(line) = line else {
+            return final_result.map_or(WorkerReply::Unexpected, WorkerReply::Final);
+        };
+        // `final_result` is the last protocol line; any trailing stdout is a
+        // protocol error even when the extra line is valid JSON.
+        if final_result.is_some() {
+            return WorkerReply::Unexpected;
+        }
         let Ok(message) = serde_json::from_str::<Json>(&line) else {
             return WorkerReply::Unexpected;
         };
@@ -1224,9 +1233,18 @@ async fn exchange(
                     Ok(Ok(())) => {}
                 }
             }
-            Some("final_result") => return WorkerReply::Final(message),
+            Some("final_result") => final_result = Some(message),
             _ => return WorkerReply::Unexpected,
         }
+    }
+}
+
+/// Drain worker stderr to the operator log. It never reaches the client, and a
+/// full pipe cannot block the worker because this task keeps reading.
+async fn forward_worker_stderr(stderr: tokio::process::ChildStderr) {
+    let mut lines = BufReader::new(stderr).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        eprintln!("{line}");
     }
 }
 
@@ -1245,10 +1263,21 @@ async fn run_worker(
         .arg(WORKER_SUBCOMMAND)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let Ok(mut child) = command.spawn() else {
-        return Outcome::failed(Error::WorkerTerminated);
+    // `spawn` can block inside fork/exec; run it on the blocking pool so the
+    // request deadline stays the outer bound. A child arriving after the
+    // timeout is still killed because `kill_on_drop` stays set on the command.
+    let mut child = match tokio::time::timeout_at(
+        deadline,
+        tokio::task::spawn_blocking(move || command.spawn()),
+    )
+    .await
+    {
+        Err(_) => return Outcome::failed(Error::TimedOut),
+        // Inner `Err` is a join error; `Ok(Err)` is a failed `Command::spawn`.
+        Ok(Err(_) | Ok(Err(_))) => return Outcome::failed(Error::WorkerTerminated),
+        Ok(Ok(Ok(child))) => child,
     };
     let Some(stdin) = child.stdin.take() else {
         terminate(&mut child).await;
@@ -1258,6 +1287,11 @@ async fn run_worker(
         terminate(&mut child).await;
         return Outcome::failed(Error::WorkerTerminated);
     };
+    let Some(stderr) = child.stderr.take() else {
+        terminate(&mut child).await;
+        return Outcome::failed(Error::WorkerTerminated);
+    };
+    let stderr_task = tokio::spawn(forward_worker_stderr(stderr));
     let reply = {
         let exchange = exchange(stdin, stdout, &host, &job, deadline);
         tokio::pin!(exchange);
@@ -1270,22 +1304,38 @@ async fn run_worker(
     match reply {
         WorkerReply::TimedOut => {
             terminate(&mut child).await;
+            let _ = stderr_task.await;
             Outcome::failed(Error::TimedOut)
         }
         WorkerReply::Unexpected => {
             terminate(&mut child).await;
+            let _ = stderr_task.await;
             Outcome::failed(Error::WorkerTerminated)
         }
         WorkerReply::Final(message) => {
-            // The result is complete, so no worker-held stream can be affected.
-            // Let the process exit within the same deadline; kill any lingerer.
-            if tokio::time::timeout_at(deadline, child.wait())
-                .await
-                .is_err()
-            {
-                terminate(&mut child).await;
+            // The deadline still covers process teardown. A complete result is
+            // consumed only after a successful exit; a lingering worker is
+            // killed and reported as a timeout, and parent-held streams drop.
+            match tokio::time::timeout_at(deadline, child.wait()).await {
+                Ok(Ok(status)) if status.success() => {
+                    let _ = stderr_task.await;
+                    finish_outcome(&message, &host)
+                }
+                Ok(Ok(_)) => {
+                    let _ = stderr_task.await;
+                    Outcome::failed(Error::WorkerTerminated)
+                }
+                Ok(Err(_)) => {
+                    terminate(&mut child).await;
+                    let _ = stderr_task.await;
+                    Outcome::failed(Error::WorkerTerminated)
+                }
+                Err(_) => {
+                    terminate(&mut child).await;
+                    let _ = stderr_task.await;
+                    Outcome::failed(Error::TimedOut)
+                }
             }
-            finish_outcome(&message, &host)
         }
     }
 }
@@ -1325,10 +1375,11 @@ fn finish_outcome(message: &Json, host: &Arc<Mutex<HostState>>) -> Outcome {
                     message: text.to_string(),
                     kind: "dns",
                 },
-                Some(_) => Error::UpstreamUnreachable {
+                Some("transport") => Error::UpstreamUnreachable {
                     message: text.to_string(),
                     kind: "transport",
                 },
+                Some(_) => return Outcome::failed(Error::WorkerTerminated),
                 None => Error::Failed(text.to_string()),
             };
             Outcome::failed(error)

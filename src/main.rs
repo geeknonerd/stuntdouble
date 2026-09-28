@@ -33,7 +33,7 @@ enum Commands {
     /// Validate the configuration file and exit
     Validate,
     /// Internal entry point for a per-request script worker.
-    #[command(name = "__script-worker", hide = true)]
+    #[command(name = stuntdouble::script::WORKER_SUBCOMMAND, hide = true)]
     ScriptWorker,
 }
 
