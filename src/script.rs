@@ -45,6 +45,13 @@ const LOOP_ITERATION_LIMIT: u64 = 100_000_000;
 const RECURSION_LIMIT: usize = 512;
 const VM_STACK_SIZE_LIMIT: usize = 10_240;
 
+#[cfg(unix)]
+const SENTINEL_STACK_SIZE: usize = 256 * 1024;
+
+/// Internal environment override that keeps glibc from reserving a per-thread
+/// malloc arena for the sentinel.
+const MALLOC_ARENA_MAX_ENV: &str = "MALLOC_ARENA_MAX";
+
 /// Read-only view of one client request, frozen into `ctx.request`.
 #[derive(Debug, Clone)]
 pub struct RequestSnapshot {
@@ -713,6 +720,10 @@ pub(crate) fn validated_header_pairs(
 fn env_json() -> Json {
     let mut map = serde_json::Map::new();
     for (key, value) in std::env::vars() {
+        // Internal worker tuning, not part of the script-visible environment.
+        if key == MALLOC_ARENA_MAX_ENV {
+            continue;
+        }
         map.insert(key, Json::String(value));
     }
     Json::Object(map)
@@ -1309,6 +1320,10 @@ async fn run_worker(
         .arg(WORKER_SUBCOMMAND)
         .arg("--memory-limit-mb")
         .arg(memory_limit_mb.to_string())
+        // The sentinel adds a thread. Without this, glibc reserves a 64 MiB
+        // malloc arena for it, a large share of the script budget; forcing one
+        // arena keeps the process-wide bound meaningful.
+        .env(MALLOC_ARENA_MAX_ENV, "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1509,6 +1524,45 @@ pub fn run_worker_process(memory_limit_mb: u64) -> i32 {
     }
 }
 
+/// Exit this worker when its parent disappears.
+///
+/// On Unix a killed server leaves its workers reparented and still running.
+/// The sentinel polls `parent_id()` once a second, independently of the script
+/// thread, so a runaway script cannot suppress the cleanup. Its stack is kept
+/// small because it counts against the worker's configured memory budget.
+#[cfg(unix)]
+fn spawn_parent_sentinel() -> std::io::Result<()> {
+    use std::os::unix::process::parent_id;
+    use std::sync::mpsc;
+
+    let parent = parent_id();
+    let (started, ready) = mpsc::sync_channel(0);
+    std::thread::Builder::new()
+        .name("script-worker-sentinel".into())
+        .stack_size(SENTINEL_STACK_SIZE)
+        .spawn(move || {
+            // Rust installs this thread's alternate signal stack before the
+            // closure runs. Report readiness so RLIMIT_AS is applied only
+            // after the sentinel is fully initialized.
+            let _ = started.send(());
+            loop {
+                std::thread::sleep(Duration::from_secs(1));
+                if parent_id() != parent {
+                    std::process::exit(0);
+                }
+            }
+        })
+        .map(|_| ())?;
+    ready
+        .recv()
+        .map_err(|_| std::io::Error::other("script worker sentinel failed to start"))
+}
+
+#[cfg(not(unix))]
+fn spawn_parent_sentinel() -> std::io::Result<()> {
+    Ok(())
+}
+
 fn worker_main(memory_limit_mb: u64) -> std::io::Result<()> {
     if memory_limit_mb < SCRIPT_MEMORY_LIMIT_FLOOR_MB {
         return Err(std::io::Error::new(
@@ -1516,6 +1570,10 @@ fn worker_main(memory_limit_mb: u64) -> std::io::Result<()> {
             "memory limit is below the compiled-in floor",
         ));
     }
+    // ADR 0014 D9: create the sentinel before applying the memory bound. The
+    // worker environment sets MALLOC_ARENA_MAX=1, so the thread costs only its
+    // small stack instead of a 64 MiB glibc arena.
+    spawn_parent_sentinel()?;
     // Apply the Linux bound before reading the job. Parsing a large script or
     // request snapshot is itself a meaningful allocation.
     // Other platforms deliberately keep process isolation and deadline kill
