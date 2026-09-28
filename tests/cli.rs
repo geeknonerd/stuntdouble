@@ -277,6 +277,30 @@ fn wait_for_child_count(parent: u32, present: bool) -> Vec<u32> {
     }
 }
 
+/// Poll the process table until a captured PID is gone. `kill -0` also sees
+/// zombies, so this waits for the reaper as well as for process termination.
+#[cfg(unix)]
+fn wait_for_process_gone(pid: u32, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let status = Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()
+            .expect("kill -0")
+            .status;
+        if !status.success() {
+            return;
+        }
+        if Instant::now() >= deadline {
+            // Keep a failed orphan assertion from leaving a busy worker behind
+            // for the rest of the suite.
+            let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
+            panic!("process {pid} was still present after {timeout:?}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// Spawn `serve` with its stderr captured in `log`, which carries both the
 /// startup announcement and the request logs the tests assert on.
 fn serve_with_args(config: &Path, env: &[(&str, &str)], args: &[&str], log: &Path) -> Child {
@@ -1824,6 +1848,47 @@ fn script_deadline_kills_the_worker_process() {
     );
     wait_for_child_count(parent_pid, false);
     stop(&mut child);
+}
+
+#[cfg(unix)]
+#[test]
+fn hard_killed_server_leaves_no_orphaned_worker() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (mut child, _log, port) = start_serve(
+        |port| {
+            fixture_with_script(
+                dir.path(),
+                port,
+                &with_sandbox(good_config(), 30_000),
+                "while (true) {}",
+            )
+        },
+        &[],
+        &[],
+    );
+    let parent_pid = child.id();
+
+    let mut client = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    let head = "GET /demo/documents/manifest/group-a HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    client.write_all(head.as_bytes()).expect("write request");
+    client.flush().expect("flush");
+
+    let workers = wait_for_child_count(parent_pid, true);
+    assert_eq!(workers.len(), 1, "unexpected workers: {workers:?}");
+    let worker_pid = workers[0];
+
+    let server_pid = parent_pid.to_string();
+    let status = Command::new("kill")
+        .args(["-9", &server_pid])
+        .status()
+        .expect("kill server");
+    assert!(status.success(), "kill failed: {status}");
+    let _ = child.wait().expect("reap server");
+
+    // No parent remains to reap this process; the worker-side sentinel must
+    // notice the reparent and exit on its own.
+    wait_for_process_gone(worker_pid, Duration::from_secs(5));
+    drop(client);
 }
 
 #[cfg(target_os = "linux")]
@@ -5498,6 +5563,9 @@ fn assert_drain_preserves_in_flight_request(signal: SignalCase) {
     let request_thread =
         std::thread::spawn(move || request(port, "GET", "/demo/documents/manifest/group-a", &[]));
     wait_for_upstream_request(&fixture.upstream);
+    let workers = wait_for_child_count(fixture.child.id(), true);
+    assert_eq!(workers.len(), 1, "unexpected workers: {workers:?}");
+    let worker_pid = workers[0];
     send_signal(&fixture.child, signal.kill_arg());
 
     let response = request_thread.join().expect("request thread");
@@ -5510,6 +5578,7 @@ fn assert_drain_preserves_in_flight_request(signal: SignalCase) {
         Some(0),
         "status: {status:?}, stderr: {stderr}"
     );
+    wait_for_process_gone(worker_pid, Duration::from_secs(5));
 }
 
 #[cfg(unix)]
