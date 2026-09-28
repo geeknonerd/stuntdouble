@@ -76,7 +76,7 @@ Within one `apiVersion`:
 - `ctx.env` is the process environment snapshot. No `.env` file is loaded.
 - `ctx.log.info` / `warn` / `error` write to server logs only and never to the client Response. Messages are not redacted or filtered: the script author must keep request/Response bodies, tokens, cookies, and other secrets out of them. The host itself never logs bodies automatically.
 - A script that throws, exceeds `sandbox.script_timeout_ms` (default 10000), or fails to load returns 500 `script_error`; a script that finishes without producing a Response returns 500 `script_no_response`; an uncaught upstream transport failure returns 502 `upstream_unreachable`. All three carry a `request_id`.
-- Scripts run in a host-owned worker pool of 4–16 slots derived from available parallelism. A matched Route whose script cannot get a slot fails fast without running it: 500 `script_error`, and `--verbose` adds the stable detail `script worker capacity exhausted`. A worker abandoned at `sandbox.script_timeout_ms` keeps its slot until the loop-iteration backstop actually ends the worker, so sustained timeouts cannot grow the worker count without bound.
+- Scripts run in fresh worker processes under a host-owned pool of 4–16 concurrent slots derived from available parallelism. A matched Route whose script cannot get a slot fails fast without running it: 500 `script_error`, and `--verbose` adds the stable detail `script worker capacity exhausted`. When `sandbox.script_timeout_ms` expires, the host kills the worker process immediately and releases its slot.
 
 ## Pending capabilities
 
@@ -91,14 +91,14 @@ The following capabilities are part of the longer v1 plan but are not implemente
 
 Scripts receive no raw `fetch`, `fs`, `os`, `subprocess`, or `socket`. All external capabilities come from host functions and are subject to:
 
-- script deadline (`sandbox.script_timeout_ms`) that answers the client with 500 `script_error`
-- script-worker concurrency cap (4–16 slots derived from available parallelism) with fail-fast when saturated
+- script deadline (`sandbox.script_timeout_ms`) that answers the client with 500 `script_error` and kills the worker process
+- script-worker process concurrency cap (4–16 slots derived from available parallelism) with fail-fast when saturated
 - network allowlist
 - static file root confinement for `ctx.file`
 - request-scoped multipart temporary storage with `files.upload_max_bytes`, streaming accounting, 8 MiB buffered upload reads, and guard-based cleanup
 - stack traces never returned to clients
 
-Boa 0.22 exposes no heap metric, heap limit, or interrupt hook, so no heap cap is enforced; a script abandoned at the deadline is stopped only by a host-side loop-iteration backstop. The T3 amendment to [ADR 0003](../../plans/adr/0003-script-first-multi-runtime.md) records that tradeoff, the remaining resource bounds, and the process-isolation upgrade path.
+Boa 0.22 exposes no heap metric, heap limit, or interrupt hook, so no hard memory bound is enforced; the host stops a timed-out script by killing its worker process. The T3 amendment to [ADR 0003](../../plans/adr/0003-script-first-multi-runtime.md) records that tradeoff and the remaining resource bounds.
 
 ## Type definitions
 

@@ -262,8 +262,7 @@ impl AppState {
             Ok(source) => {
                 let timeout = Duration::from_millis(self.config.sandbox.script_timeout_ms);
                 // Fail fast instead of queueing: queued scripts would spend
-                // their own deadline behind the workers already holding a
-                // slot, including workers abandoned at the reply deadline.
+                // their own deadline behind the workers already holding a slot.
                 match Arc::clone(&self.script_workers).try_acquire_owned() {
                     Ok(slot) => {
                         script::execute(

@@ -32,6 +32,9 @@ enum Commands {
     },
     /// Validate the configuration file and exit
     Validate,
+    /// Internal entry point for a per-request script worker.
+    #[command(name = stuntdouble::script::WORKER_SUBCOMMAND, hide = true)]
+    ScriptWorker,
 }
 
 fn main() {
@@ -40,6 +43,7 @@ fn main() {
     let code = match cli.command {
         Commands::Serve { verbose } => serve(path, verbose),
         Commands::Validate => validate(path),
+        Commands::ScriptWorker => stuntdouble::script::run_worker_process(),
     };
     std::process::exit(code);
 }

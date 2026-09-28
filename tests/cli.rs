@@ -230,6 +230,43 @@ fn stop(child: &mut Child) {
     child.wait().expect("reap server");
 }
 
+/// Direct child PIDs from the OS process table, scoped to one server process
+/// so concurrent fixtures in the same test binary cannot interfere.
+#[cfg(unix)]
+fn child_pids(parent: u32) -> Vec<u32> {
+    let output = Command::new("ps")
+        .args(["-axo", "pid=,ppid="])
+        .output()
+        .expect("ps");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let process_id = fields.next()?.parse::<u32>().ok()?;
+            let owner_id = fields.next()?.parse::<u32>().ok()?;
+            (owner_id == parent).then_some(process_id)
+        })
+        .collect()
+}
+
+/// Poll the process table until `parent` has, or no longer has, a child.
+/// A bounded failure keeps a leaked worker from hanging the suite.
+#[cfg(unix)]
+fn wait_for_child_count(parent: u32, present: bool) -> Vec<u32> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let pids = child_pids(parent);
+        if present != pids.is_empty() {
+            return pids;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "worker child present={present} expectation not met for server {parent}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// Spawn `serve` with its stderr captured in `log`, which carries both the
 /// startup announcement and the request logs the tests assert on.
 fn serve_with_args(config: &Path, env: &[(&str, &str)], args: &[&str], log: &Path) -> Child {
@@ -929,6 +966,16 @@ fn stolen_probed_port_is_retried_until_the_served_child_owns_it() {
         response.body
     );
     assert_eq!(response.body, "ok", "stderr: {stderr}");
+}
+
+#[test]
+fn worker_subcommand_is_hidden_from_help() {
+    let (code, stdout, stderr) = run(&["--help"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        !stdout.contains("__script-worker"),
+        "internal worker leaked into help: {stdout}"
+    );
 }
 
 #[test]
@@ -1707,6 +1754,136 @@ fn script_timeout_maps_to_500_script_error() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn script_deadline_kills_the_worker_process() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (mut child, _log, port) = start_serve(
+        |port| {
+            fixture_with_script(
+                dir.path(),
+                port,
+                &with_sandbox(good_config(), 1000),
+                "while (true) {}",
+            )
+        },
+        &[],
+        &[],
+    );
+    let parent_pid = child.id();
+    let pending =
+        std::thread::spawn(move || request(port, "GET", "/demo/documents/manifest/group-a", &[]));
+    wait_for_child_count(parent_pid, true);
+    let response = pending.join().expect("request thread");
+    assert_eq!(response.status, 500, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("script_error"),
+        "body: {}",
+        response.body
+    );
+    wait_for_child_count(parent_pid, false);
+    stop(&mut child);
+}
+
+#[cfg(unix)]
+#[test]
+fn externally_killed_worker_is_reported_and_other_routes_stay_healthy() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = r#"
+if (ctx.request.path === "/healthy") {
+  ctx.respond(200, {}, "ok");
+} else {
+  while (true) {}
+}
+"#;
+    let config_body = with_sandbox(
+        r#"config_version = "1"
+
+[server]
+bind = "127.0.0.1"
+port = {port}
+
+[files]
+root = "./files"
+
+[[routes]]
+name = "runaway"
+method = "GET"
+path = "/runaway"
+script = "scripts/manifest.js"
+
+[[routes]]
+name = "healthy"
+method = "GET"
+path = "/healthy"
+script = "scripts/manifest.js"
+"#,
+        10_000,
+    );
+    let (mut child, _log, port) = start_serve(
+        |port| fixture_with_script(dir.path(), port, &config_body, script),
+        &[],
+        &["--verbose"],
+    );
+    let parent_pid = child.id();
+    let pending = std::thread::spawn(move || request(port, "GET", "/runaway", &[]));
+    let workers = wait_for_child_count(parent_pid, true);
+    let status = Command::new("kill")
+        .args(["-9", &workers[0].to_string()])
+        .status()
+        .expect("kill worker");
+    assert!(status.success(), "kill failed: {status}");
+    let response = pending.join().expect("request thread");
+    assert_eq!(response.status, 500, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("script_error"),
+        "body: {}",
+        response.body
+    );
+    assert_eq!(
+        json_string(&response.body, "detail").as_deref(),
+        Some("script worker terminated unexpectedly"),
+        "body: {}",
+        response.body
+    );
+    let healthy = request(port, "GET", "/healthy", &[]);
+    assert_eq!(healthy.status, 200, "body: {}", healthy.body);
+    assert_eq!(healthy.body, "ok");
+    wait_for_child_count(parent_pid, false);
+    stop(&mut child);
+}
+
+#[test]
+fn piped_body_is_dropped_when_the_worker_exceeds_the_deadline() {
+    let upstream = Upstream::start(vec![UpstreamResponse::new(200, b"partial-body")]);
+    let url = upstream.url("/file.pdf");
+    let script = "ctx.http.pipe(ctx.env.UPSTREAM_URL);\nwhile (true) {}";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config_body = with_sandbox(&with_upstream(good_config(), &["127.0.0.1"]), 300);
+    let (response, _) = serve_and_run(
+        |port| fixture_with_script(dir.path(), port, &config_body, script),
+        &[("UPSTREAM_URL", url.as_str())],
+        &["--verbose"],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 500, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("script_error"),
+        "body: {}",
+        response.body
+    );
+    assert_eq!(
+        json_string(&response.body, "detail").as_deref(),
+        Some("script exceeded the configured timeout"),
+        "body: {}",
+        response.body
+    );
+    assert!(!response.body.contains("partial-body"));
+}
+
 #[test]
 fn scripts_cannot_reach_raw_host_capabilities() {
     let script = r#"
@@ -1821,11 +1998,31 @@ fn saturate_script_workers(port: u16) -> (Duration, Vec<Response>, Response, Res
             .collect::<Vec<_>>();
         (responses, missing)
     });
-    // The abandoned workers must still hold their permits after the reply
-    // deadline. A released permit would run this request and answer with a
-    // timeout instead of a capacity error.
-    let held = request(port, "GET", "/runaway", &[]);
-    (started.elapsed(), responses, missing, held)
+    // The deadline kills each worker and releases its slot. This request must
+    // therefore run and reach its own timeout instead of failing on capacity.
+    let after_deadline = request(port, "GET", "/runaway", &[]);
+    (started.elapsed(), responses, missing, after_deadline)
+}
+
+fn assert_script_error_response(response: &Response, stderr: &str) {
+    assert_eq!(
+        response.status, 500,
+        "body: {} stderr: {stderr}",
+        response.body
+    );
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("script_error"),
+        "body: {} stderr: {stderr}",
+        response.body
+    );
+    assert!(
+        json_string(&response.body, "request_id")
+            .as_deref()
+            .is_some_and(|request_id| !request_id.is_empty()),
+        "missing request_id: body: {} stderr: {stderr}",
+        response.body
+    );
 }
 
 #[test]
@@ -1870,7 +2067,7 @@ script = "scripts/runaway.js"
         &["--verbose"],
         saturate_script_workers,
     );
-    let (elapsed, responses, missing, held) = result;
+    let (elapsed, responses, missing, after_deadline) = result;
 
     assert!(
         elapsed < Duration::from_secs(10),
@@ -1878,24 +2075,7 @@ script = "scripts/runaway.js"
     );
     assert_eq!(responses.len(), probes);
     for response in &responses {
-        assert_eq!(
-            response.status, 500,
-            "body: {} stderr: {stderr}",
-            response.body
-        );
-        assert_eq!(
-            error_class(&response.body).as_deref(),
-            Some("script_error"),
-            "body: {} stderr: {stderr}",
-            response.body
-        );
-        assert!(
-            json_string(&response.body, "request_id")
-                .as_deref()
-                .is_some_and(|request_id| !request_id.is_empty()),
-            "missing request_id: body: {} stderr: {stderr}",
-            response.body
-        );
+        assert_script_error_response(response, &stderr);
     }
     assert!(
         responses
@@ -1915,24 +2095,20 @@ script = "scripts/runaway.js"
         missing.body
     );
     assert_eq!(error_class(&missing.body).as_deref(), Some("not_found"));
-    assert_eq!(held.status, 500, "body: {} stderr: {stderr}", held.body);
-    assert_eq!(
-        error_class(&held.body).as_deref(),
-        Some("script_error"),
-        "body: {} stderr: {stderr}",
-        held.body
+    assert_script_error_response(&after_deadline, &stderr);
+    assert!(
+        after_deadline
+            .body
+            .contains("script exceeded the configured timeout"),
+        "a timed-out worker kept its slot: body: {} stderr: {stderr}",
+        after_deadline.body
     );
     assert!(
-        held.body.contains("script worker capacity exhausted"),
-        "a timed-out worker released its slot before finishing: body: {} stderr: {stderr}",
-        held.body
-    );
-    assert!(
-        json_string(&held.body, "request_id")
-            .as_deref()
-            .is_some_and(|request_id| !request_id.is_empty()),
-        "missing request_id: body: {} stderr: {stderr}",
-        held.body
+        !after_deadline
+            .body
+            .contains("script worker capacity exhausted"),
+        "the slot was not released after the deadline: body: {} stderr: {stderr}",
+        after_deadline.body
     );
 }
 
