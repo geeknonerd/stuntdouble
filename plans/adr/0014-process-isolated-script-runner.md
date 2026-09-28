@@ -75,7 +75,7 @@ S1、S2 已于 2026-09-27 在一次性探针上执行（分支 `ci/89-process-is
 
 - **S1 → NO-GO（macOS arm64）**：GitHub `macos-15`（Apple M1 Virtual）上，`setrlimit(RLIMIT_AS)` 在 64 MiB、512 MiB、64 GiB 三档均以 `EINVAL` 失败——进程启动后 VM map 已约 391.6 GiB，限制必须高于当前 VM map 才被接受（512 GiB 可设，但不构成有效边界）。因此触发上表预定的降级对策：**macOS 只获得进程隔离与超时强杀，不设内存硬限**；「调高默认值后重测」分支经实测排除。峰值 RSS 11–12 MiB，说明被拒的是虚拟地址空间口径的检查，不是物理内存压力。
 - **S2 → GO**：release 构建、每组 100 次测量（开发机 Linux 与 CI `ubuntu-24.04`）：spawn 往返相对进程内路径的配对延迟中位数 3.0–3.9 ms、p95 3.5–4.4 ms，占默认 `script_timeout_ms = 10000` 的 0.11% 以下，不触发进程池重评估；该数值是最终 runner 形态到来前的估计。
-- **S3 → GO（#93，2026-09-29）**：在 `main` 的最终 runner 形态上执行正式复测：release 构建（commit `55f72bc`，Linux x86_64，kernel 6.8，4 vCPU），显式使用默认 `script_memory_limit_mb = 256`，每个场景运行 5 次；demo 的五条路由全部覆盖，其中两条 upstream 路由对 loopback fixture server 运行。父进程以不超过 1 ms 的间隔从进程外读取 worker 的 `/proc/<pid>/status`，记录 `VmPeak`（虚拟地址空间峰值，与 `RLIMIT_AS` 同口径）与 `VmHWM`（RSS 峰值）。测量脚本在完成工作后执行不分配内存的自旋，让 worker 保持存活；因此采到的是包含 IPC、序列化与协议缓冲的整个 worker 生命周期的峰值。原始汇总见 [#93 评论](https://github.com/geeknonerd/stuntdouble/issues/93#issuecomment-5880243728)。
+- **S3 → GO（#93，2026-09-29）**：在 `main` 的最终 runner 形态上执行正式复测：release 构建（commit `55f72bc`，Linux x86_64，kernel 6.8，4 vCPU），显式使用默认 `script_memory_limit_mb = 256`，每个场景运行 5 次；demo 的五条路由全部覆盖，其中两条 upstream 路由对 loopback fixture server 运行。父进程以不超过 1 ms 的间隔从进程外读取 worker 的 `/proc/<pid>/status`，记录 `VmPeak`（虚拟地址空间峰值，与 `RLIMIT_AS` 同口径）与 `VmHWM`（RSS 峰值）。测量脚本在完成工作后执行不分配内存的自旋，让 worker 保持存活；因此采到的是包含 IPC、序列化与协议缓冲的整个 worker 生命周期的峰值。原始汇总见 [#93 评论](https://github.com/geeknonerd/stuntdouble/issues/93#issuecomment-5880243728)。本节是 S3 完整测量数字的权威归档；其他文档只保留决策或契约摘要并链接到这里，避免逐处维护同一张表。
 
 | 场景 | 客户端结果 | `VmPeak` 中位数（5 次范围） | `VmHWM` 中位数（范围） |
 | --- | --- | --- | --- |
