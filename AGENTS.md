@@ -46,7 +46,7 @@ Stunt Double 是 Rust 实现的 Mock Server，面向对接真实外部依赖的�
 ├── plans/                            # 产品定义、演示场景与 ADR（C 层）
 │   ├── product-definition.md
 │   ├── demo-document-catalog.md
-│   └── adr/                          # ADR 0001–0013
+│   └── adr/                          # 架构决策记录（ADR）
 └── research/                         # 调研与选型证据（C 层）
 ```
 
