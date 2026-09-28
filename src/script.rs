@@ -155,7 +155,8 @@ pub struct LogRecord {
 /// Why a script did not produce a usable response.
 #[derive(Debug)]
 pub enum Error {
-    /// Script threw, the engine aborted, or the worker vanished.
+    /// Script threw, the engine aborted, or the response could not be
+    /// extracted. A vanished worker maps to [`Error::WorkerTerminated`].
     Failed(String),
     /// Wall-clock deadline exceeded.
     TimedOut,
