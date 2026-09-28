@@ -1,7 +1,7 @@
 ---
 title: "Bridge blocking upstream reads into an async streaming response"
 date: 2026-09-21
-last_updated: 2026-09-26
+last_updated: 2026-09-28
 category: architecture-patterns
 module: upstream HTTP streaming bridge
 problem_type: architecture_pattern
@@ -22,17 +22,17 @@ tags: [streaming, backpressure, axum, tokio, spawn-blocking, ureq, ctx-http-pipe
 
 这条 knowledge-track 学习记录 `ctx.http.pipe` 背后的引擎模式（T6，issue #9，PR #19；T7 的完成日志扩展见 PR #25 与下方「T7 扩展」）。它是架构模式，不是某个路由的错误映射约定：主题是如何把同步、阻塞的字节生产者接到异步 HTTP 响应上，同时不让 body 进入 JavaScript 堆。
 
-脚本宿主是同步的。Boa 的 `Context` 在 `tokio::task::spawn_blocking` 内求值，因此 `ctx.http.get` 与 `ctx.http.pipe` 可以调用 `ureq` 的阻塞客户端而不占用 Tokio 的异步 worker；worker 本身不可取消，会在循环迭代上限处停止（不可取消 worker 与循环上限：`src/script.rs:30-41`、`src/script.rs:1144-1154`；同步宿主约束另见 `src/upstream.rs:4-8`）。`ctx.http.pipe` 增加了第二个生产者：上游响应头确定之后，body 由阻塞的 `ureq` reader 读取，最终必须送达异步的 axum `Body`。
+脚本在每请求独立的 worker 进程里运行（#90；`plans/adr/0014-process-isolated-script-runner.md:18`），宿主能力与阻塞客户端留在父进程：父进程用 `tokio::task::spawn_blocking` 分发 `ctx.http.*` 等 bridge 调用，因此 `ctx.http.get` 与 `ctx.http.pipe` 仍可调用 `ureq` 的阻塞客户端而不占用 Tokio 的异步 worker（`src/script.rs:1147-1158`；同步宿主约束另见 `src/upstream.rs:4-8`）。`ctx.http.pipe` 增加了第二个生产者：上游响应头确定之后，body 由阻塞的 `ureq` reader 读取，最终必须送达异步的 axum `Body`。
 
-#82（issue #29）把并发 worker 数量限制为宿主持有的 4–16 槽 semaphore：取不到槽的 Route 立即以 500 `script_error` 失败（`--verbose` detail 为 `script worker capacity exhausted`），permit 在 `spawn_blocking` 闭包内跨过 reply deadline，一直持有到 worker 真正结束（`src/server.rs:57-75`、`src/server.rs:264-281`、`src/script.rs:1166-1172`、`docs/contracts/ctx-api.md:79`）。这不改变流式接缝本身，但给该接缝加了一个容量前提；对应的契约级回归设计见 [script-worker-contract-max-and-post-deadline-held-slot-tests.md](../conventions/script-worker-contract-max-and-post-deadline-held-slot-tests.md)。
+#82（issue #29）把并发 worker 数量限制为宿主持有的 4–16 槽 semaphore：取不到槽的 Route 立即以 500 `script_error` 失败，`--verbose` detail 为 `script worker capacity exhausted`（`src/server.rs:264-279`、`docs/contracts/ctx-api.md:79`）。#90 之后 permit 的生命周期就是 worker 进程的生命周期：deadline 到期由父进程强杀并回收子进程，permit 随 `execute` 返回立即释放（`src/script.rs:1306-1310`、`src/script.rs:1345-1348`、`src/script.rs:1396-1405`），不再有「跨过 reply deadline 一直持有到循环上限」的语义。父进程也只在成功的 `final_result` 之后才把 pipe 流交给响应，deadline 或崩溃路径直接丢弃它，客户端拿到 500 而不是 partial 200（`src/script.rs:1103-1113`、`src/script.rs:1351-1360`；回归 `piped_body_is_dropped_when_the_worker_exceeds_the_deadline`，`tests/cli.rs:1859-1885`）。这不改变流式接缝本身，但给该接缝加了一个容量前提；对应的契约级回归设计见 [script-worker-contract-max-and-post-deadline-held-slot-tests.md](../conventions/script-worker-contract-max-and-post-deadline-held-slot-tests.md)。
 
 T11（issue #52）已落地本地文件流：`ctx.file.stream` 复用「由宿主持有有界 channel，而不是脚本堆」这条接缝，错误分类与 framing header 决策则独立定义（见下方「T11 扩展」）。上传方向（T12，PR #57）也已落在同一接缝上：`ctx.request.files[].stream()` 复用同一条有界 channel 路径。
 
 实现分三层：
 
 1. JS prelude 校验调用，只记录 stream 标记与客户端 status/headers（`src/script.rs:501-521`）。
-2. 原生桥接调用 `UpstreamAccess::pipe`，把上游 `BodyStream` 保存在请求级 thread-local，只把 status/header 元数据返回给 JavaScript（`src/script.rs:663-693`）。
-3. 宿主在求值结束后取走 stream，转换为 `ResponseBody::Stream`，axum 用 `Body::from_stream(ReceiverStream::new(stream))` 适配（`src/script.rs:921-933`、`src/script.rs:1082-1092`、`src/server.rs:618-624`、`src/server.rs:883`）。
+2. 原生桥接调用 `UpstreamAccess::pipe`，把上游 `PipeBody` 存进父进程请求级的 `HostState.pipe`（不再是线程局部存储），只把 status/header 元数据返回给 worker（`src/script.rs:1019-1026`、`src/script.rs:1069-1085`）。
+3. worker 成功退出后，`finish_outcome` 用 `take_streams()` 取走 stream，转换为 `ResponseBody::Stream`，axum 用 `Body::from_stream(ReceiverStream::new(stream))` 适配（`src/script.rs:1103-1113`、`src/script.rs:1351-1360`、`src/server.rs:617-624`、`src/server.rs:880`）。
 
 公开契约给出可观察的结果：body 直接流向客户端，从不进入脚本堆，并保留上游 2xx 状态与相关 range header（`docs/contracts/ctx-api.md:51-58`）。ADR 记录了这条路径为何偏离 `ctx.http.get` 的普通「HTTP 响应即数据」规则（`plans/adr/0005-upstream-failure-semantics.md:45-56`）。
 
@@ -128,9 +128,9 @@ T7 的 `server::stream_body` 先把 `PipeBody` 解构，经 relay channel 转发
 
 ### 7. 让归属保持请求级，清理自动发生
 
-`HTTP_HOST` 与 `PIPE_STREAM` 是 thread-local，不是全局请求状态（`src/script.rs:574-583`）。它们在 `evaluate` 开始时初始化，stream 在求值结束后取走（`src/script.rs:833-864`、`src/script.rs:921-933`）。如果脚本抛错，stream 仍会被取走并由错误路径丢弃；`pump_body` 通过 `blocking_send` 观察到 receiver 消失并退出。预期的生命周期也覆盖客户端断开：当异步响应 body 丢弃 receiver 时，阻塞生产者下一次发送失败，阻塞任务随之结束（`src/upstream.rs:755-758`）。
+`ctx.http.*` 与 `ctx.request.files[].stream()` 的流由父进程请求级的 `HostState` 持有，不是全局状态（`src/script.rs:1019-1026`）；worker 只是请求方。宿主只在成功 `final_result` 后 `take_streams()`；脚本抛错、超时或崩溃时 stream 随 `HostState` 一起 drop，`pump_body` 通过 `blocking_send` 观察到 receiver 消失并退出。预期的生命周期也覆盖客户端断开：当异步响应 body 丢弃 receiver 时，阻塞生产者下一次发送失败，阻塞任务随之结束（`src/upstream.rs:755-758`）。
 
-`script::execute` 的文档说明 `spawn_blocking` 无法取消，外层 deadline 只返回结果，而阻塞 worker 会在循环迭代上限处停止（`src/script.rs:1144-1154`）。因此流式设计不依赖中止生产者任务，而依赖 receiver 被丢弃。T11 起两个流式路径都有专门的客户端断开回归测试：`ctx_http_pipe_client_disconnect_mid_body_is_logged` 与 `ctx_file_stream_client_disconnect_mid_body_is_logged`；两者都断言完成日志记为 `client_disconnected`，且 relay 未跑完全部字节。
+`script::execute` 的文档写明 permit 持有整个 worker 生命周期（`src/script.rs:1392-1395`）；worker 在独立进程里执行，deadline 由父进程强杀兜底（`src/script.rs:1306-1310`）。因此流式设计不依赖中止生产者任务，而依赖 receiver 被丢弃。T11 起两个流式路径都有专门的客户端断开回归测试：`ctx_http_pipe_client_disconnect_mid_body_is_logged` 与 `ctx_file_stream_client_disconnect_mid_body_is_logged`；两者都断言完成日志记为 `client_disconnected`，且 relay 未跑完全部字节。
 
 ## 为什么重要
 
@@ -311,5 +311,5 @@ T11 把同一接缝用于本地文件：`ctx.file.stream(path)` 打开 root 内�
 - `docs/solutions/conventions/script-owned-upstream-error-mapping.md` —— 路由级业务错误映射；本文有意把那张表留给它。
 - `tests/cli.rs` —— 针对传输、重定向、URL、状态、大小与 Range 不变量的端到端 fake-upstream 覆盖。
 - PR #19 —— T6 模式的实现与验证上下文（已合并）。T7 的完成日志修复见 PR #25（已合并，关闭 issue #10）。
-- 相关 issue：#9（T6 来源）、#10（T7 可观测性完成，已关闭）、#7（allowlist 与传输边界）、#8（路由级错误映射）、#37（完成态误报与通道关闭分类）、#3（父 spec）、#52（T11 本地文件流已落地）、#53（T12 上传已随 PR #57 落地）。
+- 相关 issue：#9（T6 来源）、#10（T7 可观测性完成，已关闭）、#7（allowlist 与传输边界）、#8（路由级错误映射）、#37（完成态误报与通道关闭分类）、#3（父 spec）、#52（T11 本地文件流已落地）、#53（T12 上传已随 PR #57 落地）、#90（脚本改为每请求 worker 进程，页内生命周期段落已据此刷新）。
 - 同一「完成态不需要观察者」机制在测试侧的后果：[../test-failures/hold-upload-temp-dir-with-unfinished-request-body.md](../test-failures/hold-upload-temp-dir-with-unfinished-request-body.md) —— 客户端停止读取不会让服务端停下，因此观察请求级状态必须自己造同步点。

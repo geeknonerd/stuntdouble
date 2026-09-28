@@ -26,20 +26,20 @@ tags: [macos, rlimit-as, setrlimit, process-isolation, script-worker, memory-lim
 
 探针返工留下了这条复现纪律：早期 S1 门禁没有单独断言 `setrlimit` 是否真正生效；只有「脚本跑完了」不能排除「限制设置失败」。修正后的探针把「限制是否真正生效」与「采样是否有效」拆成显式门禁：S1 预期限制失败时仍要求采样有效，S2 请求了限制时断言设置成功；#89 评论记录了最终通过的门禁与结果。
 
-当前工作树尚未发布这项能力：`sandbox` 解析器只接受 `script_timeout_ms`（`src/config.rs:292`），公开配置契约也只列该键（`docs/contracts/config.md:31`）；脚本仍在不可取消的 `spawn_blocking` 里执行，deadline 不终止已在运行的 worker（只约束答复与宿主调用预算），worker 最终由 `100_000_000` 次循环上限回收（`src/script.rs:1153-1154`、`src/script.rs:1168-1172`、`src/script.rs:41`）。实现票 [#90](https://github.com/geeknonerd/stuntdouble/issues/90)–[#93](https://github.com/geeknonerd/stuntdouble/issues/93) 仍待完成，所以下文是待落地设计的平台边界，不是已发布行为。
+当前工作树（`feat/90-process-script-worker`，尚未合并到 `main`）已落地进程隔离：脚本在每请求独立的 worker 进程里执行，deadline 到期由父进程强杀并回收（`src/script.rs:1254-1348`、`docs/contracts/ctx-api.md:79`）；但**内存硬限仍未实现**：`sandbox` 解析器只接受 `script_timeout_ms`（`src/config.rs:292`），公开配置契约也只列该键（`docs/contracts/config.md:31`），代码里没有 `setrlimit` 或 `script_memory_limit_mb`。实现票 [#91](https://github.com/geeknonerd/stuntdouble/issues/91)（Linux 硬限）、[#93](https://github.com/geeknonerd/stuntdouble/issues/93)（预算复测与契约同步）、[#92](https://github.com/geeknonerd/stuntdouble/issues/92)（孤儿回收）仍待完成，所以下文是待落地设计的平台边界，不是已发布行为。
 
 ## 指导
 
 1. **先做逐平台探针，再写「硬限制」承诺。** 对任何跨平台 sandbox 资源边界，在 ADR、config、SECURITY 或 README 承诺之前，先在每个目标 OS/架构上实际调用该 primitive；成功标准是系统调用成功且边界确实生效，不是子进程还能跑完。
 2. **macOS 上不能用 `RLIMIT_AS` 获得有用的硬内存上界。** 限制必须高于子进程启动后已有的 VM map；几十 MiB 到 64 GiB 都低于该 map，被 XNU 以 `EINVAL`（errno 22）拒绝。不要靠调高默认值绕过：64 GiB 仍失败；在已测四档中仅 512 GiB 可设置，但已不构成有效边界。macOS 的脚本内存故事是「进程隔离 + deadline 强杀」，并显式记录「无硬内存上界」的平台差异（ADR 0014 D6/D7，`plans/adr/0014-process-isolated-script-runner.md:25`、`plans/adr/0014-process-isolated-script-runner.md:54`）。Linux 继续使用 `RLIMIT_AS`。
-3. **若未来 macOS 必须要有内存上界，再评估引擎级限制。** ADR 保留的 rquickjs `set_memory_limit` 只能约束解释器分配，不覆盖 Rust 侧缓冲，是降级方案而不是等价物（`plans/adr/0014-process-isolated-script-runner.md:59`）。实现票 #91 应只承诺 Linux 硬限，最终契约同步由 #93 处理；在它们完成前不要宣称 `sandbox.script_memory_limit_mb` 已可用。**票面警告（截至 2026-09-28）**：spec #88 与实现票 #91 的正文仍写 Unix（Linux/macOS）强制 `RLIMIT_AS`，与本文 S1 结论冲突；#91 落地前必须先把这两张票改成 Linux-only，否则会重新引入 macOS 假保证。
+3. **若未来 macOS 必须要有内存上界，再评估引擎级限制。** ADR 保留的 rquickjs `set_memory_limit` 只能约束解释器分配，不覆盖 Rust 侧缓冲，是降级方案而不是等价物（`plans/adr/0014-process-isolated-script-runner.md:59`）。实现票 #91 应只承诺 Linux 硬限，最终契约同步由 #93 处理；在它们完成前不要宣称 `sandbox.script_memory_limit_mb` 已可用。票面已对齐：spec #88 与实现票 #91 都写明硬限仅 Linux、macOS 保持「进程隔离 + deadline 强杀」，不再有 macOS 假保证。
 4. **复现时从进程外测量，并记录失败原因。** 子进程先初始化生产同形的脚本运行时，再尽早调用 `setrlimit(RLIMIT_AS)`；父进程每隔约 2 ms 用 `ps -o vsz=,rss= -p <pid>` 采样，同时记录 `setrlimit` 返回值、errno 与峰值 VSZ/RSS，并按 64 MiB → 512 MiB → 64 GiB → 512 GiB 逐档放大，分别判断「能否设置」与「是否形成有用边界」。
 
 ## 为什么重要
 
 这是一次「配置或架构写了边界、平台却执行不了」的假保证风险。ADR 0014 原先假设 Linux/macOS 都能用 `RLIMIT_AS` 承担硬内存边界，S1 否定了 macOS 那半边。照原假设发布，macOS 实现要么在设置失败时无法兑现承诺，要么静默忽略 `EINVAL`——两种结果都会让 memory bomb 落在错误的安全假设上。
 
-进程隔离仍提供崩溃隔离，deadline 强杀仍提供 CPU/超时边界，但都不能替代单进程内存上限；并发槽位是总量缓解，不是每个 worker 的硬上限。平台差异必须进入设计、issue 与公开契约，而不是只留在一次性的 CI 日志里。工作树中尚未提交的 ADR 修订与 [方案评估 §5.3](../../../research/process-isolation-assessment.md) 修订已记录这条收敛结论（远程 `main` 仍是旧的 Linux/macOS 完整硬边界口径）；最终 runner 形态的预算复测（S3）仍由 #93 待办（`plans/adr/0014-process-isolated-script-runner.md:78`）。
+进程隔离仍提供崩溃隔离，deadline 强杀仍提供 CPU/超时边界，但都不能替代单进程内存上限；并发槽位是总量缓解，不是每个 worker 的硬上限。平台差异必须进入设计、issue 与公开契约，而不是只留在一次性的 CI 日志里。ADR 0014 D6/D7 与 [方案评估 §5.3](../../../research/process-isolation-assessment.md) 修订已把这条收敛结论提交进仓库（PR #94）；最终 runner 形态的预算复测（S3）仍由 #93 待办（`plans/adr/0014-process-isolated-script-runner.md:78`）。
 
 ## 何时适用
 
@@ -74,6 +74,6 @@ python3 scripts/spike89/macos-rlimit-probe.py \
 
 ## 相关
 
-- [契约上限处测试不可取消的脚本 worker，并证明答复期限后槽位仍被持有](../conventions/script-worker-contract-max-and-post-deadline-held-slot-tests.md)：同一 script worker 资源边界主题；该文把硬内存边界概括指向 #28 的进程隔离方案，需按本文限缩为「Linux 有硬限、macOS 无硬限」。
+- [在契约上限处测试脚本 worker 容量，并证明 deadline 后槽位可复用](../conventions/script-worker-contract-max-and-post-deadline-held-slot-tests.md)：同一 script worker 资源边界主题；该文已刷新技术细节，并明确当前分支尚未建立 `RLIMIT_AS`/RSS 硬限——平台差异以本文与 ADR 0014 D6/D7 为准。
 - [Serve 的第二次关闭信号只在第一次被观测后才有保证](../conventions/serve-shutdown-second-signal-semantics.md)：同一原则的另一例——公开承诺要停在操作系统真正保证的边界内。
 - [ADR 0014：进程隔离脚本执行](../../../plans/adr/0014-process-isolated-script-runner.md) 与 [进程隔离方案评估](../../../research/process-isolation-assessment.md)：决策与证据的权威出处。
