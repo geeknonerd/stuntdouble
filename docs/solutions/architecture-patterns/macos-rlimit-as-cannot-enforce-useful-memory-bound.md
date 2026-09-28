@@ -26,29 +26,29 @@ tags: [macos, rlimit-as, setrlimit, process-isolation, script-worker, memory-lim
 
 探针返工留下了这条复现纪律：早期 S1 门禁没有单独断言 `setrlimit` 是否真正生效；只有「脚本跑完了」不能排除「限制设置失败」。修正后的探针把「限制是否真正生效」与「采样是否有效」拆成显式门禁：S1 预期限制失败时仍要求采样有效，S2 请求了限制时断言设置成功；#89 评论记录了最终通过的门禁与结果。
 
-当时的工作树（`feat/90-process-script-worker`，尚未合并到 `main`）已落地进程隔离：脚本在每请求独立的 worker 进程里执行，deadline 到期由父进程强杀并回收（`src/script.rs` 的 `run_worker`/`terminate` 路径；`docs/contracts/ctx-api.md:79`）；但**内存硬限仍未实现**：当时的 `sandbox` 解析器只接受 `script_timeout_ms`，公开配置契约也只列该键，代码里没有 `setrlimit` 或 `script_memory_limit_mb`。实现票 [#91](https://github.com/geeknonerd/stuntdouble/issues/91)（Linux 硬限）、[#93](https://github.com/geeknonerd/stuntdouble/issues/93)（正式预算证据与验收归档）、[#92](https://github.com/geeknonerd/stuntdouble/issues/92)（孤儿回收）当时仍待完成，所以下文是待落地设计的平台边界，不是已发布行为。
+当时的工作树（`feat/90-process-script-worker`，尚未合并到 `main`）已落地进程隔离：脚本在每请求独立的 worker 进程里执行，deadline 到期由父进程强杀并回收（`src/script.rs` 的 `run_worker`/`terminate` 路径；`docs/contracts/ctx-api.md:79`）；但**内存硬限仍未实现**：当时的 `sandbox` 解析器只接受 `script_timeout_ms`，公开配置契约也只列该键，代码里没有 `setrlimit` 或 `script_memory_limit_mb`。实现票 [#91](https://github.com/geeknonerd/stuntdouble/issues/91)（Linux 硬限）、[#93](https://github.com/geeknonerd/stuntdouble/issues/93)（正式预算证据与验收归档）、[#92](https://github.com/geeknonerd/stuntdouble/issues/92)（孤儿回收）当时仍待完成，所以下文是待落地设计的平台边界；后续修订记录了已发布行为。
 
-> 后续修订（#91，2026-09-28）：Linux worker 已落地 `RLIMIT_AS` 与 `sandbox.script_memory_limit_mb`（默认 256 MiB、下限 64 MiB），公开契约已同步；上段保留为 #90 时的历史快照。本文的 macOS 结论不变：无硬内存上界。
+> 后续修订（#91/#92/#93，2026-09-28/29）：Linux worker 已落地 `RLIMIT_AS` 与 `sandbox.script_memory_limit_mb`（默认 256 MiB、下限 64 MiB），公开契约已同步；孤儿回收由 #92/#100 落地，正式 S3 预算由 [#93](https://github.com/geeknonerd/stuntdouble/issues/93#issuecomment-5880243728) 归档。上段保留为 #90 时的历史快照。本文的 macOS 结论不变：无硬内存上界。
 
 ## 指导
 
 1. **先做逐平台探针，再写「硬限制」承诺。** 对任何跨平台 sandbox 资源边界，在 ADR、config、SECURITY 或 README 承诺之前，先在每个目标 OS/架构上实际调用该 primitive；成功标准是系统调用成功且边界确实生效，不是子进程还能跑完。
 2. **macOS 上不能用 `RLIMIT_AS` 获得有用的硬内存上界。** 限制必须高于子进程启动后已有的 VM map；几十 MiB 到 64 GiB 都低于该 map，被 XNU 以 `EINVAL`（errno 22）拒绝。不要靠调高默认值绕过：64 GiB 仍失败；在已测四档中仅 512 GiB 可设置，但已不构成有效边界。macOS 的脚本内存故事是「进程隔离 + deadline 强杀」，并显式记录「无硬内存上界」的平台差异（ADR 0014 D6/D7，`plans/adr/0014-process-isolated-script-runner.md:25`、`plans/adr/0014-process-isolated-script-runner.md:54`）。Linux 继续使用 `RLIMIT_AS`。
-3. **若未来 macOS 必须要有内存上界，再评估引擎级限制。** ADR 保留的 rquickjs `set_memory_limit` 只能约束解释器分配，不覆盖 Rust 侧缓冲，是降级方案而不是等价物（`plans/adr/0014-process-isolated-script-runner.md:59`）。实现时只承诺 Linux 硬限，并先同步公开契约再宣称 `sandbox.script_memory_limit_mb` 可用。票面已对齐：spec #88 与实现票 #91 都写明硬限仅 Linux、macOS 保持「进程隔离 + deadline 强杀」，不再有 macOS 假保证。（实现后记：#91 已按仓库规则同步公开契约；正式预算证据与验收归档由 #93 完成。）
+3. **若未来 macOS 必须要有内存上界，再评估引擎级限制。** ADR 保留的 rquickjs `set_memory_limit` 只能约束解释器分配，不覆盖 Rust 侧缓冲，是降级方案而不是等价物（`plans/adr/0014-process-isolated-script-runner.md:59`）。实现时只承诺 Linux 硬限，并先同步公开契约再宣称 `sandbox.script_memory_limit_mb` 可用。票面已对齐：spec #88 与实现票 #91 都写明硬限仅 Linux、macOS 保持「进程隔离 + deadline 强杀」，不再有 macOS 假保证。（实现后记：#91 已按仓库规则同步公开契约；正式预算证据与验收归档已于 #93 完成，见 [S3 测量](https://github.com/geeknonerd/stuntdouble/issues/93#issuecomment-5880243728)。）
 4. **复现时从进程外测量，并记录失败原因。** 子进程先初始化生产同形的脚本运行时，再尽早调用 `setrlimit(RLIMIT_AS)`；父进程每隔约 2 ms 用 `ps -o vsz=,rss= -p <pid>` 采样，同时记录 `setrlimit` 返回值、errno 与峰值 VSZ/RSS，并按 64 MiB → 512 MiB → 64 GiB → 512 GiB 逐档放大，分别判断「能否设置」与「是否形成有用边界」。
 
 ## 为什么重要
 
 这是一次「配置或架构写了边界、平台却执行不了」的假保证风险。ADR 0014 原先假设 Linux/macOS 都能用 `RLIMIT_AS` 承担硬内存边界，S1 否定了 macOS 那半边。照原假设发布，macOS 实现要么在设置失败时无法兑现承诺，要么静默忽略 `EINVAL`——两种结果都会让 memory bomb 落在错误的安全假设上。
 
-进程隔离仍提供崩溃隔离，deadline 强杀仍提供 CPU/超时边界，但都不能替代单进程内存上限；并发槽位是总量缓解，不是每个 worker 的硬上限。平台差异必须进入设计、issue 与公开契约，而不是只留在一次性的 CI 日志里。ADR 0014 D6/D7 与 [方案评估 §5.3](../../../research/process-isolation-assessment.md) 修订已把这条收敛结论提交进仓库（PR #94）；正式预算复测（S3）归档仍由 #93 待办（`plans/adr/0014-process-isolated-script-runner.md:78`）。
+进程隔离仍提供崩溃隔离，deadline 强杀仍提供 CPU/超时边界，但都不能替代单进程内存上限；并发槽位是总量缓解，不是每个 worker 的硬上限。平台差异必须进入设计、issue 与公开契约，而不是只留在一次性的 CI 日志里。ADR 0014 D6/D7 与 [方案评估 §5.3](../../../research/process-isolation-assessment.md) 修订已把这条收敛结论提交进仓库（PR #94）；正式预算复测（S3）已由 #93 归档，完整数字与决策见 [ADR 0014 验证结果](../../../plans/adr/0014-process-isolated-script-runner.md)（[S3 测量](https://github.com/geeknonerd/stuntdouble/issues/93#issuecomment-5880243728)）。
 
 ## 何时适用
 
 - 设计或评审进程隔离 sandbox 的 OS 级内存、CPU 或句柄上限，准备把它写成跨平台保证时。
 - 目标包含 macOS（尤其 Apple Silicon / `macos-15`），而实现对子进程调用 `setrlimit(RLIMIT_AS)` 时。
 - 探针收到 `EINVAL`，正在判断「报错能否忽略」「要不要调高默认上限」「要不要换引擎取得 macOS 内存上界」时。
-- 更新 `sandbox.script_memory_limit_mb` 配置、安全文档或平台差异说明时（#91 负责实现与契约同步，#93 负责正式预算证据与验收归档）。
+- 更新 `sandbox.script_memory_limit_mb` 配置、安全文档或平台差异说明时（#91 已实现并同步契约，#93 已归档正式预算证据与验收）。
 
 ## 示例
 
@@ -77,6 +77,6 @@ python3 scripts/spike89/macos-rlimit-probe.py \
 ## 相关
 
 - [用最终 runner 峰值校准 Linux script worker 的 `RLIMIT_AS` 预算](./linux-rlimit-as-budget-and-oom-attribution.md)：同一 script worker 资源边界的 Linux 对照；记录默认值/floor、虚拟地址空间口径与 OOM 归因。
-- [在契约上限处测试脚本 worker 容量，并证明 deadline 后槽位可复用](../conventions/script-worker-contract-max-and-post-deadline-held-slot-tests.md)：同一 script worker 资源边界主题；该文记录 #90 的容量与 deadline 测试契约；Linux `RLIMIT_AS` 已由 #91 落地，macOS/Windows 的平台差异以本文与 ADR 0014 D6/D7 为准。
+- [在契约上限处测试脚本 worker 容量，并证明 deadline 后槽位可复用](../conventions/script-worker-contract-max-and-post-deadline-held-slot-tests.md)：同一 script worker 资源边界主题；该文记录 #90 的容量与 deadline 测试契约；Linux `RLIMIT_AS` 已由 #91 落地，macOS/Windows 的平台差异以本文与 ADR 0014 D6/D7 为准；Windows Job Object 补齐由 [#102](https://github.com/geeknonerd/stuntdouble/issues/102) 跟踪。
 - [Serve 的第二次关闭信号只在第一次被观测后才有保证](../conventions/serve-shutdown-second-signal-semantics.md)：同一原则的另一例——公开承诺要停在操作系统真正保证的边界内。
 - [ADR 0014：进程隔离脚本执行](../../../plans/adr/0014-process-isolated-script-runner.md) 与 [进程隔离方案评估](../../../research/process-isolation-assessment.md)：决策与证据的权威出处。

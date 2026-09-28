@@ -23,13 +23,13 @@ issue #28 的目标：用 OS 级机制给出硬内存（~64MB）与硬超时边�
 | D3 | 二进制形态 | self-spawn：同一二进制的隐藏子命令，不作为公开 CLI 契约 |
 | D4 | 路径策略 | 单轨替换：删除进程内 `spawn_blocking` 执行路径，所有平台统一进程隔离 |
 | D5 | 超时处置 | 到期立即强杀（SIGKILL / TerminateProcess），无宽限期 |
-| D6 | 内存口径 | 默认 64 MiB、配置键 `sandbox.script_memory_limit_mb`、子进程启动早期自设 `RLIMIT_AS`（soft=hard）；口径为虚拟地址空间（非 RSS）；配置值设下限保护（macOS EINVAL 边界） |
+| D6 | 内存口径 | 默认 256 MiB（S3 实测后自设计值 64 MiB 调整，见 5.3）、配置键 `sandbox.script_memory_limit_mb`、子进程启动早期自设 `RLIMIT_AS`（soft=hard）；口径为虚拟地址空间（非 RSS）；floor 64 MiB（覆盖普通启动路径） |
 | D7 | Windows | 内存硬限与不安全 FFI 先延后；Windows 先获得进程隔离 + 超时强杀，内存限制文档化平台差异（用户约束：优先避免 unsafe、Linux/macOS 优先） |
 | D8 | IPC 形状 | stdin/stdout + JSON Lines，三类消息（host_call / host_result / final_result），严格一配一；stderr 留子进程诊断 |
 | D9 | 孤儿治理 | Unix：子进程监视线程轮询 `std::os::unix::process::parent_id()`（1s 粒度，安全 API）；优雅关闭时主进程显式 kill 在途子进程；不用 `PR_SET_PDEATHSIG` |
 | D10 | 错误细分 | `--verbose` detail：超时保持原文；新增 `"script exceeded the configured memory limit"`、`"script worker terminated unexpectedly"`；客户端仍 500 `script_error` |
 | D11 | 关闭协调 | 首次关闭信号后等待在途请求在各自 timeout 内自然完成；排空收尾时兜底 kill 存活子进程；不提前杀 |
-| D12 | 并发上限 | 保留 `clamp(4, 16)` 槽位公式，语义改为"同时运行的脚本进程数上限"；总内存天花板 = 64 MiB × 槽位数 |
+| D12 | 并发上限 | 保留 `clamp(4, 16)` 槽位公式，语义改为"同时运行的脚本进程数上限"；Linux 上当前总虚拟地址空间上限 = 256 MiB × 槽位数（1–4 GiB；设计初值为 64 MiB × 槽位数）；macOS/Windows 没有每 worker 硬内存上限 |
 | D13 | CPU 硬限 | 由 D5 父进程 deadline 强杀承担；暂不加 `RLIMIT_CPU`（避免双计时器语义打架，ADR 记录理由） |
 
 ## 3. 代码侧改造评估
@@ -43,7 +43,7 @@ issue #28 的目标：用 OS 级机制给出硬内存（~64MB）与硬超时边�
 | `src/upstream.rs`（871 行） | `UpstreamAccess::get/pipe` | 逻辑零改动，调用方从宿主线程变为 supervisor dispatch | 零 |
 | `src/files.rs`（1080 行） | `FileAccess`/`UploadAccess` | 同上 | 零 |
 | `src/main.rs`（约 200 行） | serve/validate | 新增隐藏子命令与 runner 入口（不加载配置） | 小 |
-| `src/config.rs`（810 行） | sandbox 段 | +`script_memory_limit_mb`（默认 64，下限校验） | 小 |
+| `src/config.rs`（810 行） | sandbox 段 | +`script_memory_limit_mb`（当前默认 256、下限 64，见 5.3） | 小 |
 | 新增模块（IPC + supervisor + runner） | — | 消息类型、主进程监督循环、子进程 runner、孤儿轮询 | 400–600 行 |
 | `Cargo.toml` | — | +`rlimit`（MIT，Unix-only）；tokio full 已含 process；零 unsafe 新增 | 极小 |
 | 测试 `tests/cli.rs`（5277 行） | 现有契约测试 | 现有测试预期不需改；新增 OOM、超时无残留、崩溃映射、pipe 超时 | +150–250 行 |
@@ -62,7 +62,7 @@ issue #28 的目标：用 OS 级机制给出硬内存（~64MB）与硬超时边�
 | 热点 | 等级 | 说明 |
 | --- | --- | --- |
 | 错误路径确定性 | 中 | OOM（分配失败 → abort/信号）、崩溃、协议中断的区分与 detail 映射；测试注入手段需设计 |
-| 内存预算复测 | 中 | 64 MiB 预算下需复测：IPC 缓冲 + serde_json + 最终 runner 形态（实测基线 15.2 MiB VMS 仅含 Boa） |
+| 内存预算复测 | 中 | 原 64 MiB 设计预算需在最终 runner 形态复测：IPC 缓冲 + serde_json（基线 15.2 MiB VMS 仅含 Boa；S3 后默认调整为 256 MiB） |
 | 孤儿治理 | 低-中 | 轮询线程（Unix）+ 优雅关闭兜底 kill |
 | macOS 验证 | 中 | `RLIMIT_AS` EINVAL 边界（低于当前 VMS 报错）；Apple Silicon 行为需实测（见 5.3） |
 | 子进程启动开销 | 低-中 | 每请求 fork/exec + Boa 初始化；mock 场景可接受，需实测基准（列为前置 spike） |
@@ -70,7 +70,7 @@ issue #28 的目标：用 OS 级机制给出硬内存（~64MB）与硬超时边�
 ### 3.4 初步结论
 
 - **改造量级：中等**，不是大爆炸。新增一层进程边界 + IPC，净增约 600–900 行（含测试），不动核心业务逻辑；相对核心代码（约 4260 行）增量约 15%。
-- **复杂度主要不在主流程，而在边界情形**（错误映射、64 MiB 预算复测、macOS 行为、测试注入）。
+- **复杂度主要不在主流程，而在边界情形**（错误映射、默认预算复测、macOS 行为、测试注入）。
 
 ## 4. 轻量替代方案检索（2026-09-27）
 
@@ -119,7 +119,7 @@ issue #28 的目标：用 OS 级机制给出硬内存（~64MB）与硬超时边�
 
 | 路线 | 硬内存 | 硬超时/崩溃隔离 | 迁移量 | 新依赖 | unsafe | 结论 |
 | --- | --- | --- | --- | --- | --- | --- |
-| 进程隔离（D1–D13） | 有（Linux 64 MiB RLIMIT_AS；macOS 无硬限，见 5.3 结果） | 有 | 中等（+600–900 行） | +rlimit（1 个，极轻） | 零 | **推荐** |
+| 进程隔离（D1–D13） | 有（Linux RLIMIT_AS，当前默认 256 MiB、floor 64 MiB；macOS 无硬限，见 5.3） | 有 | 中等（+600–900 行） | +rlimit（1 个，极轻） | 零 | **推荐** |
 | 换 rquickjs | 部分（仅引擎分配） | 有（轮询中断） | 中高（宿主桥重写） | +C 工具链 + rquickjs | 零（高层 API） | 备选 |
 | 升级 Boa | 无 | 无 | — | — | — | 不可行 |
 | deno_core/V8 | 有 | 有 | 高（事件循环/op 模型） | V8 重依赖 | 零（高层） | 排除 |
@@ -131,7 +131,7 @@ issue #28 的目标：用 OS 级机制给出硬内存（~64MB）与硬超时边�
 1. **维持进程隔离路线**（D1–D13）。它是对 issue 目标达成度最高、总代价最小的路线：不改引擎、不改宿主业务逻辑、只新增一层边界；零 unsafe（Windows 延后）；新增依赖仅 rlimit 一项。
 2. **本方案不需要任何 IPC 框架或进程管理框架**：手写 JSONL（约 50 行）+ tokio 现有能力 + rlimit 封装即为最小实现；调研确认没有能显著省工的现成库。
 3. **macOS 验证已确认失败（S1，2026-09-27，#89）**：macOS 降级为"进程隔离 + 超时强杀 + 无硬内存限"，与 Windows 一致；"调高默认值后重测"分支经实测排除（64 GiB 仍 `EINVAL`）。rquickjs 换引擎不再作为本期备选，只在未来需要 macOS 硬内存限时重新评估。
-4. 用户约束确认：Windows 内存硬限与 unsafe FFI 不在本期范围（D7）。
+4. 用户约束确认：Windows 内存硬限与 unsafe FFI 不在本期范围（D7）；补齐路径由 [#102](https://github.com/geeknonerd/stuntdouble/issues/102) 跟踪。
 
 ### 5.3 实现前的前置验证（spike 清单）
 
@@ -139,13 +139,13 @@ issue #28 的目标：用 OS 级机制给出硬内存（~64MB）与硬超时边�
 | --- | --- | --- | --- |
 | S1 | macOS（Apple Silicon）上对含 Boa 的子进程设置 `RLIMIT_AS=64 MiB` 的实测 | 确认 XNU EINVAL/预留地址空间不会让该限制失效（Rebon 先例在 macOS 跳过了 RLIMIT_AS；我们只在 Linux 实测过） | macOS 降级为无内存硬限，或调高默认值后重测 |
 | S2 | 子进程启动开销基准（spawn + Boa 初始化 vs 现状线程） | 量化每请求 exec 成本；确认 mock 场景可接受 | 若不可接受，重新评估进程池（D2 升级路径） |
-| S3 | 最终 runner 形态下的 64 MiB 预算复测（含 IPC、serde_json、协议缓冲） | 确认余量（当前基线仅 Boa + 简单脚本，15.2 MiB VMS） | 调高默认上限或压缩缓冲 |
+| S3 | 最终 runner 形态下的默认预算复测（原设计假设 64 MiB；含 IPC、serde_json、协议缓冲） | 确认余量（当前基线仅 Boa + 简单脚本，15.2 MiB VMS） | 调高默认上限或压缩缓冲 |
 
-**结果（2026-09-27，#89）**：一次性探针位于分支 `ci/89-process-isolation-probes`（不合并 `main`），完整命令与原始数据见 [#89 评论](https://github.com/geeknonerd/stuntdouble/issues/89#issuecomment-5856621521) 与 [CI 运行](https://github.com/geeknonerd/stuntdouble/actions/runs/36324984631)。
+**结果（S1/S2：2026-09-27，#89；S3：2026-09-29，#91/#93）**：S1/S2 的一次性探针位于分支 `ci/89-process-isolation-probes`（不合并 `main`），完整命令与原始数据见 [#89 评论](https://github.com/geeknonerd/stuntdouble/issues/89#issuecomment-5856621521) 与 [CI 运行](https://github.com/geeknonerd/stuntdouble/actions/runs/36324984631)。
 
 - **S1 → NO-GO（macOS arm64）**：GitHub `macos-15`（Apple M1 Virtual，macOS 15.7.9）上，`setrlimit(RLIMIT_AS)` 在 64 MiB、512 MiB、64 GiB 三档均为 `EINVAL`；进程启动后 VM map 约 391.6 GiB，限制必须高于当前 VM map 才被接受（512 GiB 可设但无意义）。峰值 RSS 11–12 MiB。触发降级对策：macOS 无内存硬限。
 - **S2 → GO**：release 构建、各 100 次测量（开发机 Linux 与 CI `ubuntu-24.04`），spawn 往返相对进程内路径的配对延迟中位数 3.0–3.9 ms、p95 3.5–4.4 ms；占默认 `script_timeout_ms = 10000` 的 0.11% 以下。不做进程池。该数值是最终 runner 形态到来前的估计。
-- **S3 → 待最终 runner 形态复测**（由收尾票 #93 执行）。
+- **S3 → GO（#91/#93）**：最终 runner 的正式复测把 8 MiB `ctx.file.readText` 的 `VmPeak` 定为 173.1 MiB，把 memory bomb 的观测 `VmPeak` 定为 255.9 MiB（距 256 MiB 上限 124 KiB）；五条 demo 路由为 21.0–21.1 MiB。结果决定保留 256 MiB 默认值与 64 MiB floor：8 MiB 缓冲读取在默认值下有 82.9 MiB（32.4%）余量，而 #91 校准的最低可用限制约为 192 MiB。完整表格、测量口径与决策见 [ADR 0014 验证结果](../plans/adr/0014-process-isolated-script-runner.md)与 [#93 评论](https://github.com/geeknonerd/stuntdouble/issues/93#issuecomment-5880243728)。
 
 ### 5.4 后续步骤（本评估通过后）
 
@@ -155,4 +155,4 @@ issue #28 的目标：用 OS 级机制给出硬内存（~64MB）与硬超时边�
 
 截至 2026-09-27：ADR 0014 已合并（#87），CONTEXT.md 术语已更新，spec #88 与 ticket #89–#93 已发布。
 
-> **后续修订（#91，2026-09-28）**：在最终 runner 形态上的初步实测显示，Linux 普通脚本最低约 debug 40 MiB / release 24 MiB，8 MiB `ctx.file.readText` 最低约 192 MiB（含 IPC、Boa 字符串与协议缓冲）。据此默认值调整为 256 MiB、下限调整为 64 MiB，公开契约与 ADR 0014 已同步。正式 S3 测量归档、默认值复核与 #28 验收报告由 #93 完成。本文档此前的 64 MiB 设计假设与 S1 证据保留为历史记录。
+> **后续修订（#91/#93，2026-09-28/29）**：初步实测（#91）发现 Linux 上普通脚本最低约 debug 40 MiB / release 24 MiB，8 MiB `ctx.file.readText` 的最低可用 `RLIMIT_AS` 约 192 MiB（含 IPC、Boa 字符串与协议缓冲），因此把默认值调整为 256 MiB、floor 调整为 64 MiB。正式 S3 复测（#93，2026-09-29）确认五条 demo 路由均有充足余量，并复核 memory bomb 在默认限制下终止；决策为保留 256 MiB 默认值与 64 MiB floor，完整数字与测量口径见 ADR 0014 与 [#93 评论](https://github.com/geeknonerd/stuntdouble/issues/93#issuecomment-5880243728)。公开契约、ADR 0014 与 SECURITY.md 已同步；本文档此前的 64 MiB 设计假设与 S1 证据保留为历史记录。
