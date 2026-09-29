@@ -69,7 +69,7 @@ docs: describe the release process
 
 `v0.1.0-alpha.1` 这个旧 tag 对 release-plz 不可见，因此 `0.2.0` 是一次性的桥接版本：版本号与 CHANGELOG 段由人工在同一个 PR 里写好，合并后第 2 步建出 tag `v0.2.0` 并触发产物流水线（已完成）。此后 tag 形如 `v0.2.0` 能被正常识别，第 3 步恢复由 release-plz 打开版本 PR。
 
-`release-extras` 失败或取消时，Release 仍停留在 draft，从未公开；修复后重跑 release workflow（`gh workflow run release.yml --ref <tag> -f tag=<tag>`）。若上一次运行已在 announce 阶段部分上传 dist 产物，先删除该 draft（`gh release delete <tag> --yes`，tag 保留）再重跑，以免 upload 因资产重名失败。不得覆盖已公开 Release 的资产；发布后发现产物问题应发新的 patch 版本（本项目不使用 prerelease 版本，见「版本号」）。只有 crates.io 发布损坏时才用 `cargo yank`，绝不删除已发布的版本。
+`release-extras` 失败或取消时，Release 仍停留在 draft，从未公开；修复后重跑 release workflow（`gh workflow run release.yml --ref <tag> -f tag=<tag>`）。若上一次运行已在 draft 上附加 extras 资产（SBOM、`SHA256SUMS`、镜像 digest）或在 announce 阶段部分上传 dist 产物，先删除该 draft（`gh release delete <tag> --yes`，tag 保留）再重跑：前者会被幂等检查复用、与新构建的 dist 产物混用，后者会让 upload 因资产重名失败。不得覆盖已公开 Release 的资产；发布后发现产物问题应发新的 patch 版本（本项目不使用 prerelease 版本，见「版本号」）。只有 crates.io 发布损坏时才用 `cargo yank`，绝不删除已发布的版本。
 
 ### 发布验证
 
