@@ -33,8 +33,8 @@ _Avoid_: native function, binding, built-in
 _Avoid_: jail, container, isolation layer
 
 **Script worker**：
-承载一次 Route 脚本运行的执行单元；一次运行对应一个 worker，互不可见、不跨请求复用。
-_Avoid_: worker thread, script thread
+承载一次 Route 脚本运行的独立进程；一次运行对应一个新 worker，互不可见、不跨请求复用。
+_Avoid_: worker thread, script thread, shared worker
 
 **Static file root**：
 脚本可读取文件的唯一配置目录。

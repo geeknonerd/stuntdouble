@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Other
+
+- *(docs)* record the final script-worker memory budget and isolation contracts ([#93](https://github.com/geeknonerd/stuntdouble/issues/93))
+
 ## [0.5.1](https://github.com/geeknonerd/stuntdouble/compare/v0.5.0...v0.5.1) - 2026-09-28
 
 ### Fixed
