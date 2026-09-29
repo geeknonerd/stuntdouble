@@ -24,10 +24,15 @@ windows-archive = ".zip"
 github-build-setup = "../release-build-setup.yml"
 # release-plz creates the tag; the Release workflow is dispatched for exactly that tag.
 dispatch-releases = true
+# Hold the GitHub Release as a draft until release-extras has attached and verified
+# every asset; the announce job uploads dist artifacts and undrafts afterwards (#41).
+create-release = false
+github-release = "announce"
 # Sign release artifacts with GitHub artifact attestations.
 github-attestations = true
-# Generate the SBOM, publish the container image, and verify attestations after the GitHub Release exists.
-post-announce-jobs = ["./release-extras"]
+# Generate the SBOM, publish the container image, and verify every required asset
+# against the draft Release before the announce job publishes it.
+publish-jobs = ["./release-extras"]
 github-custom-job-permissions = { "release-extras" = { contents = "write", packages = "write", "id-token" = "write", "attestations" = "write" } }
 
 # Pin every Action used by the generated Release workflow.

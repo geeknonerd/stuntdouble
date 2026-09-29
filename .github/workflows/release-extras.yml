@@ -1,3 +1,7 @@
+# Attaches and verifies every non-dist release asset while the GitHub Release is
+# still a draft. Configured as a cargo-dist publish job in dist-workspace.toml:
+# it must succeed before the generated announce job uploads the dist artifacts
+# and undrafts the release (#41).
 name: Release extras
 
 on:
@@ -12,7 +16,7 @@ permissions: {}
 
 jobs:
   release-extras:
-    name: SBOM, container image, attestation verification
+    name: "Draft release assets: SBOM, container image, attestation verification"
     runs-on: ubuntu-22.04
     permissions:
       attestations: write
@@ -41,6 +45,38 @@ jobs:
           ref: ${{ steps.release.outputs.tag }}
           persist-credentials: false
 
+      - name: Download dist artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: artifacts-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create the draft Release
+        env:
+          PLAN: ${{ inputs.plan }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            is_draft="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft')"
+            if [[ "$is_draft" != "true" ]]; then
+              echo "release $TAG already exists and is not a draft; refusing to touch it" >&2
+              exit 1
+            fi
+            echo "draft release $TAG already exists; continuing."
+          else
+            title="$(jq -r '.announcement_title // empty' <<<"$PLAN")"
+            body="$(jq -r '.announcement_github_body // empty' <<<"$PLAN")"
+            if [[ -z "$title" || -z "$body" ]]; then
+              echo "the dist plan is missing announcement_title or announcement_github_body" >&2
+              exit 1
+            fi
+            printf '%s' "$body" > "$RUNNER_TEMP/release-notes.md"
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+              --title "$title" --notes-file "$RUNNER_TEMP/release-notes.md"
+          fi
+
       - name: Generate a CycloneDX SBOM
         shell: bash
         run: |
@@ -66,10 +102,8 @@ jobs:
           TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
-          mkdir -p checksums
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
-            --pattern 'sha256.sum' --dir checksums
-          cp checksums/sha256.sum SHA256SUMS
+          test -f artifacts/sha256.sum
+          cp artifacts/sha256.sum SHA256SUMS
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -Fxq 'SHA256SUMS'; then
             echo "SHA256SUMS is already attached to $TAG; leaving it unchanged."
           else
@@ -241,19 +275,14 @@ jobs:
           printf '%s\n' "$reference" > "$asset"
           gh release upload "$TAG" "$asset" --repo "$GITHUB_REPOSITORY"
 
-      - name: Download the Linux archive
-        env:
-          TAG: ${{ steps.release.outputs.tag }}
-        run: |
-          set -euo pipefail
-          mkdir -p verify
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
-            --pattern 'stuntdouble-x86_64-unknown-linux-gnu.tar.gz' --dir verify
-
       - name: Verify the binary attestation
         run: |
           set -euo pipefail
-          archive=verify/stuntdouble-x86_64-unknown-linux-gnu.tar.gz
+          archive=artifacts/stuntdouble-x86_64-unknown-linux-gnu.tar.gz
+          if [[ ! -f "$archive" ]]; then
+            echo "the Linux archive is missing from the downloaded dist artifacts" >&2
+            exit 1
+          fi
           for attempt in 1 2 3 4 5; do
             if gh attestation verify "$archive" --repo "$GITHUB_REPOSITORY"; then
               exit 0
@@ -264,7 +293,7 @@ jobs:
           echo "failed to verify the binary attestation for $archive" >&2
           exit 1
 
-      - name: Verify the required release assets
+      - name: Verify the release is complete before publication
         shell: bash
         env:
           PLAN: ${{ inputs.plan }}
@@ -275,17 +304,12 @@ jobs:
           plan_file="$(mktemp)"
           actual_file="$(mktemp)"
           printf '%s' "$PLAN" > "$plan_file"
+          # Assets this job already attached to the draft Release.
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
             --jq '.assets[].name' > "$actual_file"
+          # Dist artifacts the announce job will upload; its Cleanup step removes
+          # the granular per-job manifests first, so exclude them here as well.
+          find artifacts -maxdepth 1 -type f ! -name '*-dist-manifest.json' -printf '%f\n' \
+            >> "$actual_file"
           ./.github/scripts/check-release-assets.sh "$plan_file" "$actual_file" "$version"
 
-      - name: Withdraw an incomplete release
-        if: ${{ failure() || cancelled() }}
-        env:
-          TAG: ${{ steps.release.outputs.tag || github.ref_name }}
-        run: |
-          set -euo pipefail
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=true
-            echo "moved incomplete release $TAG back to draft"
-          fi
