@@ -63,7 +63,7 @@ docs: describe the release process
 3. `release-plz release-pr` 按 Conventional Commits 计算下一版本，打开或更新 release PR；PR 包含 `Cargo.toml` 与 `CHANGELOG.md` 改动。只有命中 `release_commits` 的提交才触发版本 PR（`feat`/`fix`/`perf`/`refactor`/`security`/`build`、任意 `deps` scope，或任何带 `!` 的破坏性变更）；`docs`/`ci`/`test`/`chore` 合并不单独发版，它们的条目随下一个真实版本进入 CHANGELOG。
 4. 核对 release PR 的版本号、`CHANGELOG.md`、release notes 与 B 层文档的中文译本。release PR 的 commit 由 release-plz 生成、不含 `Signed-off-by`，`dco` 工作流因此对来自本仓库 `release-plz-*` 分支的 PR 跳过检查（跳过的 job 记为 success）；人类提交仍需 `git commit -s`。
 5. 合并 release PR；下一次 `release-plz release` 会为合并后的版本创建 tag，并触发产物流水线。
-6. `.github/workflows/release.yml` 由 `cargo-dist` 从 `dist-workspace.toml` 生成，只接受 `workflow_dispatch` 的 tag 输入；`.github/release-build-setup.yml` 会在构建前断言 ref 就是 `vMAJOR.MINOR.PATCH` 形式的输入 tag（正则仍接受旧式后缀，供历史 tag 使用），且 tag commit 可从 `origin/main` 到达，绝不直接发布 `main`。它构建 Linux x86_64、macOS arm64、Windows x86_64 的 `.tar.gz`/`.zip`、逐文件 `.sha256`、`sha256.sum`、源码归档与 `types/ctx-api-v1.d.ts`，生成 GitHub artifact attestation，并创建 GitHub Release。
+6. `.github/workflows/release.yml` 由 `cargo-dist` 从 `dist-workspace.toml` 生成，只接受 `workflow_dispatch` 的 tag 输入；`.github/release-build-setup.yml` 会在构建前断言 ref 就是 `vMAJOR.MINOR.PATCH` 形式的输入 tag（正则仍接受旧式后缀，供历史 tag 使用），且 tag commit 可从 `origin/main` 到达，绝不直接发布 `main`。它构建 Linux x86_64、macOS arm64、Windows x86_64 的 `.tar.gz`/`.zip`、逐文件 `.sha256`、`sha256.sum`、源码归档与 `types/` 下声明的 apiVersion 类型定义，生成 GitHub artifact attestation，并创建 GitHub Release。
 7. `release-extras` post-announce job 在 Release 创建后生成 CycloneDX SBOM、附加 `SHA256SUMS`、构建并推送 `ghcr.io/geeknonerd/stuntdouble:<tag>`（`linux/amd64` 与 `linux/arm64` 共用同一 tag 的镜像索引，arm64 由宿主平台 builder 交叉编译，见 `Dockerfile`）、断言该索引同时覆盖两个平台、附加镜像 digest，并用 `gh attestation verify` 验证已发布的 Linux 二进制与容器 attestation。GHCR tag 已存在时复用 digest，不覆盖、不重新生成 provenance，只验证已有 attestation；存在性检查无法确认时 fail closed。
 8. 用“发布验证”中的命令复核 Release；全部资产存在后再公告。
 
@@ -85,7 +85,7 @@ docker buildx imagetools inspect "ghcr.io/geeknonerd/stuntdouble:${tag}" --raw \
 # 期望输出：amd64 arm64
 ```
 
-Release 页面必须列出三个平台的归档、`SHA256SUMS`（同时保留 cargo-dist 的 `sha256.sum`）、`stuntdouble-<version>.cdx.json`、`ctx-api-v1.d.ts`、`stuntdouble-<version>-image.txt`（镜像 tag 与 digest）以及 release notes。
+Release 页面必须列出 dist manifest 声明的全部产物（三个平台归档、逐文件 `.sha256`、`sha256.sum`、源码归档、`types/` 下每个受支持 `apiVersion` 的类型定义）加上 `SHA256SUMS`、`stuntdouble-<version>.cdx.json`、`stuntdouble-<version>-image.txt`（镜像 tag 与 digest）以及 release notes。权威清单由 `.github/scripts/check-release-assets.sh` 从 dist manifest 的 `artifacts` 派生并声明 release-extras 自产资产；发布时由 `release-extras` 断言，新增类型定义或资产类别无需再改工作流内的清单。
 
 镜像索引必须同时包含 `linux/amd64` 与 `linux/arm64`，`release-extras` 在公告前断言这一点；`v0.2.1` 及更早的 tag 是单平台镜像，重跑它们的 `release-extras` 会在该断言处失败，这是“不覆盖已有产物”的预期结果。
 
@@ -203,7 +203,6 @@ lychee --offline --no-progress --exclude-path target --exclude-path .git './**/*
 以下项目已评估，但不在 T9 当前切片处理，按触发条件跟踪：
 
 - [#41](https://github.com/geeknonerd/stuntdouble/issues/41) 发布原子性：当前 `release-extras` 失败时把 Release 回退为 draft；等 cargo-dist 支持完整 draft 编排或项目自管 Release 生命周期后升级。
-- [#43](https://github.com/geeknonerd/stuntdouble/issues/43) 必需资产清单单一来源：出现第二个受支持 `apiVersion` 或新资产类型时，从 dist manifest 派生校验清单。
 - [#44](https://github.com/geeknonerd/stuntdouble/issues/44) cargo-dist 权限与 installer 摘要：上游提供按 job 权限或摘要校验能力，或项目决定承担 `allow-dirty = ["ci"]` 代价时处理。
 
 ## 构建说明
