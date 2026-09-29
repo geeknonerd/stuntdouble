@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3](https://github.com/geeknonerd/stuntdouble/compare/v0.5.2...v0.5.3) - 2026-09-29
+
+### Fixed
+
+- *(dist)* align release recovery runbook and guard draft lifecycle ([#113](https://github.com/geeknonerd/stuntdouble/pull/113))
+
+### Other
+
+- publish releases through a verified draft ([#41](https://github.com/geeknonerd/stuntdouble/pull/41)) ([#112](https://github.com/geeknonerd/stuntdouble/pull/112))
+- *(adr)* record cargo-dist 0.33 capability check for #41 ([#111](https://github.com/geeknonerd/stuntdouble/pull/111))
+- add learning on deriving release assets from the dist manifest ([#110](https://github.com/geeknonerd/stuntdouble/pull/110))
+- update cross-compile learning with verified multi-platform releases ([#109](https://github.com/geeknonerd/stuntdouble/pull/109))
+- derive required release assets from the dist manifest ([#108](https://github.com/geeknonerd/stuntdouble/pull/108))
+
 ## [0.5.2](https://github.com/geeknonerd/stuntdouble/compare/v0.5.1...v0.5.2) - 2026-09-29
 
 ### Other
