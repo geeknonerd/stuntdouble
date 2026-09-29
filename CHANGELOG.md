@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2](https://github.com/geeknonerd/stuntdouble/compare/v0.5.1...v0.5.2) - 2026-09-29
+
+### Other
+
+- *(sandbox)* re-anchor blocking upstream bridge test references ([#107](https://github.com/geeknonerd/stuntdouble/pull/107))
+- *(sandbox)* refresh script worker learnings and capture re-anchoring method ([#106](https://github.com/geeknonerd/stuntdouble/pull/106))
+- *(sandbox)* type script worker protocol ([#104](https://github.com/geeknonerd/stuntdouble/pull/104))
+- *(sandbox)* archive S3 memory budget and isolation contracts ([#103](https://github.com/geeknonerd/stuntdouble/pull/103))
+
 ### Other
 
 - *(docs)* record the final script-worker memory budget and isolation contracts ([#93](https://github.com/geeknonerd/stuntdouble/issues/93))
