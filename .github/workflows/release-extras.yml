@@ -267,29 +267,17 @@ jobs:
       - name: Verify the required release assets
         shell: bash
         env:
+          PLAN: ${{ inputs.plan }}
           TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
           version="${TAG#v}"
-          required=(
-            "ctx-api-v1.d.ts"
-            "SHA256SUMS"
-            "sha256.sum"
-            "stuntdouble-${version}.cdx.json"
-            "stuntdouble-${version}-image.txt"
-            "stuntdouble-aarch64-apple-darwin.tar.gz"
-            "stuntdouble-x86_64-pc-windows-msvc.zip"
-            "stuntdouble-x86_64-unknown-linux-gnu.tar.gz"
-          )
-          actual="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
-          missing=0
-          for asset in "${required[@]}"; do
-            if ! grep -Fxq "$asset" <<<"$actual"; then
-              echo "missing release asset: $asset" >&2
-              missing=1
-            fi
-          done
-          exit "$missing"
+          plan_file="$(mktemp)"
+          actual_file="$(mktemp)"
+          printf '%s' "$PLAN" > "$plan_file"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets[].name' > "$actual_file"
+          ./.github/scripts/check-release-assets.sh "$plan_file" "$actual_file" "$version"
 
       - name: Withdraw an incomplete release
         if: ${{ failure() || cancelled() }}

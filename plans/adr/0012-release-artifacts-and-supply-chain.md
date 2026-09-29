@@ -75,3 +75,11 @@ T9 的发布工作流已落地，执行时补充以下约束：
 - `release-extras` 在公告前断言该 tag 是同时覆盖两个平台的镜像索引，否则 fail closed；`v0.2.1` 及更早的 tag 保持单平台。
 
 原因：镜像与三平台归档并列发布，而用户侧的 arm64（Apple Silicon 上的 Docker、ARM 云主机）很常见；把额外成本放在交叉编译而不是模拟，能保住发布 job 的时长。
+
+## #43 修订（2026-09-29）：必需资产清单单一来源
+
+「T9 实施修订」曾把资产清单单一来源列为后续硬化项。现落地为：
+
+- `release-extras` 的必需资产断言不再硬编码文件名：`.github/scripts/check-release-assets.sh` 从 dist manifest（plan job 的 `artifacts` 字段）派生全部 dist 产物，仅静态声明 release-extras 自产资产（`SHA256SUMS`、`stuntdouble-<version>.cdx.json`、`stuntdouble-<version>-image.txt`）。
+- 新增受支持 `apiVersion` 的类型定义或新资产类别无需再编辑工作流内的清单；dist manifest 未声明任何产物时 fail closed。
+- `ci.yml` 的 `test` job 运行脚本 `--self-test`：新声明产物随发布附加时通过、缺失时失败。
