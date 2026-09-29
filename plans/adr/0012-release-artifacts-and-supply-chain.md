@@ -92,4 +92,6 @@ T9 的发布工作流已落地，执行时补充以下约束：
 - `release-extras` 创建 draft Release（标题/正文取自 plan manifest 的 `announcement_title` / `announcement_github_body`），从 workflow artifacts 读取 dist 产物，附加 SBOM / `SHA256SUMS` / 镜像 digest，并断言“draft 已附加的 extras 与 announce 即将上传的 dist 产物”覆盖 manifest 声明的全部必需资产；原“Withdraw an incomplete release”步骤删除。
 - 生成的 announce job 只在 `release-extras` 为 `skipped`/`success` 时运行，并在同一个 bash 步中先上传 dist 产物、再去除 draft；upload 失败即中止，任何失败或取消都不会公开 Release。
 - 该编排不依赖上游 axodotdev/cargo-dist#2521 的 undraft 能力。若上游随后提供“上传但不公开”，可再评估是否简化。
-- 校验：cargo-dist 0.33.0 `dist generate` 生成结构已实测；`.github/scripts/check-release-assets.sh` 的 `--self-test` 与“完整/缺失”两种模拟断言通过；取消演练安排在下一次真实发布时执行（见 `docs/development.md`「失败路径演练」）。
+- 已核实 plan job 的 `dist host --steps=create` 不会绕过 draft 编排提前公开 Release：cargo-dist 0.33.0 的 `host.rs` 中该步骤只刷新 manifest 的 hosting 元数据，真正的创建/编辑命令由 CI 模板生成；`create-release = false` 时模板假定 draft 已存在，只执行 `gh release upload` + `gh release edit --draft=false`。
+- 失败恢复命令与自动化触发路径统一为 `gh workflow run release.yml --ref <tag> -f tag=<tag>`（`release-plz.yml` 的 dispatch 使用同一形式），确保 `release-build-setup.yml` 的 tag 断言通过；draft 生命周期封装为 `.github/scripts/ensure-draft-release.sh`，其 `--self-test` 由 `ci.yml` 的 test job 运行。
+- 校验：cargo-dist 0.33.0 `dist generate` 生成结构已实测；`.github/scripts/check-release-assets.sh` 的 `--self-test` 与“完整/缺失”两种模拟断言通过；取消演练安排在下一次真实发布时执行（见 `docs/development.md`「失败路径演练」）。升级 cargo-dist 后按该节的「结构检查」确认 announce 的清理与上传语义仍匹配断言的 `find` 模式。

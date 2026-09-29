@@ -58,24 +58,9 @@ jobs:
           TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            is_draft="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft')"
-            if [[ "$is_draft" != "true" ]]; then
-              echo "release $TAG already exists and is not a draft; refusing to touch it" >&2
-              exit 1
-            fi
-            echo "draft release $TAG already exists; continuing."
-          else
-            title="$(jq -r '.announcement_title // empty' <<<"$PLAN")"
-            body="$(jq -r '.announcement_github_body // empty' <<<"$PLAN")"
-            if [[ -z "$title" || -z "$body" ]]; then
-              echo "the dist plan is missing announcement_title or announcement_github_body" >&2
-              exit 1
-            fi
-            printf '%s' "$body" > "$RUNNER_TEMP/release-notes.md"
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
-              --title "$title" --notes-file "$RUNNER_TEMP/release-notes.md"
-          fi
+          plan_file="$(mktemp)"
+          printf '%s' "$PLAN" > "$plan_file"
+          ./.github/scripts/ensure-draft-release.sh "$TAG" "$plan_file"
 
       - name: Generate a CycloneDX SBOM
         shell: bash

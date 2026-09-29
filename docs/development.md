@@ -59,7 +59,7 @@ docs: describe the release process
 发布由两条 GitHub Actions 工作流串联；版本号的唯一来源仍是 workspace 的 `Cargo.toml`：
 
 1. 把已完成的改动合并进 `main`。这次 push 触发 `.github/workflows/release-plz.yml`。
-2. `release-plz release` 根据 `release-plz.toml` 的 `git_only = true` 从 git tag 判断未发布版本；需要发布时创建 tag，并在同一 job 中用 `gh workflow run release.yml -f tag=<tag>` 触发产物流水线。
+2. `release-plz release` 根据 `release-plz.toml` 的 `git_only = true` 从 git tag 判断未发布版本；需要发布时创建 tag，并在同一 job 中用 `gh workflow run release.yml --ref "$tag" -f "tag=$tag"` 触发产物流水线。
 3. `release-plz release-pr` 按 Conventional Commits 计算下一版本，打开或更新 release PR；PR 包含 `Cargo.toml` 与 `CHANGELOG.md` 改动。只有命中 `release_commits` 的提交才触发版本 PR（`feat`/`fix`/`perf`/`refactor`/`security`/`build`、任意 `deps` scope，或任何带 `!` 的破坏性变更）；`docs`/`ci`/`test`/`chore` 合并不单独发版，它们的条目随下一个真实版本进入 CHANGELOG。
 4. 核对 release PR 的版本号、`CHANGELOG.md`、release notes 与 B 层文档的中文译本。release PR 的 commit 由 release-plz 生成、不含 `Signed-off-by`，`dco` 工作流因此对来自本仓库 `release-plz-*` 分支的 PR 跳过检查（跳过的 job 记为 success）；人类提交仍需 `git commit -s`。
 5. 合并 release PR；下一次 `release-plz release` 会为合并后的版本创建 tag，并触发产物流水线。
@@ -69,7 +69,7 @@ docs: describe the release process
 
 `v0.1.0-alpha.1` 这个旧 tag 对 release-plz 不可见，因此 `0.2.0` 是一次性的桥接版本：版本号与 CHANGELOG 段由人工在同一个 PR 里写好，合并后第 2 步建出 tag `v0.2.0` 并触发产物流水线（已完成）。此后 tag 形如 `v0.2.0` 能被正常识别，第 3 步恢复由 release-plz 打开版本 PR。
 
-`release-extras` 失败或取消时，Release 仍停留在 draft，从未公开；修复后重跑 release workflow（`gh workflow run release.yml -f tag=<tag>`）。若上一次运行已在 announce 阶段部分上传 dist 产物，先删除该 draft（`gh release delete <tag> --yes`，tag 保留）再重跑，以免 upload 因资产重名失败。不得覆盖已公开 Release 的资产；发布后发现产物问题应发新的 patch 版本（本项目不使用 prerelease 版本，见「版本号」）。只有 crates.io 发布损坏时才用 `cargo yank`，绝不删除已发布的版本。
+`release-extras` 失败或取消时，Release 仍停留在 draft，从未公开；修复后重跑 release workflow（`gh workflow run release.yml --ref <tag> -f tag=<tag>`）。若上一次运行已在 announce 阶段部分上传 dist 产物，先删除该 draft（`gh release delete <tag> --yes`，tag 保留）再重跑，以免 upload 因资产重名失败。不得覆盖已公开 Release 的资产；发布后发现产物问题应发新的 patch 版本（本项目不使用 prerelease 版本，见「版本号」）。只有 crates.io 发布损坏时才用 `cargo yank`，绝不删除已发布的版本。
 
 ### 发布验证
 
@@ -95,7 +95,7 @@ Release 页面必须列出 dist manifest 声明的全部产物（三个平台归
 
 发布闸门的 fail-closed 行为由两种方式覆盖：
 
-1. **结构检查**：`dist generate` 后确认生成的 `release.yml` 中 announce job 依赖 `custom-release-extras`，且其 `if` 要求该 job 为 `skipped` 或 `success`；`Create GitHub Release` 步骤在同一个 bash 步中先执行 `gh release upload`、后执行 `gh release edit --draft=false`。升级 cargo-dist 后重做。
+1. **结构检查**：`dist generate` 后确认生成的 `release.yml` 中 announce job 依赖 `custom-release-extras`，且其 `if` 要求该 job 为 `skipped` 或 `success`；`Create GitHub Release` 步骤先在同一个 bash 步中执行 `gh release upload "$TAG" artifacts/*`（前置 Cleanup 只删除 `artifacts/*-dist-manifest.json`）、后执行 `gh release edit --draft=false`，且该上传集合与 `release-extras` 断言中的 `find artifacts ... ! -name '*-dist-manifest.json'` 一致；plan job 的 `dist host --steps=create` 不创建 Release（cargo-dist 0.33 只刷新 manifest 的 hosting 元数据，见 ADR 0012）。升级 cargo-dist 后重做。
 2. **取消演练**：在下一次真实发布（或结构性变更后的首跑）中，于 `release-extras` 运行期间取消 workflow run，断言 `gh release view <tag> --json isDraft --jq .isDraft` 仍为 `true`；随后重跑 release workflow 完成发布。演练只操作 draft，始终安全。
 
 ## 发布产物
