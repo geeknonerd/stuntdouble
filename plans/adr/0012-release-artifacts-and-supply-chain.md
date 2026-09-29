@@ -83,3 +83,13 @@ T9 的发布工作流已落地，执行时补充以下约束：
 - `release-extras` 的必需资产断言不再硬编码文件名：`.github/scripts/check-release-assets.sh` 从 dist manifest（plan job 的 `artifacts` 字段）派生全部 dist 产物，仅静态声明 release-extras 自产资产（`SHA256SUMS`、`stuntdouble-<version>.cdx.json`、`stuntdouble-<version>-image.txt`）。
 - 新增受支持 `apiVersion` 的类型定义或新资产类别无需再编辑工作流内的清单；dist manifest 未声明任何产物时 fail closed。
 - `ci.yml` 的 `test` job 运行脚本 `--self-test`：新声明产物随发布附加时通过、缺失时失败。
+
+## #41 修订（2026-09-29）：发布改为 draft 编排
+
+「T9 实施修订」中“失败后回退为 draft”的缓解被替换为全程 draft 编排：GitHub Release 只在全部资产附加并通过断言后公开。
+
+- `dist-workspace.toml` 使用 cargo-dist 0.33 原生配置：`create-release = false`、`github-release = "announce"`，并把 `release-extras` 从 post-announce job 前移为 `publish-jobs` 成员。
+- `release-extras` 创建 draft Release（标题/正文取自 plan manifest 的 `announcement_title` / `announcement_github_body`），从 workflow artifacts 读取 dist 产物，附加 SBOM / `SHA256SUMS` / 镜像 digest，并断言“draft 已附加的 extras 与 announce 即将上传的 dist 产物”覆盖 manifest 声明的全部必需资产；原“Withdraw an incomplete release”步骤删除。
+- 生成的 announce job 只在 `release-extras` 为 `skipped`/`success` 时运行，并在同一个 bash 步中先上传 dist 产物、再去除 draft；upload 失败即中止，任何失败或取消都不会公开 Release。
+- 该编排不依赖上游 axodotdev/cargo-dist#2521 的 undraft 能力。若上游随后提供“上传但不公开”，可再评估是否简化。
+- 校验：cargo-dist 0.33.0 `dist generate` 生成结构已实测；`.github/scripts/check-release-assets.sh` 的 `--self-test` 与“完整/缺失”两种模拟断言通过；取消演练安排在下一次真实发布时执行（见 `docs/development.md`「失败路径演练」）。

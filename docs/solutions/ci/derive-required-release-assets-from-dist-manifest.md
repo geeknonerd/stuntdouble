@@ -32,6 +32,8 @@ tags: [release-assets, cargo-dist, dist-manifest, single-source-of-truth, releas
 
 当前实现由 `.github/scripts/check-release-assets.sh` 读取 plan：`required_assets()` 从 `.artifacts` 的键派生 dist 产物，再补 release-extras 自产的资产（`.github/scripts/check-release-assets.sh:19-33`）。`release-extras` 把 plan 与 GitHub Release 的实际资产名交给脚本（`.github/workflows/release-extras.yml:267-280`）；开发文档只指向该脚本作为权威来源（`docs/development.md:88`），ADR 0012 也有 #43 修订（`plans/adr/0012-release-artifacts-and-supply-chain.md:79-85`）。
 
+> **2026-09-29 更新（#41）**：`release-extras` 已前移为 cargo-dist publish job，断言对象改为“draft 已附加的 extras 与 announce 即将上传的 dist 产物”的并集，失败或取消时 Release 保持 draft（不再需要 Withdraw 回退）。本文关于 manifest 派生、fail closed 与自测的知识不变；行号与岗位名以当前工作流为准。
+
 （session history）#43 曾一度被归入「等待 cargo-dist 上游能力」而搁置；2026-09-29 重新调研发现，plan job 已经能把完整 dist manifest 交给 `release-extras`，用仓库现有版本即可派生，无需上游新能力，于是改为立即可推进的候选。
 
 ## 做法（Guidance）

@@ -63,13 +63,13 @@ docs: describe the release process
 3. `release-plz release-pr` 按 Conventional Commits 计算下一版本，打开或更新 release PR；PR 包含 `Cargo.toml` 与 `CHANGELOG.md` 改动。只有命中 `release_commits` 的提交才触发版本 PR（`feat`/`fix`/`perf`/`refactor`/`security`/`build`、任意 `deps` scope，或任何带 `!` 的破坏性变更）；`docs`/`ci`/`test`/`chore` 合并不单独发版，它们的条目随下一个真实版本进入 CHANGELOG。
 4. 核对 release PR 的版本号、`CHANGELOG.md`、release notes 与 B 层文档的中文译本。release PR 的 commit 由 release-plz 生成、不含 `Signed-off-by`，`dco` 工作流因此对来自本仓库 `release-plz-*` 分支的 PR 跳过检查（跳过的 job 记为 success）；人类提交仍需 `git commit -s`。
 5. 合并 release PR；下一次 `release-plz release` 会为合并后的版本创建 tag，并触发产物流水线。
-6. `.github/workflows/release.yml` 由 `cargo-dist` 从 `dist-workspace.toml` 生成，只接受 `workflow_dispatch` 的 tag 输入；`.github/release-build-setup.yml` 会在构建前断言 ref 就是 `vMAJOR.MINOR.PATCH` 形式的输入 tag（正则仍接受旧式后缀，供历史 tag 使用），且 tag commit 可从 `origin/main` 到达，绝不直接发布 `main`。它构建 Linux x86_64、macOS arm64、Windows x86_64 的 `.tar.gz`/`.zip`、逐文件 `.sha256`、`sha256.sum`、源码归档与 `types/` 下声明的 apiVersion 类型定义，生成 GitHub artifact attestation，并创建 GitHub Release。
-7. `release-extras` post-announce job 在 Release 创建后生成 CycloneDX SBOM、附加 `SHA256SUMS`、构建并推送 `ghcr.io/geeknonerd/stuntdouble:<tag>`（`linux/amd64` 与 `linux/arm64` 共用同一 tag 的镜像索引，arm64 由宿主平台 builder 交叉编译，见 `Dockerfile`）、断言该索引同时覆盖两个平台、附加镜像 digest，并用 `gh attestation verify` 验证已发布的 Linux 二进制与容器 attestation。GHCR tag 已存在时复用 digest，不覆盖、不重新生成 provenance，只验证已有 attestation；存在性检查无法确认时 fail closed。
-8. 用“发布验证”中的命令复核 Release；全部资产存在后再公告。
+6. `.github/workflows/release.yml` 由 `cargo-dist` 从 `dist-workspace.toml` 生成，只接受 `workflow_dispatch` 的 tag 输入；`.github/release-build-setup.yml` 会在构建前断言 ref 就是 `vMAJOR.MINOR.PATCH` 形式的输入 tag（正则仍接受旧式后缀，供历史 tag 使用），且 tag commit 可从 `origin/main` 到达，绝不直接发布 `main`。它构建 Linux x86_64、macOS arm64、Windows x86_64 的 `.tar.gz`/`.zip`、逐文件 `.sha256`、`sha256.sum`、源码归档与 `types/` 下声明的 apiVersion 类型定义，生成 GitHub artifact attestation；GitHub Release 以 draft 形式承载产物，直到发布闸门（第 7–8 步）通过才公开。
+7. `release-extras` 作为 cargo-dist publish job 在公告前运行：创建 draft Release（标题与正文取自 plan manifest 的 `announcement_title` / `announcement_github_body`），从 workflow artifacts 读取 dist 产物，生成 CycloneDX SBOM、附加 `SHA256SUMS`、构建并推送 `ghcr.io/geeknonerd/stuntdouble:<tag>`（`linux/amd64` 与 `linux/arm64` 共用同一 tag 的镜像索引，arm64 由宿主平台 builder 交叉编译，见 `Dockerfile`）、断言该索引同时覆盖两个平台、附加镜像 digest，并用 `gh attestation verify` 验证 Linux 二进制与容器 attestation，最后断言“draft 上已附加的 extras 与 announce job 即将上传的 dist 产物”覆盖 manifest 声明的全部必需资产。GHCR tag 已存在时复用 digest，不覆盖、不重新生成 provenance，只验证已有 attestation；存在性检查无法确认时 fail closed。
+8. 断言全部通过后，生成工作流的 announce job 在同一个 bash 步中先上传 dist 产物、再去除 draft；该 job 仅在 `release-extras` 成功或（prerelease 场景的）跳过时运行，跳过时也会因缺少 draft 而安全失败。任何失败或取消都不会公开 Release。公开后用“发布验证”中的命令复核。
 
 `v0.1.0-alpha.1` 这个旧 tag 对 release-plz 不可见，因此 `0.2.0` 是一次性的桥接版本：版本号与 CHANGELOG 段由人工在同一个 PR 里写好，合并后第 2 步建出 tag `v0.2.0` 并触发产物流水线（已完成）。此后 tag 形如 `v0.2.0` 能被正常识别，第 3 步恢复由 release-plz 打开版本 PR。
 
-`release-extras` 失败或取消时，会把已公开但不完整的 Release 回退为 draft；修复后优先重跑该 job，若需要更换已有产物则发布新的 patch 版本（本项目不使用 prerelease 版本，见「版本号」）。发布失败不得复用或覆盖已有 tag；只有 crates.io 发布损坏时才用 `cargo yank`，绝不删除已发布的版本。
+`release-extras` 失败或取消时，Release 仍停留在 draft，从未公开；修复后重跑 release workflow（`gh workflow run release.yml -f tag=<tag>`）。若上一次运行已在 announce 阶段部分上传 dist 产物，先删除该 draft（`gh release delete <tag> --yes`，tag 保留）再重跑，以免 upload 因资产重名失败。不得覆盖已公开 Release 的资产；发布后发现产物问题应发新的 patch 版本（本项目不使用 prerelease 版本，见「版本号」）。只有 crates.io 发布损坏时才用 `cargo yank`，绝不删除已发布的版本。
 
 ### 发布验证
 
@@ -90,6 +90,13 @@ Release 页面必须列出 dist manifest 声明的全部产物（三个平台归
 镜像索引必须同时包含 `linux/amd64` 与 `linux/arm64`，`release-extras` 在公告前断言这一点；`v0.2.1` 及更早的 tag 是单平台镜像，重跑它们的 `release-extras` 会在该断言处失败，这是“不覆盖已有产物”的预期结果。
 
 镜像由 `release-extras` 用 job 内 `GITHUB_TOKEN` 推送，因此按 GHCR 默认规则继承运行 workflow 的仓库的可见性与权限模型（公开仓库得到公开包），匿名 `docker pull` 无需登录即可用，也不需要人工确认或设置可见性；public 之后不能改回 private。只有改用 PAT 或 CLI 在 workflow 之外创建**新包名**时才会默认落成 private，那时才需要去 package settings 的 Danger Zone 改一次。依据与核实命令见 [solutions/ci/ghcr-package-visibility-follows-the-publishing-token.md](solutions/ci/ghcr-package-visibility-follows-the-publishing-token.md)。
+
+### 失败路径演练
+
+发布闸门的 fail-closed 行为由两种方式覆盖：
+
+1. **结构检查**：`dist generate` 后确认生成的 `release.yml` 中 announce job 依赖 `custom-release-extras`，且其 `if` 要求该 job 为 `skipped` 或 `success`；`Create GitHub Release` 步骤在同一个 bash 步中先执行 `gh release upload`、后执行 `gh release edit --draft=false`。升级 cargo-dist 后重做。
+2. **取消演练**：在下一次真实发布（或结构性变更后的首跑）中，于 `release-extras` 运行期间取消 workflow run，断言 `gh release view <tag> --json isDraft --jq .isDraft` 仍为 `true`；随后重跑 release workflow 完成发布。演练只操作 draft，始终安全。
 
 ## 发布产物
 
@@ -187,7 +194,7 @@ lychee --offline --no-progress --exclude-path target --exclude-path .git './**/*
 - `.github/workflows/ci.yml`：`fmt`、`clippy`、`test`、`docs`、`docs-links`、`deny`、`audit`、`msrv` 八个 job，全部 action 按 SHA 固定。`audit` job 不再经第三方审查 action：直接跑固定版本的 `cargo-audit`，有漏洞即以非 0 退出使 job 失败，也不创建 issue；版本升级需人工改 workflow。原因、实测耗时、运行时核查方法与仍属外部的注解见 [solutions/ci/node20-deprecation-annotations-only-cover-node20-actions.md](solutions/ci/node20-deprecation-annotations-only-cover-node20-actions.md)。
 - `.github/workflows/release-plz.yml`：release PR、tag 与 cargo-dist 触发。
 - `.github/workflows/release.yml`：由 `dist-workspace.toml` 生成；改配置后运行 `dist generate`，不要手工编辑该文件。
-- `.github/workflows/release-extras.yml`：cargo-dist 的 post-announce job，负责 SBOM、GHCR 镜像、digest，以及二进制、容器与必需 Release 资产的验证。
+- `.github/workflows/release-extras.yml`：cargo-dist 的 publish job，负责创建 draft Release、SBOM、GHCR 镜像、digest，并在公告前验证二进制、容器与“将公开资产全集”。
 - `.github/release-build-setup.yml`：cargo-dist 注入到每个构建 job 的步骤，拒绝非 tag 或其他 ref 的发布构建。
 - `.github/workflows/codeql.yml`：Rust 高级代码扫描，在 `main`、pull request 与每周计划任务上运行；它不加入 required checks，改由 ruleset「CodeQL merge protection」参与合并判定（阈值与误报处置见「Pull request」）。
 - 仓库必须允许 GitHub Actions 创建 pull request（Settings → Actions → General → Workflow permissions）。
@@ -202,7 +209,6 @@ lychee --offline --no-progress --exclude-path target --exclude-path .git './**/*
 
 以下项目已评估，但不在 T9 当前切片处理，按触发条件跟踪：
 
-- [#41](https://github.com/geeknonerd/stuntdouble/issues/41) 发布原子性：当前 `release-extras` 失败时把 Release 回退为 draft；等 cargo-dist 支持完整 draft 编排或项目自管 Release 生命周期后升级。
 - [#44](https://github.com/geeknonerd/stuntdouble/issues/44) cargo-dist 权限与 installer 摘要：上游提供按 job 权限或摘要校验能力，或项目决定承担 `allow-dirty = ["ci"]` 代价时处理。
 
 ## 构建说明
