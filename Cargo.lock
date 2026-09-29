@@ -1812,6 +1812,7 @@ dependencies = [
  "hyper-util",
  "rlimit",
  "rustls",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

@@ -22,6 +22,9 @@ use boa_engine::native_function::NativeFunction;
 use boa_engine::{
     js_string, Context, JsError, JsNativeError, JsNativeErrorKind, JsString, JsValue, Source,
 };
+use serde::de;
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{json, Value as Json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
@@ -592,8 +595,169 @@ fn js_literal(value: &Json) -> String {
         .replace('\u{2029}', "\\u2029")
 }
 
+/// One host bridge callable from the worker. Unknown names are protocol errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum BridgeName {
+    #[serde(rename = "__sd_http_get")]
+    HttpGet,
+    #[serde(rename = "__sd_http_pipe")]
+    HttpPipe,
+    #[serde(rename = "__sd_file")]
+    File,
+    #[serde(rename = "__sd_upload")]
+    Upload,
+    #[serde(rename = "__sd_validate_headers")]
+    ValidateHeaders,
+}
+
+impl BridgeName {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::HttpGet => "__sd_http_get",
+            Self::HttpPipe => "__sd_http_pipe",
+            Self::File => "__sd_file",
+            Self::Upload => "__sd_upload",
+            Self::ValidateHeaders => "__sd_validate_headers",
+        }
+    }
+}
+
+/// Parent-to-worker JSON Lines messages.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ParentMessage {
+    Job { script: String, request: Json },
+    HostResult { result: Json },
+}
+
+/// Worker-to-parent JSON Lines messages.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum WorkerMessage {
+    HostCall { name: BridgeName, payload: Json },
+    FinalResult(FinalResult),
+}
+
+/// Stable error kind carried by a failed `final_result`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum FinalErrorKind {
+    MemoryLimit,
+    Timeout,
+    Dns,
+    Transport,
+}
+
+impl FinalErrorKind {
+    const fn upstream_str(self) -> Option<&'static str> {
+        match self {
+            Self::MemoryLimit => None,
+            Self::Timeout => Some("timeout"),
+            Self::Dns => Some("dns"),
+            Self::Transport => Some("transport"),
+        }
+    }
+
+    fn from_upstream(kind: &str) -> Option<Self> {
+        [Self::Timeout, Self::Dns, Self::Transport]
+            .into_iter()
+            .find(|candidate| candidate.upstream_str() == Some(kind))
+    }
+
+    fn into_error(self, message: String) -> Error {
+        match self {
+            Self::MemoryLimit => Error::MemoryLimitExceeded,
+            Self::Timeout | Self::Dns | Self::Transport => Error::UpstreamUnreachable {
+                message,
+                kind: self.upstream_str().expect("upstream kind"),
+            },
+        }
+    }
+}
+
+/// Failed `final_result` payload. An absent kind is a script failure; a known
+/// kind selects the stable host-side error class.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct FinalError {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kind: Option<FinalErrorKind>,
+    message: String,
+}
+
+impl FinalError {
+    fn into_error(self) -> Error {
+        match self.kind {
+            Some(kind) => kind.into_error(self.message),
+            None => Error::Failed(self.message),
+        }
+    }
+}
+
+/// The two valid `final_result` shapes. Parsing rejects success/error mixtures
+/// and omissions at the protocol boundary.
+#[derive(Debug, PartialEq)]
+enum FinalResult {
+    Success(Json),
+    Error(FinalError),
+}
+
+#[derive(Deserialize)]
+struct FinalResultWire {
+    ok: bool,
+    #[serde(flatten)]
+    fields: serde_json::Map<String, Json>,
+}
+
+impl<'de> Deserialize<'de> for FinalResult {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mut wire = FinalResultWire::deserialize(deserializer)?;
+        let has_result = wire.fields.contains_key("result");
+        let has_error = wire.fields.contains_key("error");
+        match (wire.ok, has_result, has_error) {
+            (true, true, false) => Ok(Self::Success(
+                wire.fields
+                    .remove("result")
+                    .expect("result field was checked"),
+            )),
+            (false, false, true) => serde_json::from_value::<FinalError>(
+                wire.fields
+                    .remove("error")
+                    .expect("error field was checked"),
+            )
+            .map(Self::Error)
+            .map_err(de::Error::custom),
+            _ => Err(de::Error::custom("malformed final_result")),
+        }
+    }
+}
+
+impl Serialize for FinalResult {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Success(result) => {
+                let mut state = serializer.serialize_struct("final_result", 2)?;
+                state.serialize_field("ok", &true)?;
+                state.serialize_field("result", result)?;
+                state.end()
+            }
+            Self::Error(error) => {
+                let mut state = serializer.serialize_struct("final_result", 2)?;
+                state.serialize_field("ok", &false)?;
+                state.serialize_field("error", error)?;
+                state.end()
+            }
+        }
+    }
+}
+
 /// Write one JSON Lines protocol message to the parent.
-fn write_protocol_line(value: &Json) -> std::io::Result<()> {
+fn write_protocol_line<T: Serialize>(value: &T) -> std::io::Result<()> {
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
     serde_json::to_writer(&mut stdout, value).map_err(std::io::Error::other)?;
@@ -609,50 +773,49 @@ fn read_protocol_line() -> std::io::Result<Option<String>> {
 }
 
 /// Send one host call and wait for the parent's exactly-one result.
-fn worker_host_call(name: &str, payload: &Json) -> boa_engine::JsResult<Json> {
-    let call = json!({ "type": "host_call", "name": name, "payload": payload });
+fn worker_host_call(name: BridgeName, payload: &Json) -> boa_engine::JsResult<Json> {
+    let call = WorkerMessage::HostCall {
+        name,
+        payload: payload.clone(),
+    };
     write_protocol_line(&call).map_err(|error| {
-        JsNativeError::error().with_message(format!("{name}: cannot reach host: {error}"))
+        JsNativeError::error()
+            .with_message(format!("{}: cannot reach host: {error}", name.as_str()))
     })?;
     let line = read_protocol_line().map_err(|error| {
-        JsNativeError::error().with_message(format!("{name}: host read failed: {error}"))
+        JsNativeError::error().with_message(format!("{}: host read failed: {error}", name.as_str()))
     })?;
     let line = line.ok_or_else(|| {
-        JsNativeError::error().with_message(format!("{name}: host closed the pipe"))
+        JsNativeError::error().with_message(format!("{}: host closed the pipe", name.as_str()))
     })?;
-    let mut message: Json = serde_json::from_str(&line).map_err(|error| {
-        JsNativeError::error().with_message(format!("{name}: invalid host response: {error}"))
+    let message: ParentMessage = serde_json::from_str(&line).map_err(|error| {
+        JsNativeError::error()
+            .with_message(format!("{}: invalid host response: {error}", name.as_str()))
     })?;
     drop(line);
-    if message.get("type").and_then(Json::as_str) != Some("host_result") {
-        return Err(JsNativeError::error()
-            .with_message(format!("{name}: expected host_result"))
-            .into());
+    match message {
+        ParentMessage::HostResult { result } => Ok(result),
+        ParentMessage::Job { .. } => Err(JsNativeError::error()
+            .with_message(format!("{}: expected host_result", name.as_str()))
+            .into()),
     }
-    message
-        .get_mut("result")
-        .map(std::mem::take)
-        .ok_or_else(|| {
-            JsNativeError::error()
-                .with_message(format!("{name}: host_result is missing result"))
-                .into()
-        })
 }
 
 /// Decode one bridge argument, dispatch it to the parent, and encode the JSON
 /// string the script prelude expects.
-fn worker_bridge(name: &str, args: &[JsValue]) -> boa_engine::JsResult<JsValue> {
+fn worker_bridge(name: BridgeName, args: &[JsValue]) -> boa_engine::JsResult<JsValue> {
     let Some(raw) = args.first().and_then(JsValue::as_string) else {
         return Err(JsNativeError::typ()
-            .with_message(format!("{name}: expected a JSON string"))
+            .with_message(format!("{}: expected a JSON string", name.as_str()))
             .into());
     };
     let payload: Json = serde_json::from_str(&raw.to_std_string_escaped()).map_err(|error| {
-        JsNativeError::typ().with_message(format!("{name}: invalid payload: {error}"))
+        JsNativeError::typ().with_message(format!("{}: invalid payload: {error}", name.as_str()))
     })?;
     let result = worker_host_call(name, &payload)?;
     let rendered = serde_json::to_string(&result).map_err(|error| {
-        JsNativeError::error().with_message(format!("{name}: cannot encode result: {error}"))
+        JsNativeError::error()
+            .with_message(format!("{}: cannot encode result: {error}", name.as_str()))
     })?;
     drop(result);
     Ok(JsValue::from(JsString::from(rendered)))
@@ -663,7 +826,7 @@ fn worker_http_get(
     args: &[JsValue],
     _context: &mut Context,
 ) -> boa_engine::JsResult<JsValue> {
-    worker_bridge("__sd_http_get", args)
+    worker_bridge(BridgeName::HttpGet, args)
 }
 
 fn worker_http_pipe(
@@ -671,7 +834,7 @@ fn worker_http_pipe(
     args: &[JsValue],
     _context: &mut Context,
 ) -> boa_engine::JsResult<JsValue> {
-    worker_bridge("__sd_http_pipe", args)
+    worker_bridge(BridgeName::HttpPipe, args)
 }
 
 fn worker_file(
@@ -679,7 +842,7 @@ fn worker_file(
     args: &[JsValue],
     _context: &mut Context,
 ) -> boa_engine::JsResult<JsValue> {
-    worker_bridge("__sd_file", args)
+    worker_bridge(BridgeName::File, args)
 }
 
 fn worker_upload(
@@ -687,7 +850,7 @@ fn worker_upload(
     args: &[JsValue],
     _context: &mut Context,
 ) -> boa_engine::JsResult<JsValue> {
-    worker_bridge("__sd_upload", args)
+    worker_bridge(BridgeName::Upload, args)
 }
 
 fn worker_validate_headers(
@@ -695,7 +858,7 @@ fn worker_validate_headers(
     args: &[JsValue],
     _context: &mut Context,
 ) -> boa_engine::JsResult<JsValue> {
-    worker_bridge("__sd_validate_headers", args)
+    worker_bridge(BridgeName::ValidateHeaders, args)
 }
 
 /// Validate script-supplied response headers with the HTTP grammar shared by
@@ -1090,11 +1253,11 @@ impl HostState {
         }
     }
 
-    /// Handle one bridge call. `None` is an unknown bridge, which is a
-    /// parent/worker protocol mismatch rather than a script error.
-    fn dispatch(&mut self, name: &str, payload: &Json) -> Option<Json> {
+    /// Handle one bridge call. `None` is a missing configured capability, which
+    /// is a parent/worker protocol mismatch rather than a script error.
+    fn dispatch(&mut self, name: BridgeName, payload: &Json) -> Option<Json> {
         match name {
-            "__sd_http_get" => {
+            BridgeName::HttpGet => {
                 let host = self.upstream.as_ref()?;
                 Some(match host.get(payload) {
                     Ok(response) => {
@@ -1103,7 +1266,7 @@ impl HostState {
                     Err(error) => upstream_error_json(&error),
                 })
             }
-            "__sd_http_pipe" => {
+            BridgeName::HttpPipe => {
                 let host = self.upstream.as_ref()?;
                 Some(match host.pipe(payload) {
                     Ok(response) => {
@@ -1121,8 +1284,8 @@ impl HostState {
                     Err(error) => upstream_error_json(&error),
                 })
             }
-            "__sd_file" => Some(self.files.as_ref()?.call(payload)),
-            "__sd_upload" => Some(self.uploads.as_ref().map_or_else(
+            BridgeName::File => Some(self.files.as_ref()?.call(payload)),
+            BridgeName::Upload => Some(self.uploads.as_ref().map_or_else(
                 || {
                     json!({
                         "ok": false,
@@ -1132,8 +1295,7 @@ impl HostState {
                 },
                 |host| host.call(payload),
             )),
-            "__sd_validate_headers" => Some(validate_headers_json(payload)),
-            _ => None,
+            BridgeName::ValidateHeaders => Some(validate_headers_json(payload)),
         }
     }
 
@@ -1181,13 +1343,17 @@ fn validate_headers_json(payload: &Json) -> Json {
 
 /// Run one blocking host call without stalling the async protocol loop. Calls
 /// are strictly serialized by ping-pong, so one mutex is sufficient.
-async fn dispatch_host(host: &Arc<Mutex<HostState>>, name: String, payload: Json) -> Option<Json> {
+async fn dispatch_host(
+    host: &Arc<Mutex<HostState>>,
+    name: BridgeName,
+    payload: Json,
+) -> Option<Json> {
     let host = Arc::clone(host);
     tokio::task::spawn_blocking(move || {
         let mut host = host
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        host.dispatch(&name, &payload)
+        host.dispatch(name, &payload)
     })
     .await
     .ok()
@@ -1195,9 +1361,9 @@ async fn dispatch_host(host: &Arc<Mutex<HostState>>, name: String, payload: Json
 }
 
 /// Write one JSON Lines message to the worker.
-async fn write_json_line(
+async fn write_json_line<T: Serialize>(
     writer: &mut tokio::process::ChildStdin,
-    value: &Json,
+    value: &T,
 ) -> std::io::Result<()> {
     let mut line = serde_json::to_vec(value).map_err(std::io::Error::other)?;
     line.push(b'\n');
@@ -1207,7 +1373,7 @@ async fn write_json_line(
 
 enum WorkerReply {
     /// The worker delivered its one complete final result.
-    Final(Json),
+    Final(FinalResult),
     /// The wall-clock deadline expired.
     TimedOut,
     /// EOF, malformed output, an unknown bridge, or another protocol error.
@@ -1219,7 +1385,7 @@ async fn exchange(
     mut stdin: tokio::process::ChildStdin,
     stdout: tokio::process::ChildStdout,
     host: &Arc<Mutex<HostState>>,
-    job: &Json,
+    job: &ParentMessage,
     deadline: tokio::time::Instant,
 ) -> WorkerReply {
     if write_json_line(&mut stdin, job).await.is_err() {
@@ -1241,21 +1407,11 @@ async fn exchange(
         if final_result.is_some() {
             return WorkerReply::Unexpected;
         }
-        let Ok(message) = serde_json::from_str::<Json>(&line) else {
+        let Ok(message) = serde_json::from_str::<WorkerMessage>(&line) else {
             return WorkerReply::Unexpected;
         };
-        match message.get("type").and_then(Json::as_str) {
-            Some("host_call") => {
-                let Some(name) = message
-                    .get("name")
-                    .and_then(Json::as_str)
-                    .map(str::to_string)
-                else {
-                    return WorkerReply::Unexpected;
-                };
-                let Some(payload) = message.get("payload").cloned() else {
-                    return WorkerReply::Unexpected;
-                };
+        match message {
+            WorkerMessage::HostCall { name, payload } => {
                 let result =
                     match tokio::time::timeout_at(deadline, dispatch_host(host, name, payload))
                         .await
@@ -1264,15 +1420,14 @@ async fn exchange(
                         Ok(None) => return WorkerReply::Unexpected,
                         Ok(Some(result)) => result,
                     };
-                let reply = json!({ "type": "host_result", "result": result });
+                let reply = ParentMessage::HostResult { result };
                 match tokio::time::timeout_at(deadline, write_json_line(&mut stdin, &reply)).await {
                     Err(_) => return WorkerReply::TimedOut,
                     Ok(Err(_)) => return WorkerReply::Unexpected,
                     Ok(Ok(())) => {}
                 }
             }
-            Some("final_result") => final_result = Some(message),
-            _ => return WorkerReply::Unexpected,
+            WorkerMessage::FinalResult(result) => final_result = Some(result),
         }
     }
 }
@@ -1307,7 +1462,7 @@ fn unexpected_worker_error(diagnostics: &WorkerDiagnostics) -> Error {
 /// Spawn one worker process and drive it until its final result or the shared
 /// wall-clock deadline. The child is killed and reaped on every other exit.
 async fn run_worker(
-    job: Json,
+    job: ParentMessage,
     memory_limit_mb: u64,
     host: Arc<Mutex<HostState>>,
     deadline: tokio::time::Instant,
@@ -1375,14 +1530,14 @@ async fn run_worker(
             let diagnostics = stderr_task.await.unwrap_or_default();
             Outcome::failed(unexpected_worker_error(&diagnostics))
         }
-        WorkerReply::Final(message) => {
+        WorkerReply::Final(result) => {
             // The deadline still covers process teardown. A complete result is
             // consumed only after a successful exit; a lingering worker is
             // killed and reported as a timeout, and parent-held streams drop.
             match tokio::time::timeout_at(deadline, child.wait()).await {
                 Ok(Ok(status)) if status.success() => {
                     let _ = stderr_task.await;
-                    finish_outcome(&message, &host)
+                    finish_outcome(result, &host)
                 }
                 Ok(Ok(_)) => {
                     let diagnostics = stderr_task.await.unwrap_or_default();
@@ -1410,45 +1565,16 @@ async fn terminate(child: &mut Child) {
 }
 
 /// Map one complete `final_result` onto the existing Outcome shape.
-fn finish_outcome(message: &Json, host: &Arc<Mutex<HostState>>) -> Outcome {
+fn finish_outcome(result: FinalResult, host: &Arc<Mutex<HostState>>) -> Outcome {
     let (pipe, file_host, upload_host) = {
         let mut host = host
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         host.take_streams()
     };
-    match message.get("ok").and_then(Json::as_bool) {
-        Some(true) => match message.get("result") {
-            Some(result) => parse_host_record(result, pipe, file_host, upload_host),
-            None => Outcome::failed(Error::WorkerTerminated),
-        },
-        Some(false) => {
-            let Some(error) = message.get("error") else {
-                return Outcome::failed(Error::WorkerTerminated);
-            };
-            let Some(text) = error.get("message").and_then(Json::as_str) else {
-                return Outcome::failed(Error::WorkerTerminated);
-            };
-            let error = match error.get("kind").and_then(Json::as_str) {
-                Some("memory_limit") => Error::MemoryLimitExceeded,
-                Some("timeout") => Error::UpstreamUnreachable {
-                    message: text.to_string(),
-                    kind: "timeout",
-                },
-                Some("dns") => Error::UpstreamUnreachable {
-                    message: text.to_string(),
-                    kind: "dns",
-                },
-                Some("transport") => Error::UpstreamUnreachable {
-                    message: text.to_string(),
-                    kind: "transport",
-                },
-                Some(_) => return Outcome::failed(Error::WorkerTerminated),
-                None => Error::Failed(text.to_string()),
-            };
-            Outcome::failed(error)
-        }
-        None => Outcome::failed(Error::WorkerTerminated),
+    match result {
+        FinalResult::Success(result) => parse_host_record(&result, pipe, file_host, upload_host),
+        FinalResult::Error(error) => Outcome::failed(error.into_error()),
     }
 }
 
@@ -1487,11 +1613,10 @@ pub async fn execute(
         Arc::clone(&calls),
         Arc::clone(&file_calls),
     )));
-    let job = json!({
-        "type": "job",
-        "script": source,
-        "request": request.to_json(),
-    });
+    let job = ParentMessage::Job {
+        script: source,
+        request: request.to_json(),
+    };
     let mut outcome = run_worker(
         job,
         sandbox.script_memory_limit_mb,
@@ -1585,51 +1710,42 @@ fn worker_main(memory_limit_mb: u64) -> std::io::Result<()> {
             "missing job line",
         ));
     };
-    let job: Json = serde_json::from_str(&line)
+    let message: ParentMessage = serde_json::from_str(&line)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    if job.get("type").and_then(Json::as_str) != Some("job") {
+    let ParentMessage::Job { script, request } = message else {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "expected a job line",
         ));
-    }
-    let Some(script) = job.get("script").and_then(Json::as_str) else {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "job script missing",
-        ));
     };
-    let Some(request) = job.get("request") else {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "job request missing",
-        ));
-    };
-    let message = match evaluate_in_worker(script, request) {
-        Ok(result) => json!({ "type": "final_result", "ok": true, "result": result }),
-        Err(Error::UpstreamUnreachable { message, kind }) => json!({
-            "type": "final_result",
-            "ok": false,
-            "error": { "kind": kind, "message": message }
-        }),
-        Err(Error::Failed(message)) => json!({
-            "type": "final_result",
-            "ok": false,
-            "error": { "message": message }
-        }),
-        Err(Error::MemoryLimitExceeded) => json!({
-            "type": "final_result",
-            "ok": false,
-            "error": {
-                "kind": "memory_limit",
-                "message": Error::MemoryLimitExceeded.detail()
-            }
-        }),
-        Err(error) => json!({
-            "type": "final_result",
-            "ok": false,
-            "error": { "message": error.detail() }
-        }),
+    let message = match evaluate_in_worker(&script, &request) {
+        Ok(result) => WorkerMessage::FinalResult(FinalResult::Success(result)),
+        Err(Error::UpstreamUnreachable { message, kind }) => {
+            let Some(kind) = FinalErrorKind::from_upstream(kind) else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "unknown upstream error kind",
+                ));
+            };
+            WorkerMessage::FinalResult(FinalResult::Error(FinalError {
+                kind: Some(kind),
+                message,
+            }))
+        }
+        Err(Error::Failed(message)) => WorkerMessage::FinalResult(FinalResult::Error(FinalError {
+            kind: None,
+            message,
+        })),
+        Err(Error::MemoryLimitExceeded) => {
+            WorkerMessage::FinalResult(FinalResult::Error(FinalError {
+                kind: Some(FinalErrorKind::MemoryLimit),
+                message: Error::MemoryLimitExceeded.detail().to_string(),
+            }))
+        }
+        Err(error) => WorkerMessage::FinalResult(FinalResult::Error(FinalError {
+            kind: None,
+            message: error.detail().to_string(),
+        })),
     };
     write_protocol_line(&message)
 }
@@ -1652,6 +1768,141 @@ fn apply_worker_memory_limit(_memory_limit_mb: u64) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_protocol_round_trips_host_calls_and_results() {
+        let host_call = WorkerMessage::HostCall {
+            name: BridgeName::HttpGet,
+            payload: json!({ "url": "http://example.test" }),
+        };
+        assert_round_trip(
+            &host_call,
+            &json!({
+                "type": "host_call",
+                "name": "__sd_http_get",
+                "payload": { "url": "http://example.test" }
+            }),
+        );
+
+        let host_result = ParentMessage::HostResult {
+            result: json!({ "ok": true }),
+        };
+        assert_round_trip(
+            &host_result,
+            &json!({ "type": "host_result", "result": { "ok": true } }),
+        );
+    }
+
+    #[test]
+    fn bridge_names_use_stable_wire_labels() {
+        for (name, label) in [
+            (BridgeName::HttpGet, "__sd_http_get"),
+            (BridgeName::HttpPipe, "__sd_http_pipe"),
+            (BridgeName::File, "__sd_file"),
+            (BridgeName::Upload, "__sd_upload"),
+            (BridgeName::ValidateHeaders, "__sd_validate_headers"),
+        ] {
+            assert_eq!(name.as_str(), label);
+            assert_eq!(serde_json::to_value(name).expect("serialize bridge"), label);
+        }
+    }
+
+    #[test]
+    fn unknown_upstream_error_kinds_are_not_coerced() {
+        assert_eq!(
+            FinalErrorKind::from_upstream("timeout"),
+            Some(FinalErrorKind::Timeout)
+        );
+        assert_eq!(
+            FinalErrorKind::from_upstream("dns"),
+            Some(FinalErrorKind::Dns)
+        );
+        assert_eq!(
+            FinalErrorKind::from_upstream("transport"),
+            Some(FinalErrorKind::Transport)
+        );
+        assert_eq!(FinalErrorKind::from_upstream("quantum"), None);
+    }
+
+    #[test]
+    fn final_result_round_trips_success_and_error_shapes() {
+        let success = WorkerMessage::FinalResult(FinalResult::Success(json!({ "response": null })));
+        assert_round_trip(
+            &success,
+            &json!({
+                "type": "final_result",
+                "ok": true,
+                "result": { "response": null }
+            }),
+        );
+
+        let failure = WorkerMessage::FinalResult(FinalResult::Error(FinalError {
+            kind: Some(FinalErrorKind::Dns),
+            message: "lookup failed".into(),
+        }));
+        assert_round_trip(
+            &failure,
+            &json!({
+                "type": "final_result",
+                "ok": false,
+                "error": { "kind": "dns", "message": "lookup failed" }
+            }),
+        );
+    }
+
+    #[test]
+    fn unknown_protocol_variants_are_rejected() {
+        for message in [
+            json!({ "type": "alien" }),
+            json!({ "type": "host_call", "name": "__sd_unknown", "payload": {} }),
+            json!({
+                "type": "final_result",
+                "ok": false,
+                "error": { "kind": "quantum", "message": "boom" }
+            }),
+        ] {
+            assert!(
+                serde_json::from_value::<WorkerMessage>(message).is_err(),
+                "unknown variant was accepted"
+            );
+        }
+        assert!(serde_json::from_value::<ParentMessage>(json!({ "type": "alien" })).is_err());
+    }
+
+    #[test]
+    fn malformed_final_result_shapes_are_rejected() {
+        for message in [
+            json!({ "type": "final_result", "ok": true }),
+            json!({ "type": "final_result", "ok": false }),
+            json!({
+                "type": "final_result",
+                "ok": true,
+                "result": null,
+                "error": { "message": "boom" }
+            }),
+            json!({
+                "type": "final_result",
+                "ok": false,
+                "result": null,
+                "error": { "message": "boom" }
+            }),
+        ] {
+            assert!(
+                serde_json::from_value::<WorkerMessage>(message.clone()).is_err(),
+                "malformed final_result was accepted: {message}"
+            );
+        }
+    }
+
+    fn assert_round_trip<T>(value: &T, wire: &Json)
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+    {
+        let encoded = serde_json::to_value(value).expect("serialize protocol message");
+        assert_eq!(&encoded, wire);
+        let decoded = serde_json::from_value::<T>(encoded).expect("deserialize protocol message");
+        assert_eq!(&decoded, value);
+    }
 
     #[test]
     fn engine_panic_is_isolated_from_the_caller() {
