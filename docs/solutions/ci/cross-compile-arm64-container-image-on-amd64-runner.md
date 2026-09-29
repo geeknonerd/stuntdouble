@@ -1,6 +1,7 @@
 ---
 title: "Cross-compile the linux/arm64 release container image on an amd64-only runner"
 date: 2026-09-24
+last_updated: 2026-09-29
 category: ci
 module: multi-platform release image
 problem_type: tooling_decision
@@ -81,7 +82,7 @@ error[E0463]: can't find crate for core
 修改后：$BUILDPLATFORM builder  -> {amd64 原生, arm64 交叉编译} -> 双平台 image index
 ```
 
-**验证边界：** 本轮在本地完成两平台构建、容器端到端请求（arm64 经 QEMU 执行）与断言桩测试（多平台索引通过、单平台索引 fail closed）；真实的多平台 push 要由下一次 release 首次执行（PR #81，截至本文未合并）。在它成功之前，应表述为「修复已落分支、待 release 验证」，而不是「registry 已修复」。
+**验证边界与后续状态：** 落地本轮改动时（PR #81）只在本地完成两平台构建、容器端到端请求（arm64 经 QEMU 执行）与断言桩测试（多平台索引通过、单平台索引 fail closed）；由于真实的多平台 push 尚待 release 首次执行，当时的表述是「修复已落分支、待 release 验证」而不是「registry 已修复」。PR #81 已于 2026-09-24 合并，首次真实 push 出现在 v0.3.0（2026-09-26），`docker buildx imagetools inspect ... --raw` 实测该 tag 的 Linux 架构集合为 `amd64 arm64`；2026-09-29 复核 v0.5.2 仍是同一双平台索引，v0.2.1 仍是单平台 manifest。
 
 ## 相关（Related）
 
