@@ -1,6 +1,6 @@
-# 第一版采用完全脚本化，支持 JavaScript/TypeScript + Python 运行时
+# 第一版采用完全脚本化，支持 JavaScript/TypeScript 运行时（Python 推迟到 v2）
 
-- 状态：`已接受（运行时路径待定）`
+- 状态：`已接受（Python 范围见 ADR 0015）`
 - 日期：2026-09-18
 - 关联：[ADR 0001](0001-no-shared-state-in-v1.md)、[ADR 0002](0002-route-model-only-in-v1.md)、[架构设计最佳实践调研](../../research/architecture-best-practices.md)
 
@@ -86,7 +86,11 @@ T3 限定了单个脚本的资源包络，但没有限定被放弃 worker 的数
 
 这不是内存硬边界；#28 的进程隔离（[ADR 0014](0014-process-isolated-script-runner.md)）仍是长期修复。进程隔离落地后，可由 OS 级 CPU/内存限制取代本修订的并发上限（或保留为进程数上限）。
 
+## 修订（ADR 0015，2026-09-30）：Python 推迟到 v2
+
+v1 脚本运行时只有 Boa（JS）。本文件正文保留 2026-09-18 的原始选型记录作为历史；Python 范围以 [ADR 0015](0015-python-runtime-deferred-to-v2.md) 为准：移出 v1、进入 v2 路线，`validate` 继续拒绝 `.py`。
+
 ## 替代方案
 
 - 纯声明式模板 + 脚本逃逸口（拒绝：私有 DSL 设计成本高，且已验证场景主体落在脚本侧）
-- 只支持 JS/TS 不支持 Python（待定：可能仍是正确的 v1 选择）
+- 只支持 JS/TS 不支持 Python（已采纳为 v1 结论：Python 推迟到 v2，见 [ADR 0015](0015-python-runtime-deferred-to-v2.md)）
