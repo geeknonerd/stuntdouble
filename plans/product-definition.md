@@ -1,7 +1,7 @@
 # Mock Server 产品功能定义
 
 - 状态：`功能已收敛`（配置文件主格式已确认，公开契约已在 T8 冻结）
-- 更新：2026-09-30（Python 推迟到 v2，见 ADR 0015；未实现 `ctx` 能力移出 1.0，见 ADR 0016；发布就绪三项推迟与 1.0 门禁见 ADR 0017）
+- 更新：2026-09-30（Python 推迟到 v2，见 ADR 0015；未实现 `ctx` 能力移出 1.0，见 ADR 0016；发布就绪三项推迟与 1.0 门禁见 ADR 0017；v1.0.0 已发布，门禁已兑现）
 - 关联：[Mock 服务选型调研](../research/mock-server-landscape.md)、[示例文档清单与二进制下载场景](demo-document-catalog.md)、[配置契约](../docs/contracts/config.md)、[ctx API 契约](../docs/contracts/ctx-api.md)、[CLI 契约](../docs/contracts/cli.md)
 
 ## 1. 产品命题与定位
@@ -89,10 +89,10 @@
 - 实际 MSRV：Rust 1.91（由 Boa 0.22 决定；clap 4.6 与 toml 1.x 要求 1.85）。策略是工具链跟随 stable、MSRV 取“安全门槛 + 依赖树”共同确定的实际最低值：不允许为压低 MSRV 保留未修复的 advisory 或未维护依赖。Python（RustPython）接入时需重新校准（见 [ADR 0015](adr/0015-python-runtime-deferred-to-v2.md)）。
 - v2 路线：Python 脚本运行时（[ADR 0015](adr/0015-python-runtime-deferred-to-v2.md)）、SQLite 共享状态（ADR 0001 预留）、声明式响应序列、资源模型预设生成器、Admin API（模式 3）、内置 TLS、`ctx.local`、脚本定时器（均见 [ADR 0016](adr/0016-v1-ctx-pending-capabilities-deferred.md)）。
 - v1.x 候选（`apiVersion` 1 内增量）：`ctx.request.bodyBytes`、`ctx.http.get` 的 `retries` / `backoff`、`ctx.http.request`（见 [ADR 0016](adr/0016-v1-ctx-pending-capabilities-deferred.md)）。
-- crates.io：1.0 前只做包名占位，不开自动化发布（保持 `publish = false` + `git_only = true`）；转正触发条件见 [ADR 0017](adr/0017-v1-release-readiness.md)。
-- 独立治理邮箱：1.0 不设，继续用 GitHub 私密报告；转正触发条件见 [ADR 0017](adr/0017-v1-release-readiness.md)。
-- 自定义域名：1.0 不配，继续用 GitHub Pages 默认域名；转正触发条件见 [ADR 0017](adr/0017-v1-release-readiness.md)。
-- 1.0 门禁：三契约稳定、单运行时 Boa JS、发布验证链通过、文档与安全表修正；版本路径直接备 `1.0.0`，不加中间 `0.6.0`（均见 [ADR 0017](adr/0017-v1-release-readiness.md)）。
+- crates.io：v1.0.0 已按此落地——只做包名占位，未开自动化发布（保持 `publish = false` + `git_only = true`）；转正触发条件见 [ADR 0017](adr/0017-v1-release-readiness.md)。
+- 独立治理邮箱：v1.0.0 未设，继续用 GitHub 私密报告；转正触发条件见 [ADR 0017](adr/0017-v1-release-readiness.md)。
+- 自定义域名：v1.0.0 未配，继续用 GitHub Pages 默认域名；转正触发条件见 [ADR 0017](adr/0017-v1-release-readiness.md)。
+- 1.0 门禁：v1.0.0 已满足并发布——三契约稳定、单运行时 Boa JS、发布验证链通过、文档与安全表修正；版本路径已按直接备 `1.0.0` 落地，未加中间 `0.6.0`（均见 [ADR 0017](adr/0017-v1-release-readiness.md)）。
 
 ## 7. 术语
 
