@@ -4,9 +4,10 @@
 
 | Version | Supported |
 | --- | --- |
-| No releases yet | Not applicable |
+| 0.5.x | Supported (pre-1.0 line) |
+| < 0.5.0 | Not supported |
 
-Stunt Double has no released versions yet. The project is in early development, with the first vertical slice (T1–T12) implemented, so there are no supported release lines to patch. Once the first stable release exists, this table lists the supported lines.
+Stunt Double is pre-1.0 (latest `v0.5.3`), with slices T1–T13 implemented. Security fixes ship in the next patch release on the `0.5.x` line. Once `1.0.0` exists, this table lists the supported stable lines.
 
 ## Threat model
 
