@@ -7,7 +7,7 @@
 | [0001](0001-no-shared-state-in-v1.md) | 第一版不支持请求间共享状态 | 已接受 |
 | [0002](0002-route-model-only-in-v1.md) | 第一版只实装路由模型，资源派生推迟为同一引擎的预设 | 已接受 |
 | [0003](0003-script-first-multi-runtime.md) | 第一版采用完全脚本化，支持 JavaScript/TypeScript 运行时（Python 推迟到 v2） | 已接受（Python 范围见 ADR 0015） |
-| [0004](0004-host-functions-only-sandbox.md) | 脚本能力只经宿主函数提供（半托管沙箱） | 已接受（API 明细待收敛） |
+| [0004](0004-host-functions-only-sandbox.md) | 脚本能力只经宿主函数提供（半托管沙箱） | 已接受（API 明细已由 ADR 0016 收敛） |
 | [0005](0005-upstream-failure-semantics.md) | 上游失败语义：默认透传，传输层失败才造错误码 | 已接受 |
 | [0006](0006-product-positioning.md) | 产品定位：对接真实外部依赖的联调假服务 | 已接受 |
 | [0007](0007-naming-and-brand.md) | 项目命名与品牌 | 已接受 |
@@ -19,6 +19,7 @@
 | [0013](0013-documentation-language-and-bilingual-structure.md) | 文档语言分层与双语结构 | 已接受 |
 | [0014](0014-process-isolated-script-runner.md) | 进程隔离脚本执行：每请求子进程 + OS 级硬限制 | 已接受 |
 | [0015](0015-python-runtime-deferred-to-v2.md) | Python 脚本运行时推迟到 v2 | 已接受 |
+| [0016](0016-v1-ctx-pending-capabilities-deferred.md) | v1 未实现 `ctx` 能力移出 1.0 | 已接受 |
 
 ## 如何新增 ADR
 

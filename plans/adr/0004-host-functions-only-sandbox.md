@@ -1,6 +1,6 @@
 # 脚本能力只经宿主函数提供（半托管沙箱）
 
-- 状态：`已接受（API 明细待收敛）`
+- 状态：`已接受（API 明细已由 ADR 0016 收敛）`
 - 日期：2026-09-18
 - 关联：[ADR 0001](0001-no-shared-state-in-v1.md)、[ADR 0003](0003-script-first-multi-runtime.md)
 
@@ -31,6 +31,10 @@
 ## 修订（ADR 0015，2026-09-30）：Python 推迟到 v2
 
 v1 只有 Boa（JS）运行时，本文件中的 RustPython 约束（`os`/`subprocess`/`socket` 导入移除等）转为 v2 接入条件，不作为 v1 验收项；范围以 [ADR 0015](0015-python-runtime-deferred-to-v2.md) 为准。正文保留原始记录，不重写历史。
+
+## 修订（ADR 0016，2026-09-30）：未实现能力移出 1.0
+
+`bodyBytes`、`ctx.http.request`、retry/backoff、`ctx.local`、timers 已移出 1.0（去向见 [ADR 0016](0016-v1-ctx-pending-capabilities-deferred.md)）；1.0 只承诺 T1–T12 已实现子集。正文保留原始记录，不重写历史。
 
 ## T12 修订
 
