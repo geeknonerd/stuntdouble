@@ -4,10 +4,10 @@
 
 | Version | Supported |
 | --- | --- |
-| 0.5.x | Supported (pre-1.0 line) |
-| < 0.5.0 | Not supported |
+| 1.0.x | Supported |
+| < 1.0.0 | Not supported |
 
-Stunt Double is pre-1.0 (latest `v0.5.3`), with slices T1–T13 implemented. Security fixes ship in the next patch release on the `0.5.x` line. Once `1.0.0` exists, this table lists the supported stable lines.
+Stunt Double 1.0.0 ships slices T1–T13. Security fixes ship in the next patch release on the `1.0.x` line.
 
 ## Threat model
 

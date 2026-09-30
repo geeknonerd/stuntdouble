@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0](https://github.com/geeknonerd/stuntdouble/compare/v0.5.3...v1.0.0) - 2026-09-30
+
+### Other
+
+- record draft cleanup protocol for cargo-dist release reruns ([#115](https://github.com/geeknonerd/stuntdouble/pull/115))
+- defer Python runtime to v2 ([#116](https://github.com/geeknonerd/stuntdouble/pull/116))
+- cut pending ctx capabilities from v1 ([#117](https://github.com/geeknonerd/stuntdouble/pull/117))
+- define v1 release readiness and defer three pending items ([#118](https://github.com/geeknonerd/stuntdouble/pull/118))
+- correct SECURITY supported versions for pre-1.0 line ([#119](https://github.com/geeknonerd/stuntdouble/pull/119))
+- sync index status with process-isolated script workers ([#120](https://github.com/geeknonerd/stuntdouble/pull/120))
+
 ## [0.5.3](https://github.com/geeknonerd/stuntdouble/compare/v0.5.2...v0.5.3) - 2026-09-29
 
 ### Fixed
