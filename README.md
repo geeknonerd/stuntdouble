@@ -4,7 +4,7 @@
 
 > **A test double that plays the whole show.**
 
-Stunt Double is a Rust-based mock server for integration testing against real external dependencies. It reads upstream APIs, transforms data with built-in JavaScript or Python, returns files and binary responses, and runs with zero host runtime dependencies.
+Stunt Double is a Rust-based mock server for integration testing against real external dependencies. It reads upstream APIs, transforms data with built-in JavaScript, returns files and binary responses, and runs with zero host runtime dependencies.
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![Status: upstream HTTP](https://img.shields.io/badge/status-upstream%20http-orange.svg)](#status)
@@ -51,7 +51,6 @@ The trigger chain and the release checklist live in [docs/development.md](docs/d
 
 - Route model with one pipeline: `match → source → transform → response`.
 - Built-in JavaScript runtime: Boa.
-- Built-in Python runtime: RustPython with a stdlib subset.
 - Host-injected `ctx` API. No raw `fetch`, `fs`, `os`, `subprocess`, or `socket`.
 - Upstream HTTP (`ctx.http.get` plus streaming `ctx.http.pipe` with Range passthrough; `ctx.http.request` pending) and `ctx.file` reads, file streaming, local file Range responses, and request-scoped multipart uploads exposed through `ctx.request.files`.
 - One static file root with path traversal protection.
@@ -65,6 +64,7 @@ The trigger chain and the release checklist live in [docs/development.md](docs/d
 - Response sequencing.
 - Automatic resource CRUD.
 - TypeScript transpilation.
+- Python runtime (deferred to v2; see ADR 0015).
 - npm, pip, or third-party imports.
 - Hot reload, Admin API, or GUI.
 - Built-in TLS termination.
@@ -88,7 +88,7 @@ Development documentation is written in Chinese; [ADR 0013](plans/adr/0013-docum
 - [Product definition](plans/product-definition.md) (Chinese) — v1 scope, host API, non-goals.
 - [Demo scenario](plans/demo-document-catalog.md) (Chinese) — CSV manifest and PDF download contract.
 - [Development and release workflow](docs/development.md) (Chinese) — branch, commit, CI, versioning, and release rules.
-- [Architecture decisions](plans/adr/) (Chinese) — ADR 0001–0014.
+- [Architecture decisions](plans/adr/) (Chinese) — ADR 0001–0015.
 - [Domain glossary](CONTEXT.md) (Chinese) — project vocabulary.
 - [Research](research/) (Chinese) — mock server landscape, runtimes, architecture, and open-source baseline.
 - [Repository documentation index](docs/README.md) (Chinese) — entry point for maintainers.

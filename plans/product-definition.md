@@ -1,12 +1,12 @@
 # Mock Server 产品功能定义
 
 - 状态：`功能已收敛`（配置文件主格式已确认，公开契约已在 T8 冻结）
-- 更新：2026-09-22
+- 更新：2026-09-30（Python 推迟到 v2，见 ADR 0015）
 - 关联：[Mock 服务选型调研](../research/mock-server-landscape.md)、[示例文档清单与二进制下载场景](demo-document-catalog.md)、[配置契约](../docs/contracts/config.md)、[ctx API 契约](../docs/contracts/ctx-api.md)、[CLI 契约](../docs/contracts/cli.md)
 
 ## 1. 产品命题与定位
 
-一款用 Rust 实现的 Mock Server 产品 **Stunt Double (`stuntdouble`)**：以声明式路由配置描述接口，用 JavaScript / Python 脚本（运行时内置）完成从数据源取数、调外部上游、读写文件的响应构造；把"读数据源（本地 JSON/外部 HTTP）、调用外部网络、返回二进制/文件"当作一等能力，替代 json-server + 自写 middleware 的组合。请求间共享状态类能力不在第一版（v2/v3 考虑 SQLite）。
+一款用 Rust 实现的 Mock Server 产品 **Stunt Double (`stuntdouble`)**：以声明式路由配置描述接口，用 JavaScript 脚本（Boa 运行时内置）完成从数据源取数、调外部上游、读写文件的响应构造；把"读数据源（本地 JSON/外部 HTTP）、调用外部网络、返回二进制/文件"当作一等能力，替代 json-server + 自写 middleware 的组合。请求间共享状态类能力不在第一版（v2/v3 考虑 SQLite）。
 
 **定位（主）**：面向需要对接真实外部依赖的后端与集成开发者的联调假服务，用于本地与 CI。
 **顺风加成**：AI 编码代理的测试后端（零运行时依赖、确定性、二进制文件能力天然契合）。
@@ -18,7 +18,7 @@
 | --- | --- | --- |
 | 产品形态 | 可对外发布的 Mock Server 产品，非内部工具 | 本轮讨论 |
 | 实现语言 | Rust（产品主体） | 本轮讨论 |
-| 脚本运行时 | **全部内置**：Boa（JS, v0.22.x）+ RustPython（Python stdlib 子集），零外部环境依赖（无需安装 Node/Python） | [ADR 0003](adr/0003-script-first-multi-runtime.md)、[脚本运行时选型调研](../research/script-runtime-selection.md) |
+| 脚本运行时 | **内置**：Boa（JS, v0.22.x），零外部环境依赖（无需安装 Node）；Python（RustPython）推迟到 v2 | [ADR 0003](adr/0003-script-first-multi-runtime.md)、[ADR 0015](adr/0015-python-runtime-deferred-to-v2.md)、[脚本运行时选型调研](../research/script-runtime-selection.md) |
 | TypeScript | **第一版不支持**（不引入 swc/oxc 转译）；需 TS 者自行编译为 `.js`。产品仍发布 `.d.ts` 供编辑器使用 | [ADR 0003](adr/0003-script-first-multi-runtime.md) |
 | 脚本能力供给方式 | 半托管：外部能力一律经宿主函数注入；不向脚本暴露引擎自带的 `fetch`/`fs`/`os`/`subprocess` | [ADR 0004](adr/0004-host-functions-only-sandbox.md) |
 | 脚本生态边界 | **不支持 import/npm/pip**；仅内置少量常用库（如受限的 http.get/post、csv、json、text 处理） | ADR 0003 |
@@ -27,7 +27,7 @@
 | 数据源 | 本地静态数据文件、外部上游接口 | [ADR 0001](adr/0001-no-shared-state-in-v1.md) |
 | 共享状态 | 不支持；v2/v3 考虑基于 SQLite 的持久化 | [ADR 0001](adr/0001-no-shared-state-in-v1.md) |
 | 资源派生模型 | 不实装；未来可作为"OpenAPI 预设生成器"实现，但不作为独立引擎 | [ADR 0002](adr/0002-route-model-only-in-v1.md) |
-| 变换表达力边界 | 完全脚本化，不做私有模板 DSL；脚本语言为 JS（第一版）+ Python | ADR 0003 |
+| 变换表达力边界 | 完全脚本化，不做私有模板 DSL；脚本语言为 JS（第一版）；Python 为 v2 候选 | [ADR 0003](adr/0003-script-first-multi-runtime.md)、[ADR 0015](adr/0015-python-runtime-deferred-to-v2.md) |
 | 文件 I/O 语义 | 静态文件目录为唯一文件根：配置声明，脚本文件操作只能在该目录内，相对路径默认解析到此根；上传由宿主解析 multipart 并落到系统临时目录下的每请求独立随机子目录（Unix 0700，脚本不可见路径），请求结束清理；响应侧支持流式透传与本地文件流，Range 透传/支持；纯内存响应不支持 Range；上传上限默认 20MB（可配置） | 本轮讨论 |
 | 上游失败语义 | 以"是否拿到 HTTP 响应"为唯一分界：有响应则视为数据、默认透传状态码（脚本可改写）；传输层失败抛异常，未捕获返回 502 + `request_id`；脚本异常返回 500；脚本未调用 `respond` 视为逻辑错误 | [ADR 0005](adr/0005-upstream-failure-semantics.md) |
 | 超时与重试 | 脚本总超时默认 10 秒（可配置），上游超时 = `min(剩余脚本时间, opts.timeout_ms)`，并预留最多 100ms 的回复余量以避免与脚本硬超时竞态；默认不重试，`opts.retries` 显式开启且上限 3 次，只对传输层失败生效 | [ADR 0005](adr/0005-upstream-failure-semantics.md) |
@@ -47,7 +47,7 @@
 
 ## 4. 脚本 API 契约（半托管，已确认）
 
-脚本入口是一段 JS 或 Python 源码，宿主注入单一对象 `ctx`。
+脚本入口是一段 JS 源码，宿主注入单一对象 `ctx`（Python 为 v2 候选，见 [ADR 0015](adr/0015-python-runtime-deferred-to-v2.md)）。
 
 | 分组 | API | 约束 |
 | --- | --- | --- |
@@ -69,6 +69,7 @@
 | 响应推进 | 按调用次序变化的轮询状态机；v2 候选 | 本轮讨论 |
 | 资源模型自动 CRUD | json-server 式自动路由；v2 候选（作为路由模型的预设生成器） | [ADR 0002](adr/0002-route-model-only-in-v1.md) |
 | TypeScript 转译 | 不引入 swc/oxc；用户自行用 tsc/esbuild 编译为 `.js` | [ADR 0003](adr/0003-script-first-multi-runtime.md) |
+| Python 运行时 | v1 不提供；`.py` 脚本在 `validate` 直接拒绝；v2 候选 | [ADR 0015](adr/0015-python-runtime-deferred-to-v2.md) |
 | 第三方包 | 不支持 import / npm / pip | ADR 0003 |
 | 脚本写文件 | 不提供 `ctx.file.write`；上传由宿主落盘 | 本轮讨论 |
 | 上游自动重试 | 默认不重试；`opts.retries` 显式开启 | [ADR 0005](adr/0005-upstream-failure-semantics.md) |
@@ -81,8 +82,8 @@
 
 ## 6. 待定
 
-- 实际 MSRV：Rust 1.91（由 Boa 0.22 决定；clap 4.6 与 toml 1.x 要求 1.85）。策略是工具链跟随 stable、MSRV 取“安全门槛 + 依赖树”共同确定的实际最低值：不允许为压低 MSRV 保留未修复的 advisory 或未维护依赖。RustPython 接入后需重新校准。
-- v2 路线：SQLite 共享状态（ADR 0001 预留）、声明式响应序列、资源模型预设生成器、Admin API（模式 3）、内置 TLS。
+- 实际 MSRV：Rust 1.91（由 Boa 0.22 决定；clap 4.6 与 toml 1.x 要求 1.85）。策略是工具链跟随 stable、MSRV 取“安全门槛 + 依赖树”共同确定的实际最低值：不允许为压低 MSRV 保留未修复的 advisory 或未维护依赖。Python（RustPython）接入时需重新校准（见 [ADR 0015](adr/0015-python-runtime-deferred-to-v2.md)）。
+- v2 路线：Python 脚本运行时（[ADR 0015](adr/0015-python-runtime-deferred-to-v2.md)）、SQLite 共享状态（ADR 0001 预留）、声明式响应序列、资源模型预设生成器、Admin API（模式 3）、内置 TLS。
 - crates.io 包名保留与首个发布凭据配置。
 - 独立治理邮箱；当前 Code of Conduct 使用 GitHub 私密报告。
 - 自定义域名；当前使用 GitHub Pages。

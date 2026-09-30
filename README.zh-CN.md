@@ -6,7 +6,7 @@
 
 > **A test double that plays the whole show.**
 
-Stunt Double 是一个用 Rust 实现的 Mock Server，面向需要对接真实外部依赖的集成测试。它会读取上游接口、用内置 JavaScript 或 Python 变换数据、返回文件与二进制响应，并且不依赖宿主机上的 Node.js、Python 或 JVM。
+Stunt Double 是一个用 Rust 实现的 Mock Server，面向需要对接真实外部依赖的集成测试。它会读取上游接口、用内置 JavaScript 变换数据、返回文件与二进制响应，并且不依赖宿主机上的 Node.js、Python 或 JVM。
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#许可证)
 [![Status: upstream HTTP](https://img.shields.io/badge/status-upstream%20http-orange.svg)](#当前状态)
@@ -51,7 +51,6 @@ gh attestation verify stuntdouble-x86_64-unknown-linux-gnu.tar.gz --repo geeknon
 
 - 路由模型只有一条流水线：`match → source → transform → response`。
 - 内置 JavaScript 运行时：Boa。
-- 内置 Python 运行时：RustPython stdlib 子集。
 - 宿主注入 `ctx` API，不暴露裸 `fetch`、`fs`、`os`、`subprocess`、`socket`。
 - 上游 HTTP（`ctx.http.get` 与支持 Range 透传的流式 `ctx.http.pipe` 已实现，`ctx.http.request` 待后续切片）、`ctx.file` 读取、文件流、本地文件 Range 响应，以及通过 `ctx.request.files` 暴露的请求级 multipart 上传。
 - 唯一静态文件根，并阻止路径穿越。
@@ -65,6 +64,7 @@ gh attestation verify stuntdouble-x86_64-unknown-linux-gnu.tar.gz --repo geeknon
 - 响应推进。
 - 自动资源 CRUD。
 - TypeScript 转译。
+- Python 运行时（推迟到 v2，见 ADR 0015）。
 - npm、pip 或第三方导入。
 - 热重载、Admin API、GUI。
 - 内置 TLS 终止。

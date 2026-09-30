@@ -27,12 +27,12 @@ Mock Server 产品的功能边界（ADR 0001–0006）已收敛，需要从临�
 1. **展示名**：`Stunt Double`
 2. **技术标识**：`stuntdouble`（全小写、无连字符，crate / npm / 二进制 / 统一使用此名）
 3. **定位口号（Tagline）**：*A test double that plays the whole show.*
-   - 中文辅助定位：面向集成联调的 Mock Server：会读外部数据、能吐文件、内置 JS/Python 运行时，零外部环境依赖。
+   - 中文辅助定位：面向集成联调的 Mock Server：会读外部数据、能吐文件、内置 JS 运行时（Python 推迟到 v2，见 [ADR 0015](0015-python-runtime-deferred-to-v2.md)），零外部环境依赖。
 4. **仓库位置**：GitHub 组织 `geeknonerd` 下的 `stuntdouble` 仓库
 
 ## 理由
 
-- **隐喻对齐**：产品定位是做外部依赖的"替身"，且能完整演完全场（读真实外部接口、流式吐文件、执行 JS/Python 变换），与"特技替身（stunt double）"的角色同构。
+- **隐喻对齐**：产品定位是做外部依赖的"替身"，且能完整演完全场（读真实外部接口、流式吐文件、执行 JS 变换），与"特技替身（stunt double）"的角色同构。
 - **命名空间干净**：核心分发渠道 crates.io 与 npm 均全空闲，域名未被抢注。
 - **避免撞名**：避开已拥挤的 `mock-*` 前缀，建立独立品牌识别。
 
