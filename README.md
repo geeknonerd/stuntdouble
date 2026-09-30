@@ -88,7 +88,7 @@ Development documentation is written in Chinese; [ADR 0013](plans/adr/0013-docum
 - [Product definition](plans/product-definition.md) (Chinese) — v1 scope, host API, non-goals.
 - [Demo scenario](plans/demo-document-catalog.md) (Chinese) — CSV manifest and PDF download contract.
 - [Development and release workflow](docs/development.md) (Chinese) — branch, commit, CI, versioning, and release rules.
-- [Architecture decisions](plans/adr/) (Chinese) — ADR 0001–0016.
+- [Architecture decisions](plans/adr/) (Chinese) — ADR 0001–0017.
 - [Domain glossary](CONTEXT.md) (Chinese) — project vocabulary.
 - [Research](research/) (Chinese) — mock server landscape, runtimes, architecture, and open-source baseline.
 - [Repository documentation index](docs/README.md) (Chinese) — entry point for maintainers.

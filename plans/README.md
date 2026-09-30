@@ -6,7 +6,7 @@
 
 - [产品功能定义](product-definition.md) — v1 范围、宿主 API 契约与不做清单。
 - [示例文档清单](demo-document-catalog.md) — 生成 CSV 清单并下载 PDF 的公开演示场景。
-- [架构决策](adr/) — ADR 0001–0016。
+- [架构决策](adr/) — ADR 0001–0017。
 
 ## 决策记录
 
