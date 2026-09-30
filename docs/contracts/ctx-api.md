@@ -23,17 +23,17 @@ Within one `apiVersion`:
 | --- | --- | --- |
 | Request snapshot | `ctx.request.method` / `path` / `params` / `query` / `headers` / `bodyText` | implemented (T2) |
 | Request snapshot | `ctx.request.files` | implemented (T12) |
-| Request snapshot | `ctx.request.bodyBytes` | pending (not in this slice) |
+| Request snapshot | `ctx.request.bodyBytes` | deferred out of 1.0 (v1.x candidate, see ADR 0016) |
 | Upstream HTTP | `ctx.http.get` | implemented (T4) |
-| Upstream HTTP | `ctx.http.get` `opts.retries` / `backoff` | pending |
-| Upstream HTTP | `ctx.http.request` | pending |
+| Upstream HTTP | `ctx.http.get` `opts.retries` / `backoff` | deferred out of 1.0 (v1.x candidate, see ADR 0016) |
+| Upstream HTTP | `ctx.http.request` | deferred out of 1.0 (v1.x candidate, see ADR 0016) |
 | Binary passthrough | `ctx.http.pipe` | implemented (T6) |
 | Files | `ctx.file.readText` / `ctx.file.readBytes` / `ctx.file.stream` | implemented (T11) |
 | Response | `ctx.respond` | implemented (T2) |
-| Request-local state | `ctx.local` | pending |
+| Request-local state | `ctx.local` | deferred out of 1.0 (v2 candidate, see ADR 0016) |
 | Logging | `ctx.log.info` / `warn` / `error` | implemented (T2) |
 | Environment | `ctx.env` | implemented (T2) |
-| Timers | `setTimeout` / `setInterval` | pending |
+| Timers | `setTimeout` / `setInterval` | deferred out of 1.0 (v2 candidate, see ADR 0016) |
 
 ## Implemented subset
 
@@ -79,9 +79,9 @@ Within one `apiVersion`:
 - Scripts run in fresh worker processes under a host-owned pool of 4–16 concurrent slots derived from available parallelism. A matched Route whose script cannot get a slot fails fast without running it: 500 `script_error`, and `--verbose` adds the stable detail `script worker capacity exhausted`. When `sandbox.script_timeout_ms` expires, the host kills the worker process immediately and releases its slot.
 - On Linux, each worker applies `sandbox.script_memory_limit_mb` (default 256 MiB, minimum 64) as `RLIMIT_AS` on itself before script code runs. The bound is virtual address space, not RSS; a worker stopped by it answers 500 `script_error`, and `--verbose` adds the stable detail `script exceeded the configured memory limit`. macOS cannot enforce a useful `RLIMIT_AS` bound in this slice, and Windows has no memory limit yet: both keep process isolation and the deadline but have no hard memory bound.
 
-## Pending capabilities
+## Deferred capabilities
 
-The following capabilities are part of the longer v1 plan but are not implemented yet. They are intentionally absent from `ctx` and from `types/ctx-api-v1.d.ts`; calling an absent member is an ordinary script error and maps to 500 `script_error`.
+The following capabilities are deferred out of 1.0 by [ADR 0016](../../plans/adr/0016-v1-ctx-pending-capabilities-deferred.md) and are not implemented. They are intentionally absent from `ctx` and from `types/ctx-api-v1.d.ts`; calling an absent member is an ordinary script error and maps to 500 `script_error`.
 
 - `ctx.request.bodyBytes`
 - `ctx.http.request` and `ctx.http.get` retry/backoff options

@@ -1,7 +1,7 @@
 # Mock Server 产品功能定义
 
 - 状态：`功能已收敛`（配置文件主格式已确认，公开契约已在 T8 冻结）
-- 更新：2026-09-30（Python 推迟到 v2，见 ADR 0015）
+- 更新：2026-09-30（Python 推迟到 v2，见 ADR 0015；未实现 `ctx` 能力移出 1.0，见 ADR 0016）
 - 关联：[Mock 服务选型调研](../research/mock-server-landscape.md)、[示例文档清单与二进制下载场景](demo-document-catalog.md)、[配置契约](../docs/contracts/config.md)、[ctx API 契约](../docs/contracts/ctx-api.md)、[CLI 契约](../docs/contracts/cli.md)
 
 ## 1. 产品命题与定位
@@ -30,7 +30,7 @@
 | 变换表达力边界 | 完全脚本化，不做私有模板 DSL；脚本语言为 JS（第一版）；Python 为 v2 候选 | [ADR 0003](adr/0003-script-first-multi-runtime.md)、[ADR 0015](adr/0015-python-runtime-deferred-to-v2.md) |
 | 文件 I/O 语义 | 静态文件目录为唯一文件根：配置声明，脚本文件操作只能在该目录内，相对路径默认解析到此根；上传由宿主解析 multipart 并落到系统临时目录下的每请求独立随机子目录（Unix 0700，脚本不可见路径），请求结束清理；响应侧支持流式透传与本地文件流，Range 透传/支持；纯内存响应不支持 Range；上传上限默认 20MB（可配置） | 本轮讨论 |
 | 上游失败语义 | 以"是否拿到 HTTP 响应"为唯一分界：有响应则视为数据、默认透传状态码（脚本可改写）；传输层失败抛异常，未捕获返回 502 + `request_id`；脚本异常返回 500；脚本未调用 `respond` 视为逻辑错误 | [ADR 0005](adr/0005-upstream-failure-semantics.md) |
-| 超时与重试 | 脚本总超时默认 10 秒（可配置），上游超时 = `min(剩余脚本时间, opts.timeout_ms)`，并预留最多 100ms 的回复余量以避免与脚本硬超时竞态；默认不重试，`opts.retries` 显式开启且上限 3 次，只对传输层失败生效 | [ADR 0005](adr/0005-upstream-failure-semantics.md) |
+| 超时与重试 | 脚本总超时默认 10 秒（可配置），上游超时 = `min(剩余脚本时间, opts.timeout_ms)`，并预留最多 100ms 的回复余量以避免与脚本硬超时竞态；默认不重试（`opts.retries` 移出 1.0，见 ADR 0016） | [ADR 0005](adr/0005-upstream-failure-semantics.md)、[ADR 0016](adr/0016-v1-ctx-pending-capabilities-deferred.md) |
 | 可观测性 | 每请求一条结构化日志（request_id/路由/耗时/上游链/状态码/错误分类）；默认不记录请求体与响应体；诊断开关附加 `detail`；堆栈永不进响应 | [ADR 0005](adr/0005-upstream-failure-semantics.md) |
 | 响应推进 | **不进第一版**，列入不做清单；v2 可加声明式响应序列或脚本 `callCount` 数字 | 本轮讨论 |
 | 目标平台与分发 | 核心二进制：Linux x86_64、macOS arm64、Windows x86_64；分发：GitHub Releases 二进制 + 容器镜像（`linux/amd64`、`linux/arm64`）；GUI（如未来做）优先 Linux + macOS | 本轮讨论 |
@@ -51,14 +51,14 @@
 
 | 分组 | API | 约束 |
 | --- | --- | --- |
-| 请求只读 | `ctx.request`: `method` / `path` / `params` / `query` / `headers` / `bodyText` / `bodyBytes` | 只读；不暴露原始 socket |
-| 外部取数 | `ctx.http.get(url, opts)` / `ctx.http.request(method, url, opts)` | 仅白名单 host；`ctx.http.get` 于 T4 实现（`timeout_ms`；`retries` / `backoff` 后续切片），`ctx.http.request` 后续切片；返回 `{status, headers, text(), bytes()}` |
+| 请求只读 | `ctx.request`: `method` / `path` / `params` / `query` / `headers` / `bodyText`（`bodyBytes` 移出 1.0，见 ADR 0016） | 只读；不暴露原始 socket |
+| 外部取数 | `ctx.http.get(url, opts)`（`opts` 仅 `timeout_ms`；`retries` / `backoff` 与 `ctx.http.request` 移出 1.0，见 ADR 0016） | 仅白名单 host；返回 `{status, headers, text(), bytes()}` |
 | 二进制透传 | `ctx.http.pipe(url, {status, headers})` | 于 T6 实现；上游 2xx 响应体直接流到客户端，不进脚本堆内存；默认透传上游 2xx 状态并转发 Range/206；不做字节级变换 |
 | 读文件 | `ctx.file.readText(p)` / `ctx.file.readBytes(p)` / `ctx.file.stream(p)` | 只读；路径相对静态文件目录解析；拒绝绝对路径与 `..`；v1 不提供脚本写文件能力（上传由宿主落盘） |
 | 响应 | `ctx.respond(status, headers, body)`；body 为 string / bytes / 文件流引用 | 文件流引用支持 Range；纯内存 body 不支持 Range；不调用则视为未产生响应（固定错误码，不静默 200） |
-| 请求内暂存 | `ctx.local`（键值，随请求销毁） | **不跨请求**（ADR 0001）；与"共享状态"严格区分 |
+| 请求内暂存 | 未提供（`ctx.local` 移出 1.0，见 ADR 0016） | **不跨请求**（ADR 0001）；与"共享状态"严格区分 |
 | 日志 | `ctx.log.info/warn/error` | 只进服务端日志，绝不出现在响应里 |
-| 定时 | `setTimeout` / `setInterval`（boa_runtime） | 受整体脚本超时截断 |
+| 定时 | 未提供（`setTimeout` / `setInterval` 移出 1.0，见 ADR 0016） | 不适用 |
 | 不可用 | `require` / `import` / `fetch` / `fs` / `process` / Python `os`、`subprocess`、`socket` | 不注入即不可见 |
 
 ## 5. 明确不做清单（第一版）
@@ -72,7 +72,11 @@
 | Python 运行时 | v1 不提供；`.py` 脚本在 `validate` 直接拒绝；v2 候选 | [ADR 0015](adr/0015-python-runtime-deferred-to-v2.md) |
 | 第三方包 | 不支持 import / npm / pip | ADR 0003 |
 | 脚本写文件 | 不提供 `ctx.file.write`；上传由宿主落盘 | 本轮讨论 |
-| 上游自动重试 | 默认不重试；`opts.retries` 显式开启 | [ADR 0005](adr/0005-upstream-failure-semantics.md) |
+| 上游自动重试 | 默认不重试；`opts.retries` 显式开启（v1.x 候选，见 ADR 0016） | [ADR 0005](adr/0005-upstream-failure-semantics.md) |
+| 请求二进制快照 | `ctx.request.bodyBytes` 不提供；非 UTF-8 用 `bodyText: null` 表达（v1.x 候选，见 ADR 0016） | [ADR 0016](adr/0016-v1-ctx-pending-capabilities-deferred.md) |
+| 上游任意方法 | `ctx.http.request` 不提供；先用 `ctx.http.get` / `ctx.http.pipe`（v1.x 候选，见 ADR 0016） | [ADR 0016](adr/0016-v1-ctx-pending-capabilities-deferred.md) |
+| 请求内暂存 | `ctx.local` 不提供（v2 候选，见 ADR 0016） | [ADR 0001](adr/0001-no-shared-state-in-v1.md)、[ADR 0016](adr/0016-v1-ctx-pending-capabilities-deferred.md) |
+| 脚本定时器 | `setTimeout` / `setInterval` 不提供（v2 候选，见 ADR 0016） | [ADR 0016](adr/0016-v1-ctx-pending-capabilities-deferred.md) |
 | 热重载与管理 API | v1 只做"改配置文件 + 重启"（模式 1） | [架构设计最佳实践调研](../research/architecture-best-practices.md) |
 | GUI / 桌面端 | v1 不做；如未来做，优先 Linux + macOS | 本轮讨论 |
 | HTTP 之外的协议 | 不支持 WebSocket / GraphQL / gRPC；v1 仅 HTTP/1.1 | 本轮讨论 |
@@ -83,7 +87,8 @@
 ## 6. 待定
 
 - 实际 MSRV：Rust 1.91（由 Boa 0.22 决定；clap 4.6 与 toml 1.x 要求 1.85）。策略是工具链跟随 stable、MSRV 取“安全门槛 + 依赖树”共同确定的实际最低值：不允许为压低 MSRV 保留未修复的 advisory 或未维护依赖。Python（RustPython）接入时需重新校准（见 [ADR 0015](adr/0015-python-runtime-deferred-to-v2.md)）。
-- v2 路线：Python 脚本运行时（[ADR 0015](adr/0015-python-runtime-deferred-to-v2.md)）、SQLite 共享状态（ADR 0001 预留）、声明式响应序列、资源模型预设生成器、Admin API（模式 3）、内置 TLS。
+- v2 路线：Python 脚本运行时（[ADR 0015](adr/0015-python-runtime-deferred-to-v2.md)）、SQLite 共享状态（ADR 0001 预留）、声明式响应序列、资源模型预设生成器、Admin API（模式 3）、内置 TLS、`ctx.local`、脚本定时器（均见 [ADR 0016](adr/0016-v1-ctx-pending-capabilities-deferred.md)）。
+- v1.x 候选（`apiVersion` 1 内增量）：`ctx.request.bodyBytes`、`ctx.http.get` 的 `retries` / `backoff`、`ctx.http.request`（见 [ADR 0016](adr/0016-v1-ctx-pending-capabilities-deferred.md)）。
 - crates.io 包名保留与首个发布凭据配置。
 - 独立治理邮箱；当前 Code of Conduct 使用 GitHub 私密报告。
 - 自定义域名；当前使用 GitHub Pages。

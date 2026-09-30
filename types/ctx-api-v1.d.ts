@@ -3,9 +3,9 @@
 // This file is part of the public contract; the release artifact set defined by
 // plans/adr/0012-release-artifacts-and-supply-chain.md must include it. T9 wires
 // the release pipeline.
-// It covers the implemented subset through T1-T12; pending capabilities
-// are intentionally absent until they land. Keep this file in sync with
-// docs/contracts/ctx-api.md.
+// It covers the implemented subset through T1-T12; capabilities deferred by
+// plans/adr/0016-v1-ctx-pending-capabilities-deferred.md are intentionally
+// absent. Keep this file in sync with docs/contracts/ctx-api.md.
 
 /** A read-only snapshot of the incoming client request. */
 interface SdRequest {

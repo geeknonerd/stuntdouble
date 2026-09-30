@@ -25,17 +25,17 @@
 | --- | --- | --- |
 | 请求快照 | `ctx.request.method` / `path` / `params` / `query` / `headers` / `bodyText` | 已实现（T2） |
 | 请求快照 | `ctx.request.files` | 已实现（T12） |
-| 请求快照 | `ctx.request.bodyBytes` | pending（不在本切片） |
+| 请求快照 | `ctx.request.bodyBytes` | 已移出 1.0（v1.x 候选，见 ADR 0016） |
 | 上游 HTTP | `ctx.http.get` | 已实现（T4） |
-| 上游 HTTP | `ctx.http.get` 的 `opts.retries` / `backoff` | pending |
-| 上游 HTTP | `ctx.http.request` | pending |
+| 上游 HTTP | `ctx.http.get` 的 `opts.retries` / `backoff` | 已移出 1.0（v1.x 候选，见 ADR 0016） |
+| 上游 HTTP | `ctx.http.request` | 已移出 1.0（v1.x 候选，见 ADR 0016） |
 | 二进制透传 | `ctx.http.pipe` | 已实现（T6） |
 | 文件 | `ctx.file.readText` / `ctx.file.readBytes` / `ctx.file.stream` | 已实现（T11） |
 | 响应 | `ctx.respond` | 已实现（T2） |
-| 请求内状态 | `ctx.local` | pending |
+| 请求内状态 | `ctx.local` | 已移出 1.0（v2 候选，见 ADR 0016） |
 | 日志 | `ctx.log.info` / `warn` / `error` | 已实现（T2） |
 | 环境变量 | `ctx.env` | 已实现（T2） |
-| 定时器 | `setTimeout` / `setInterval` | pending |
+| 定时器 | `setTimeout` / `setInterval` | 已移出 1.0（v2 候选，见 ADR 0016） |
 
 ## 已实现的子集
 
@@ -81,9 +81,9 @@
 - 脚本在全新的 worker 进程中运行；宿主拥有的并发槽位池为 4–16 个，数量按可用并行度推导。命中 Route 的脚本拿不到槽位时不会运行，而是快速失败：500 `script_error`；`--verbose` 附加稳定 detail `script worker capacity exhausted`。`sandbox.script_timeout_ms` 到期时，宿主立即杀死 worker 进程并释放其槽位。
 - Linux 上每个 worker 会在脚本代码运行前把 `sandbox.script_memory_limit_mb`（默认 256 MiB，最低 64）作为 `RLIMIT_AS` 应用到自身。该上限约束虚拟地址空间而非 RSS；因此停止的 worker 返回 500 `script_error`，`--verbose` 附加稳定 detail `script exceeded the configured memory limit`。本切片中 macOS 无法用 `RLIMIT_AS` 建立有用的上界，Windows 也尚无内存限制：两者保留进程隔离与 deadline，但没有硬内存上限。
 
-## Pending 能力
+## 已推迟能力
 
-以下能力属于更长的 v1 计划，但尚未实现。它们有意不出现在 `ctx` 与 `types/ctx-api-v1.d.ts` 中；调用不存在的成员是普通脚本错误，映射为 500 `script_error`。
+以下能力经 [ADR 0016](../../plans/adr/0016-v1-ctx-pending-capabilities-deferred.md) 移出 1.0，尚未实现。它们有意不出现在 `ctx` 与 `types/ctx-api-v1.d.ts` 中；调用不存在的成员是普通脚本错误，映射为 500 `script_error`。
 
 - `ctx.request.bodyBytes`
 - `ctx.http.request` 与 `ctx.http.get` 的 retry/backoff 选项

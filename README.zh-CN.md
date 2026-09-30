@@ -52,7 +52,7 @@ gh attestation verify stuntdouble-x86_64-unknown-linux-gnu.tar.gz --repo geeknon
 - 路由模型只有一条流水线：`match → source → transform → response`。
 - 内置 JavaScript 运行时：Boa。
 - 宿主注入 `ctx` API，不暴露裸 `fetch`、`fs`、`os`、`subprocess`、`socket`。
-- 上游 HTTP（`ctx.http.get` 与支持 Range 透传的流式 `ctx.http.pipe` 已实现，`ctx.http.request` 待后续切片）、`ctx.file` 读取、文件流、本地文件 Range 响应，以及通过 `ctx.request.files` 暴露的请求级 multipart 上传。
+- 上游 HTTP（`ctx.http.get` 与支持 Range 透传的流式 `ctx.http.pipe` 已实现，`ctx.http.request` 已移出 1.0，见 ADR 0016）、`ctx.file` 读取、文件流、本地文件 Range 响应，以及通过 `ctx.request.files` 暴露的请求级 multipart 上传。
 - 唯一静态文件根，并阻止路径穿越。
 - 静态配置 + 重启。热重载与 Admin API 推迟。
 - Linux x86_64、macOS arm64、Windows x86_64 二进制与 `linux/amd64`、`linux/arm64` 双平台容器镜像（T9 已配置发布自动化）。

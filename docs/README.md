@@ -17,7 +17,7 @@
 - [中文 README](../README.zh-CN.md) — 中文项目说明。
 - [产品功能定义](../plans/product-definition.md) — v1 范围与不做清单。
 - [演示夹具](../demo/README.md) — 可运行的清单场景、上游覆盖、离线文件路由（本地清单、本地下载与上传）、契约与错误映射。
-- [架构决策](../plans/adr/) — ADR 0001–0015。
+- [架构决策](../plans/adr/) — ADR 0001–0016。
 - [调研](../research/) — mock server 生态、运行时选型与开源基线。
 - [解决方案](solutions/) — 经 ce-compound 沉淀的经验与已解决问题。
 - [`ctx` API 类型定义](../types/ctx-api-v1.d.ts) — v1 切片冻结的 `apiVersion` 1 源码类型；发布产物契约要求每个版本包含，T9 接入发布流水线。

@@ -52,7 +52,7 @@ The trigger chain and the release checklist live in [docs/development.md](docs/d
 - Route model with one pipeline: `match → source → transform → response`.
 - Built-in JavaScript runtime: Boa.
 - Host-injected `ctx` API. No raw `fetch`, `fs`, `os`, `subprocess`, or `socket`.
-- Upstream HTTP (`ctx.http.get` plus streaming `ctx.http.pipe` with Range passthrough; `ctx.http.request` pending) and `ctx.file` reads, file streaming, local file Range responses, and request-scoped multipart uploads exposed through `ctx.request.files`.
+- Upstream HTTP (`ctx.http.get` plus streaming `ctx.http.pipe` with Range passthrough; `ctx.http.request` deferred out of 1.0, see ADR 0016) and `ctx.file` reads, file streaming, local file Range responses, and request-scoped multipart uploads exposed through `ctx.request.files`.
 - One static file root with path traversal protection.
 - Static configuration with restart. Hot reload and Admin API are deferred.
 - Linux x86_64, macOS arm64, and Windows x86_64 binaries plus a `linux/amd64` and `linux/arm64` container image (release automation configured in T9).
@@ -88,7 +88,7 @@ Development documentation is written in Chinese; [ADR 0013](plans/adr/0013-docum
 - [Product definition](plans/product-definition.md) (Chinese) — v1 scope, host API, non-goals.
 - [Demo scenario](plans/demo-document-catalog.md) (Chinese) — CSV manifest and PDF download contract.
 - [Development and release workflow](docs/development.md) (Chinese) — branch, commit, CI, versioning, and release rules.
-- [Architecture decisions](plans/adr/) (Chinese) — ADR 0001–0015.
+- [Architecture decisions](plans/adr/) (Chinese) — ADR 0001–0016.
 - [Domain glossary](CONTEXT.md) (Chinese) — project vocabulary.
 - [Research](research/) (Chinese) — mock server landscape, runtimes, architecture, and open-source baseline.
 - [Repository documentation index](docs/README.md) (Chinese) — entry point for maintainers.
