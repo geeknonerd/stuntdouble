@@ -1243,7 +1243,7 @@ impl HostState {
             client_range,
             calls,
         );
-        let files = files::FileAccess::new(&files_config.root, Arc::clone(&file_calls));
+        let files = files::FileAccess::new(&files_config.root, file_calls.clone());
         let uploads = uploads.map(|store| files::UploadAccess::new(store, file_calls));
         Self {
             upstream: Some(upstream),
@@ -1597,8 +1597,8 @@ pub async fn execute(
         .checked_add(timeout)
         .unwrap_or_else(Instant::now);
     let deadline = tokio::time::Instant::from_std(script_deadline);
-    let calls: upstream::CallLog = Arc::new(Mutex::new(Vec::new()));
-    let file_calls: files::CallLog = Arc::new(Mutex::new(Vec::new()));
+    let calls: upstream::CallLog = upstream::CallLog::new();
+    let file_calls: files::CallLog = files::CallLog::new();
     let client_range = request
         .headers
         .iter()
@@ -1610,8 +1610,8 @@ pub async fn execute(
         uploads.clone(),
         script_deadline,
         client_range,
-        Arc::clone(&calls),
-        Arc::clone(&file_calls),
+        calls.clone(),
+        file_calls.clone(),
     )));
     let job = ParentMessage::Job {
         script: source,
@@ -1632,7 +1632,7 @@ pub async fn execute(
             store.close();
         }
     }
-    outcome.upstream_calls = upstream::calls_json(&calls);
+    outcome.upstream_calls = calls.snapshot();
     outcome.file_calls = file_calls;
     outcome
 }

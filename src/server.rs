@@ -5,7 +5,7 @@ use crate::config::Config;
 use crate::files;
 use crate::matcher::match_route;
 use crate::script::{self, RequestSnapshot, ResponseBody, ScriptResponse};
-use crate::upstream;
+use crate::{request_log::elapsed_ms, upstream};
 use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE};
@@ -285,7 +285,7 @@ impl AppState {
                 route.script.display()
             ))),
         };
-        let script_duration_ms = Some(elapsed_ms(script_started));
+        let script_duration_ms = Some(elapsed_ms(script_started.elapsed()));
         let script::Outcome {
             response,
             logs,
@@ -489,14 +489,14 @@ async fn handle(State(state): State<Arc<AppState>>, request: Request) -> Respons
         "path": path,
         "status": mapped.status.as_u16(),
         "error": mapped.error_class,
-        "elapsed_ms": elapsed_ms(started),
+        "elapsed_ms": elapsed_ms(started.elapsed()),
         "script_duration_ms": script_duration_ms,
         "request_body_bytes": request_body_bytes,
         "response_body_bytes": mapped.body_bytes,
         "request_headers": request_header_log,
         "response_headers": response_header_log,
         "upstream_calls": upstream_calls,
-        "file_calls": files::calls_json(&file_calls),
+        "file_calls": file_calls.snapshot(),
         "upload": upload,
         "params": params,
         "client_request_id": client_request_id,
@@ -848,11 +848,6 @@ fn framing_header(headers: &HeaderMap) -> Option<&HeaderName> {
         .find(|name| headers.contains_key(*name))
 }
 
-fn elapsed_ms(started: Instant) -> f64 {
-    let millis = started.elapsed().as_secs_f64() * 1000.0;
-    (millis * 100.0).round() / 100.0
-}
-
 /// Relay a piped body to the client and write the request log when it ends.
 /// The status line is already on the wire, so a mid-stream failure is recorded
 /// in the log without changing the client-visible status.
@@ -921,8 +916,8 @@ async fn relay_stream(
     }
     call.finish(outcome, bytes);
     payload["response_body_bytes"] = json!(bytes);
-    payload["elapsed_ms"] = json!(elapsed_ms(started));
-    payload["upstream_calls"] = json!(call.calls_json());
+    payload["elapsed_ms"] = json!(elapsed_ms(started.elapsed()));
+    payload["upstream_calls"] = json!(call.snapshot());
     if let Some(class) = outcome.error_class() {
         payload["error"] = json!(class);
     }
@@ -1002,8 +997,8 @@ async fn relay_file_stream(
     }
     call.finish(outcome, bytes);
     payload["response_body_bytes"] = json!(bytes);
-    payload["elapsed_ms"] = json!(elapsed_ms(started));
-    payload["file_calls"] = json!(call.calls_json());
+    payload["elapsed_ms"] = json!(elapsed_ms(started.elapsed()));
+    payload["file_calls"] = json!(call.snapshot());
     if let Some(class) = outcome.error_class() {
         payload["error"] = json!(class);
     }

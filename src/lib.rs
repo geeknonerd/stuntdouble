@@ -3,6 +3,7 @@
 pub mod config;
 mod files;
 pub mod matcher;
+mod request_log;
 pub mod script;
 pub mod server;
 mod upstream;
