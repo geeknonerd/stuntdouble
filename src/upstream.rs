@@ -8,14 +8,14 @@
 //! channel of frames, so bytes never enter the script heap.
 use std::cell::OnceCell;
 use std::io::Read;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use serde_json::{json, Value as Json};
 use url::{Host as UrlHost, Url};
+
+use crate::request_log::{elapsed_ms, Chain, LogRecord, Pending};
 
 /// Maximum redirects followed after the initial request.
 const MAX_REDIRECTS: u8 = 3;
@@ -58,10 +58,11 @@ impl CallRecord {
             kind: None,
         }
     }
+}
 
+impl LogRecord for CallRecord {
     /// Log shape shared by every upstream call. Query strings never enter it.
-    #[must_use]
-    pub fn to_json(&self) -> Json {
+    fn to_json(&self) -> Json {
         json!({
             "api": self.api,
             "host": self.host,
@@ -74,20 +75,19 @@ impl CallRecord {
             "kind": self.kind,
         })
     }
+
+    fn set_duration_ms(&mut self, ms: f64) {
+        self.duration_ms = Some(ms);
+    }
+
+    fn set_bytes(&mut self, bytes: u64) {
+        self.response_bytes = Some(bytes);
+    }
 }
 
 /// Shared per-request upstream call chain. The worker thread appends; the
 /// request handler reads it even when a timeout orphans the worker.
-pub type CallLog = Arc<Mutex<Vec<CallRecord>>>;
-
-/// Snapshot a request's upstream call chain for the structured log.
-#[must_use]
-pub fn calls_json(calls: &CallLog) -> Vec<Json> {
-    calls.lock().map_or_else(
-        |_| Vec::new(),
-        |calls| calls.iter().map(CallRecord::to_json).collect(),
-    )
-}
+pub type CallLog = Chain<CallRecord>;
 
 /// Per-request allowlist and timeout guard for upstream calls.
 #[derive(Debug)]
@@ -149,57 +149,17 @@ impl StreamOutcome {
 /// Handle used to finalize one piped call after its body ends. Dropping it
 /// without an explicit finish records an abandoned stream, so the call chain
 /// never keeps a half-open entry when a script discards a piped response.
-#[derive(Debug)]
-pub struct StreamCall {
-    calls: CallLog,
-    index: usize,
-    started: Instant,
-    finished: AtomicBool,
-}
+pub type StreamCall = Pending<CallRecord>;
 
-impl StreamCall {
-    fn new(calls: CallLog, index: usize, started: Instant) -> Self {
-        Self {
-            calls,
-            index,
-            started,
-            finished: AtomicBool::new(false),
-        }
-    }
-
+impl Pending<CallRecord> {
     /// Finalize this call with the outcome of its body stream.
     pub fn finish(&self, outcome: StreamOutcome, bytes: u64) {
-        self.finalize(Some(outcome), bytes);
-    }
-
-    fn finalize(&self, outcome: Option<StreamOutcome>, bytes: u64) {
-        if self.finished.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        let Ok(mut calls) = self.calls.lock() else {
-            return;
-        };
-        let Some(record) = calls.get_mut(self.index) else {
-            return;
-        };
-        record.duration_ms = Some(elapsed_ms(self.started.elapsed()));
-        record.response_bytes = Some(bytes);
-        if outcome == Some(StreamOutcome::UpstreamError) {
-            record.error = Some("upstream_stream_error");
-            record.kind = Some("transport");
-        }
-    }
-
-    /// Snapshot the call chain after this stream finalized it.
-    #[must_use]
-    pub fn calls_json(&self) -> Vec<Json> {
-        calls_json(&self.calls)
-    }
-}
-
-impl Drop for StreamCall {
-    fn drop(&mut self) {
-        self.finalize(None, 0);
+        self.finish_with(bytes, |record| {
+            if outcome == StreamOutcome::UpstreamError {
+                record.error = Some("upstream_stream_error");
+                record.kind = Some("transport");
+            }
+        });
     }
 }
 
@@ -450,20 +410,11 @@ impl UpstreamAccess {
     }
 
     fn begin_call(&self, api: &'static str) -> usize {
-        let Ok(mut calls) = self.calls.lock() else {
-            return usize::MAX;
-        };
-        calls.push(CallRecord::new(api));
-        calls.len() - 1
+        self.calls.begin(CallRecord::new(api))
     }
 
     fn update_call(&self, index: usize, update: impl FnOnce(&mut CallRecord)) {
-        let Ok(mut calls) = self.calls.lock() else {
-            return;
-        };
-        if let Some(record) = calls.get_mut(index) {
-            update(record);
-        }
+        self.calls.update(index, update);
     }
 
     fn finish_call(&self, index: usize, started: Instant, error: Option<&Error>) {
@@ -726,10 +677,6 @@ struct PipeCall {
 /// Time left for the script itself to catch and map a transport error.
 fn reply_margin(remaining: Duration) -> Duration {
     std::cmp::min(remaining / 10, Duration::from_millis(100))
-}
-
-fn elapsed_ms(elapsed: Duration) -> f64 {
-    (elapsed.as_secs_f64() * 1000.0 * 100.0).round() / 100.0
 }
 
 fn timeout_error() -> Error {

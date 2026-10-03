@@ -17,9 +17,10 @@ use std::cell::RefCell;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
+
+use crate::request_log::{elapsed_ms, Chain, LogRecord, Pending};
 
 use serde_json::{json, Value as Json};
 use tempfile::TempDir;
@@ -109,10 +110,11 @@ impl CallRecord {
             error: None,
         }
     }
+}
 
+impl LogRecord for CallRecord {
     /// Log shape shared by every file call. Paths never enter it.
-    #[must_use]
-    pub fn to_json(&self) -> Json {
+    fn to_json(&self) -> Json {
         json!({
             "api": self.api,
             "bytes": self.bytes,
@@ -120,20 +122,19 @@ impl CallRecord {
             "error": self.error,
         })
     }
+
+    fn set_duration_ms(&mut self, ms: f64) {
+        self.duration_ms = Some(ms);
+    }
+
+    fn set_bytes(&mut self, bytes: u64) {
+        self.bytes = Some(bytes);
+    }
 }
 
 /// Shared per-request file call chain. The worker thread appends; the request
 /// handler reads it even when a timeout orphans the worker.
-pub type CallLog = Arc<Mutex<Vec<CallRecord>>>;
-
-/// Snapshot a request's file call chain for the structured log.
-#[must_use]
-pub fn calls_json(calls: &CallLog) -> Vec<Json> {
-    calls.lock().map_or_else(
-        |_| Vec::new(),
-        |calls| calls.iter().map(CallRecord::to_json).collect(),
-    )
-}
+pub type CallLog = Chain<CallRecord>;
 
 /// `Content-Type` media type that selects the multipart parser.
 const MULTIPART_CONTENT_TYPE: &str = "multipart/form-data";
@@ -567,7 +568,7 @@ impl UploadAccess {
         }
         let file = File::open(path).map_err(|error| map_open_error(&error))?;
         let size = metadata.len();
-        let call = CallHandle::new(Arc::clone(&self.calls), call_index, started);
+        let call = Pending::new(self.calls.clone(), call_index, started);
         let body = FileBody {
             file,
             size,
@@ -620,11 +621,7 @@ fn read_capped_file(file: File, size: u64) -> Result<Vec<u8>, Error> {
 
 /// Append one file call and return its slot in the shared per-request log.
 fn begin_call(calls: &CallLog, api: &'static str) -> usize {
-    let mut calls = calls
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    calls.push(CallRecord::new(api));
-    calls.len().saturating_sub(1)
+    calls.begin(CallRecord::new(api))
 }
 
 fn finish_call(
@@ -634,15 +631,12 @@ fn finish_call(
     bytes: Option<u64>,
     error: Option<&'static str>,
 ) {
-    let mut calls = calls
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let Some(record) = calls.get_mut(index) else {
-        return;
-    };
-    record.bytes = bytes;
-    record.duration_ms = Some(elapsed_ms(started.elapsed()));
-    record.error = error;
+    let ms = elapsed_ms(started.elapsed());
+    calls.update(index, |record| {
+        record.bytes = bytes;
+        record.duration_ms = Some(ms);
+        record.error = error;
+    });
 }
 
 /// Request-scoped access rooted at the configured static file root.
@@ -731,7 +725,7 @@ impl FileAccess {
                 return Err(error);
             }
         };
-        let call = CallHandle::new(Arc::clone(&self.calls), index, started);
+        let call = Pending::new(self.calls.clone(), index, started);
         let body = FileBody {
             file,
             size,
@@ -855,11 +849,6 @@ fn map_open_error(error: &std::io::Error) -> Error {
     }
 }
 
-fn elapsed_ms(elapsed: Duration) -> f64 {
-    let millis = elapsed.as_secs_f64() * 1000.0;
-    (millis * 100.0).round() / 100.0
-}
-
 /// Single-range decision for one streamed file Response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RangeDecision {
@@ -980,57 +969,14 @@ impl StreamOutcome {
 
 /// Handle that finalizes one `ctx.file.stream` call when its body ends, or
 /// when the script discards the handle without using it.
-#[derive(Debug)]
-pub struct CallHandle {
-    calls: CallLog,
-    index: usize,
-    started: Instant,
-    finished: AtomicBool,
-}
+pub type CallHandle = Pending<CallRecord>;
 
-impl CallHandle {
-    fn new(calls: CallLog, index: usize, started: Instant) -> Self {
-        Self {
-            calls,
-            index,
-            started,
-            finished: AtomicBool::new(false),
-        }
-    }
-
+impl Pending<CallRecord> {
     /// Finalize this call with the outcome of its body stream.
     pub fn finish(&self, outcome: StreamOutcome, bytes: u64) {
-        self.finalize(Some(outcome), bytes);
-    }
-
-    fn finalize(&self, outcome: Option<StreamOutcome>, bytes: u64) {
-        if self.finished.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        let mut calls = self
-            .calls
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(record) = calls.get_mut(self.index) else {
-            return;
-        };
-        record.duration_ms = Some(elapsed_ms(self.started.elapsed()));
-        record.bytes = Some(bytes);
-        if let Some(outcome) = outcome {
+        self.finish_with(bytes, |record| {
             record.error = outcome.error_class();
-        }
-    }
-
-    /// Snapshot the call chain after this stream finalized it.
-    #[must_use]
-    pub fn calls_json(&self) -> Vec<Json> {
-        calls_json(&self.calls)
-    }
-}
-
-impl Drop for CallHandle {
-    fn drop(&mut self) {
-        self.finalize(None, 0);
+        });
     }
 }
 
@@ -1064,14 +1010,14 @@ mod tests {
             }],
             total_bytes: 4,
         });
-        let calls: CallLog = Arc::new(Mutex::new(Vec::new()));
-        let access = UploadAccess::new(Arc::clone(&store), Arc::clone(&calls));
+        let calls: CallLog = Chain::new();
+        let access = UploadAccess::new(Arc::clone(&store), calls.clone());
         store.close();
 
         let result = access.call(&json!({ "op": "stream", "index": 0 }));
         assert_eq!(result["ok"], false);
         assert_eq!(result["code"], "file_not_found");
-        let calls = calls_json(&calls);
+        let calls = calls.snapshot();
         assert_eq!(calls.len(), 1, "calls: {calls:?}");
         assert_eq!(calls[0]["api"], "upload.stream");
         assert_eq!(calls[0]["error"], "file_not_found");

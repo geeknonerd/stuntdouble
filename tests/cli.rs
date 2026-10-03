@@ -2801,6 +2801,7 @@ ctx.respond(200, {}, "unreachable");
 }
 
 #[test]
+#[allow(unknown_lints, clippy::assert_is_empty)]
 fn upload_stream_reuses_file_range_and_framing_rules() {
     let dir = tempfile::tempdir().expect("tempdir");
     let script = r#"
