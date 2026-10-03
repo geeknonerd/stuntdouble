@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1](https://github.com/geeknonerd/stuntdouble/compare/v1.0.0...v1.0.1) - 2026-10-03
+
+### Other
+
+- unify upstream and file call chains in request_log ([#125](https://github.com/geeknonerd/stuntdouble/pull/125))
+- converge post-1.0 tense after v1.0.0 release ([#122](https://github.com/geeknonerd/stuntdouble/pull/122))
+
 ## [1.0.0](https://github.com/geeknonerd/stuntdouble/compare/v0.5.3...v1.0.0) - 2026-09-30
 
 ### Other
