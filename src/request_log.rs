@@ -252,6 +252,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unknown_lints, clippy::assert_is_empty)]
     fn out_of_range_updates_are_noops() {
         let chain: Chain<Record> = Chain::new();
         chain.update(usize::MAX, |_| panic!("must not run"));

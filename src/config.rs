@@ -854,6 +854,7 @@ script = "scripts/x.js"
     }
 
     #[test]
+    #[allow(unknown_lints, clippy::assert_is_empty)]
     fn upstream_defaults_deny_every_host_with_a_fifteen_second_timeout() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = write_config(dir.path(), minimal());

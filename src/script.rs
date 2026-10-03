@@ -1922,6 +1922,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unknown_lints, clippy::assert_is_empty)]
     fn parse_query_decodes_keys_and_values() {
         let query = parse_query("format=csv&%7Bgroup%7D=a+b&flag");
         assert_eq!(query.get("format").map(String::as_str), Some("csv"));
