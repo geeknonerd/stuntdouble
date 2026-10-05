@@ -1,6 +1,6 @@
 # Stunt Double
 
-[English](README.md) \| **中文**
+[English](README.md) | **中文**
 
 > 本页是英文版 [README.md](README.md) 的译本；如有出入，以英文版为准。
 
@@ -9,111 +9,110 @@
 Stunt Double 是一个用 Rust 实现的 Mock Server，面向需要对接真实外部依赖的集成测试。它会读取上游接口、用内置 JavaScript 变换数据、返回文件与二进制响应，并且不依赖宿主机上的 Node.js、Python 或 JVM。
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#许可证)
-[![Status: upstream HTTP](https://img.shields.io/badge/status-upstream%20http-orange.svg)](#当前状态)
+[![Release](https://img.shields.io/github/v/release/geeknonerd/stuntdouble)](https://github.com/geeknonerd/stuntdouble/releases)
+[![CI](https://github.com/geeknonerd/stuntdouble/actions/workflows/ci.yml/badge.svg)](https://github.com/geeknonerd/stuntdouble/actions/workflows/ci.yml)
+
+v1.0.1 已发布，配置、`ctx` API、CLI 三契约已冻结。执行模型与安全边界见 [plans/adr/](plans/adr/)，细节见 [docs/](docs/README.md)。
+
+## 快速开始（60 秒）
+
+从 checkout 直接跑离线 demo——无需新建文件，无需联网：
+
+```bash
+cargo run -- serve --config demo/stuntdouble.toml
+curl -i http://127.0.0.1:3000/demo/documents/local-manifest/group-a
+```
+
+期望返回 `200` 与 CSV：
+
+```text
+文件编码,文件标题,系统代码
+DOC-0001,示例设备 A 安装手册,SYS-A
+DOC-0002,示例设备 B 运行手册,SYS-B
+```
+
+下一步：[快速开始](docs/guide/getting-started.zh-CN.md) 从零建第一条路由；[Mock 场景示例](docs/guide/mock-recipes.zh-CN.md) 覆盖上游、文件与上传流程。
 
 ## 为什么做 Stunt Double
 
-多数 Mock 工具擅长静态桩，Stunt Double 针对静态桩通常覆盖不了的集成工作：
+多数 Mock 工具擅长静态桩，Stunt Double 针对静态桩覆盖不了的集成工作：
 
 - 需要从真实上游接口取数。
-- 需要 CSV、JSON、文本或二进制变换。
+- 需要经脚本做 CSV、JSON、文本或二进制变换。
 - 需要 PDF、文件或字节流响应，并支持 Range。
 - CI 环境不能安装 Node.js、Python 或 JVM。
-- 需要脚本行为，但必须有明确的宿主限制，而不是不受限的运行时。
 
-设计目标是单个二进制文件尽可能贴近真实依赖的行为，让客户端测到真实链路，而不只是拿到一份固定响应。
+| 工具 | 一句话定位 | 何时选 Stunt Double |
+|---|---|---|
+| WireMock | Java 系通用 stub | 需要 Rust 单二进制 + 上游改写 + 二进制流 |
+| Mockoon | 本地静态 stub 与 GUI | 需要脚本变换 + Range/206 + 零运行时 CI |
+| json-server | 资源派生 CRUD | 需要逐条 Route 声明 + 上游 + 文件根 |
+| Prism | OpenAPI 契约校验 | 需要“先改真数据再返回”的替身 |
 
-## 当前状态
+## 安装
 
-**脚本执行、上游 HTTP、请求诊断与沙箱加固（T1–T7）已落地；v1 公开契约与 `ctx` API 类型定义已冻结（T8）。** `stuntdouble serve` 与 `stuntdouble validate` 读取 TOML 配置，按方法 + 路径匹配路由，并用内置 Boa 执行路由 JavaScript，宿主注入的 `ctx` 提供 `apiVersion` / `request` / `http.get` / `http.pipe` / `file.readText` / `file.readBytes` / `file.stream` / `respond` / `log` / `env`。两类上游调用都只能访问 `[upstream] allow_hosts` 列出的 host：`ctx.http.get` 把上游 4xx/5xx 视为数据，未捕获的传输层失败映射为 502 `upstream_unreachable`；`ctx.http.pipe` 把上游 2xx 响应体绕开脚本堆直接流给客户端，转发 `Range` 并保留 206 `Content-Range`。未命中路由返回 404 `not_found`；脚本异常、超时或超过 Linux 内存上限返回 500 `script_error`，未调用 `ctx.respond` 返回 500 `script_no_response`，响应均带 `request_id`。脚本提供的响应 header 采用 fail-closed 校验：名称或值非法时返回 `script_error`，`ctx.http.pipe` 会在联系上游之前拒绝。每个命中的 Route 都在全新的 script worker 进程中运行，因此崩溃、协议失败或超时不会拖垮其他路由。脚本还运行在宿主管辖的资源边界内：配置的 `sandbox.script_timeout_ms` 应答时限、Linux 上在读取 job 之前应用的 `sandbox.script_memory_limit_mb`（默认 256 MiB，下限 64 MiB）`RLIMIT_AS` 上限、读取一个请求头与请求体的 `server.request_timeout_ms` 期限、槽满即快速失败的有界脚本 worker 池、循环次数兜底，以及钉住的递归/VM 栈上限；引擎 panic 返回 500 `script_error`，不会拖垮服务。Boa 0.22 不暴露堆指标或 interrupt 钩子；本切片中 macOS 与 Windows 保留进程隔离和 deadline 强杀，但没有硬内存上限——威胁模型见 [SECURITY.md](SECURITY.md)，平台边界见 [ADR 0014](plans/adr/0014-process-isolated-script-runner.md)。文档清单与 PDF 下载场景已提供可运行夹具 [demo/](demo/README.md)，同时提供完全离线的文件路由。每个请求还会向 stderr 写出一条结构化日志，包含上游调用链、脚本耗时、body 大小与白名单 header；`serve --verbose` 为 500/502 响应附加稳定的 `detail` 类别，便于本地诊断，且绝不包含堆栈、上游 body 或内部地址。T10 增加信号驱动的关闭：第一个 Ctrl-C/SIGINT 或 Unix SIGTERM 会排空在途请求后退出 `0`；shutdown 开始后观测到的第二个信号强制以 `130`/`143` 退出（标准信号不排队，背靠背发送可能合并）。T9 配置发布流水线：发布契约要求 `release-plz` 创建版本 PR 与 tag，cargo-dist 构建 Linux x86_64、macOS arm64、Windows x86_64 归档并附上校验和、attestation 与 `apiVersion` 1 类型定义，Release 后置任务附加 CycloneDX SBOM 与 GHCR 镜像 tag、digest。Release [`v1.0.0`](https://github.com/geeknonerd/stuntdouble/releases/tag/v1.0.0) 已按这些要求发布：三平台归档与逐文件校验和、`SHA256SUMS`、CycloneDX SBOM、`ctx-api-v1.d.ts`、GHCR 镜像 digest 都已附带，流水线在公告前逐项校验；验证清单见 [docs/development.md](docs/development.md)。带根限制的 `ctx.file` 读取与流式本地文件响应已实现（T11）；T12 在脚本运行前把 multipart 上传解析进请求级临时存储，并通过 `ctx.request.files` 暴露。T13 让文档夹具无需任何上游即可运行：本地清单用 `ctx.file.readText` 读取 `files/metadata.json`，本地下载用 `ctx.file.stream` 流式返回夹具 PDF（200/206/416），上传路由只回显 multipart 元数据、不持久化任何内容。见 [plans/adr/](plans/adr/)。
-
-## 安装与验证
-
-```bash
-cargo install --path .   # 或：cargo run -- serve --config stuntdouble.toml
-
-# 容器镜像（把 tag 换成 releases 页面中的版本；
-# 挂载的配置里设置 server.bind = "0.0.0.0"）
-docker run --rm -p 8080:8080 \
-  -v "$PWD/stuntdouble.toml:/etc/stuntdouble/stuntdouble.toml:ro" \
-  ghcr.io/geeknonerd/stuntdouble:vX.Y.Z
-```
-
-发布契约要求每个 [GitHub Release](https://github.com/geeknonerd/stuntdouble/releases) 包含 Linux x86_64、macOS arm64、Windows x86_64 归档、`SHA256SUMS`、CycloneDX SBOM、`ctx-api-v1.d.ts`、release notes 以及 `linux/amd64`、`linux/arm64` 双平台 GHCR 镜像的 tag 与 digest；发布 workflow 会验证所有必需资产都已附带。验证下载归档的构建来源：
+从 [releases 页面](https://github.com/geeknonerd/stuntdouble/releases)下载对应平台归档，再验证构建来源：
 
 ```bash
 gh attestation verify stuntdouble-x86_64-unknown-linux-gnu.tar.gz --repo geeknonerd/stuntdouble
 ```
 
-触发链与发布检查表见 [docs/development.md](docs/development.md)。
+或跑容器镜像（挂载配置里设置 `server.bind = "0.0.0.0"`）：
 
-## v1 已落地范围
+```bash
+docker run --rm -p 8080:8080 \
+  -v "$PWD/stuntdouble.toml:/etc/stuntdouble/stuntdouble.toml:ro" \
+  ghcr.io/geeknonerd/stuntdouble:v1.0.1
+```
+
+贡献者用 `cargo install --path .` 从源码安装；完整资产清单与发布检查表见 [docs/development.md](docs/development.md)。
+
+## 功能
 
 - 路由模型只有一条流水线：`match → source → transform → response`。
-- 内置 JavaScript 运行时：Boa。
-- 宿主注入 `ctx` API，不暴露裸 `fetch`、`fs`、`os`、`subprocess`、`socket`。
-- 上游 HTTP（`ctx.http.get` 与支持 Range 透传的流式 `ctx.http.pipe` 已实现，`ctx.http.request` 已移出 1.0，见 ADR 0016）、`ctx.file` 读取、文件流、本地文件 Range 响应，以及通过 `ctx.request.files` 暴露的请求级 multipart 上传。
-- 唯一静态文件根，并阻止路径穿越。
-- 静态配置 + 重启。热重载与 Admin API 推迟。
-- Linux x86_64、macOS arm64、Windows x86_64 二进制与 `linux/amd64`、`linux/arm64` 双平台容器镜像（T9 已配置发布自动化）。
-- 结构化请求日志，包含 `request_id`、上游调用链、body 大小、白名单 header 与稳定错误分类。
+- 内置 JavaScript 运行时（Boa）与宿主注入的 `ctx`；不暴露裸 `fetch`、`fs`、`os`、`subprocess`、`socket`。
+- 上游 HTTP（`ctx.http.get`、支持 Range 透传的流式 `ctx.http.pipe`）与 `ctx.file` 读取、文件流、请求级 multipart 上传。
+- 唯一静态文件根并阻止路径穿越；静态配置 + 重启生效。
+- Linux x86_64、macOS arm64、Windows x86_64 二进制与 `linux/amd64`、`linux/arm64` 双平台容器镜像。
+- 结构化请求日志，含 `request_id`、上游调用链与稳定错误分类。
 
 ## v1 不做（1.0.0 范围外）
 
-- 请求间共享状态。
-- 响应推进。
-- 自动资源 CRUD。
-- TypeScript 转译。
-- Python 运行时（推迟到 v2，见 ADR 0015）。
-- npm、pip 或第三方导入。
-- 热重载、Admin API、GUI。
-- 内置 TLS 终止。
+- 请求间共享状态；响应推进；自动资源 CRUD。
+- TypeScript 转译；Python 运行时（v2，见 ADR 0015）；npm、pip 或第三方导入。
+- 热重载、Admin API、GUI；内置 TLS 终止。
 - WebSocket、GraphQL、gRPC。
+- `ctx.http.request`、`retries`、`bodyBytes`（已延期，见 ADR 0016）。
 
 完整范围见 [plans/product-definition.md](plans/product-definition.md)。
 
 ## 文档
 
-- [快速开始](docs/guide/getting-started.zh-CN.md)
-- [Mock 场景示例](docs/guide/mock-recipes.zh-CN.md)
-- [产品功能定义](plans/product-definition.md)
-- [公开演示场景](plans/demo-document-catalog.md)
-- [演示夹具](demo/README.zh-CN.md)
-- [架构决策](plans/adr/)
-- [开发和发布流程](docs/development.md)
-- [治理规范](GOVERNANCE.md)
-- [公开契约](docs/contracts/README.zh-CN.md)
-- [`ctx` API 类型定义](types/ctx-api-v1.d.ts) —— apiVersion 1 源码类型
-- [领域词汇表](CONTEXT.md)
-- [变更日志](CHANGELOG.md)
-- [文档索引](docs/README.md)
-- [English README](README.md)
+- [快速开始](docs/guide/getting-started.zh-CN.md)——安装、第一条路由与上游调用。
+- [Mock 场景示例](docs/guide/mock-recipes.zh-CN.md)——按任务组织的 JSON、上游、文件、上传与 CI 示例。
+- [公开契约](docs/contracts/README.zh-CN.md)——配置、`ctx` API 与 CLI。
+- [`ctx` API 类型定义](types/ctx-api-v1.d.ts)——apiVersion 1 源码类型。
+- [演示夹具](demo/README.zh-CN.md)——可运行的离线与上游文档场景。
+- [文档站](https://geeknonerd.github.io/stuntdouble/)——渲染后的契约与 demo 入口。
+- [变更日志](CHANGELOG.md)——发布历史。
+
+开发文档为中文；[ADR 0013](plans/adr/0013-documentation-language-and-bilingual-structure.md) 记录语言策略。
+
+- [产品功能定义](plans/product-definition.md)（中文）——v1 范围、宿主 API 与不做清单。
+- [开发与发布流程](docs/development.md)（中文）——分支、提交、CI、版本与发布规则。
+- [架构决策](plans/adr/)（中文）——ADR 0001–0017。
+- [领域词汇表](CONTEXT.md)（中文）——项目词汇。
+- [调研](research/)（中文）——Mock 选型、运行时、架构与开源基线。
+- [仓库文档索引](docs/README.md)（中文）——维护者入口。
 
 ## 参与贡献
 
-提出功能前先阅读产品定义与 ADR。v1 范围已刻意收窄并随 1.0.0 落地，新能力仍须落在单一执行模型内。
-
-- 遵守 [Code of Conduct](CODE_OF_CONDUCT.md)。
-- Bug 与功能请求使用 GitHub issue 模板。
-- 客户数据不得进入 issue、日志、fixture 或截图。
-- 提交使用 `git commit -s`（DCO）。
-- commit message 使用英文。
-
-完整流程见 [CONTRIBUTING.md](CONTRIBUTING.md) 与 [docs/development.md](docs/development.md)。
+提功能前先读产品定义与 ADR；新能力仍须落在单一执行模型内。遵守 [Code of Conduct](CODE_OF_CONDUCT.md)，用 GitHub issue 模板，客户数据不得进入 issue 与 fixture，提交用 `git commit -s`（DCO），commit message 用英文。见 [CONTRIBUTING.md](CONTRIBUTING.md) 与 [docs/development.md](docs/development.md)。
 
 ## 安全
 
-不要在公开 issue 中报告漏洞。请使用本仓库的 GitHub 私密漏洞报告功能，见 [SECURITY.md](SECURITY.md)。
-
-公开 issue 中禁止粘贴客户主机名、Token、Header、生产日志、请求体或响应体。
+不要在公开 issue 中报告漏洞，请用本仓库的 GitHub 私密漏洞报告，见 [SECURITY.md](SECURITY.md)。公开 issue 禁止粘贴客户主机名、Token、Header、生产日志、请求体或响应体。
 
 ## 许可证
 
-双许可证，任选其一：
-
-- Apache License, Version 2.0（[LICENSE-APACHE](LICENSE-APACHE)）
-- MIT（[LICENSE-MIT](LICENSE-MIT)）
-
-这是 Rust 项目常见的宽松许可证组合，便于商业与开源环境采用。
-
-除非明确声明，否则任何有意提交并纳入本项目的贡献都按上述双许可证授权，不附加额外条款。
+双许可证任选其一：[Apache-2.0](LICENSE-APACHE) 或 [MIT](LICENSE-MIT)。除非明确声明，任何有意提交并纳入本项目的贡献默认按上述双许可证授权，不附加额外条款。
