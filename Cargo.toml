@@ -41,6 +41,14 @@ unused_self = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 
+[profile.dev]
+# Keep line-level debug info for local crates; drop type/generic/macro debug sections.
+debug = 1
+
+[profile.dev.package."*"]
+# Dependencies skip debug info: the main driver of test binary size.
+debug = false
+
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"
