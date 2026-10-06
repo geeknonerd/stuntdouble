@@ -1,6 +1,6 @@
 # Stunt Double
 
-**English** | [中文](README.zh-CN.md)
+**English** \| [中文](README.zh-CN.md)
 
 > **A test double that plays the whole show.**
 
@@ -10,26 +10,65 @@ Stunt Double is a Rust-based mock server for integration testing against real ex
 [![Release](https://img.shields.io/github/v/release/geeknonerd/stuntdouble)](https://github.com/geeknonerd/stuntdouble/releases)
 [![CI](https://github.com/geeknonerd/stuntdouble/actions/workflows/ci.yml/badge.svg)](https://github.com/geeknonerd/stuntdouble/actions/workflows/ci.yml)
 
-v1.0.1 is released; the configuration, `ctx` API, and CLI contracts are frozen. The execution model and security boundaries live in [plans/adr/](plans/adr/); details live in [docs/](docs/README.md).
+The configuration, `ctx` API, and CLI contracts are frozen for v1. The execution model and security boundaries live in [plans/adr/](plans/adr/); details live in [docs/](docs/README.md).
 
-## Quickstart (60 seconds)
+## Quickstart
 
-Run the offline demo from a checkout — no new files, no network:
+This quickstart uses a prebuilt release binary, so you do not need Rust/Cargo, GitHub CLI, Docker, or a source checkout. [Download and verify the binary for your platform](#install), then open a terminal in the extracted directory.
 
-```bash
-cargo run -- serve --config demo/stuntdouble.toml
-curl -i http://127.0.0.1:3000/demo/documents/local-manifest/group-a
+Create an empty `files/` directory and save these two files beside the binary.
+
+`stuntdouble.toml`:
+
+```toml
+config_version = "1"
+
+[server]
+bind = "127.0.0.1"
+port = 3000
+
+[files]
+root = "./files"
+
+[[routes]]
+name = "hello"
+method = "GET"
+path = "/hello/:name"
+script = "hello.js"
 ```
 
-Expect `200` with a CSV body:
+`hello.js`:
+
+```js
+const name = ctx.request.params.name;
+ctx.respond(200, { "Content-Type": "text/plain; charset=utf-8" }, "Hello, " + name + "!\n");
+```
+
+Validate the configuration and start the server from the extracted directory.
+
+macOS or Linux:
+
+```sh
+./stuntdouble validate --config stuntdouble.toml
+./stuntdouble serve --config stuntdouble.toml
+```
+
+Windows PowerShell:
+
+```powershell
+.\stuntdouble.exe validate --config .\stuntdouble.toml
+.\stuntdouble.exe serve --config .\stuntdouble.toml
+```
+
+Open <http://127.0.0.1:3000/hello/world> in a browser. The response is:
 
 ```text
-文件编码,文件标题,系统代码
-DOC-0001,示例设备 A 安装手册,SYS-A
-DOC-0002,示例设备 B 运行手册,SYS-B
+Hello, world!
 ```
 
-Next: [Getting started](docs/guide/getting-started.md) builds your first route from scratch; [Mock recipes](docs/guide/mock-recipes.md) covers upstream, file, and upload flows.
+Press Ctrl-C to stop the server.
+
+Next: [Getting started](docs/guide/getting-started.md) walks through the first route in more detail; [Mock recipes](docs/guide/mock-recipes.md) covers upstream, file, and upload flows.
 
 ## Why Stunt Double
 
@@ -49,21 +88,90 @@ Most mock tools are optimized for static stubs. Stunt Double targets the integra
 
 ## Install
 
-Download the archive for your platform from the [releases page](https://github.com/geeknonerd/stuntdouble/releases), then verify its provenance:
+For ordinary use, download a prebuilt binary; Rust and Cargo are not required. From the [latest release](https://github.com/geeknonerd/stuntdouble/releases/latest), download both the archive and its matching `.sha256` file. Keep them in the same folder, open a terminal or PowerShell there, and verify the checksum before extracting.
 
-```bash
+| Platform | Archive | SHA-256 file |
+|---|---|---|
+| Linux x86_64 | [Download](https://github.com/geeknonerd/stuntdouble/releases/latest/download/stuntdouble-x86_64-unknown-linux-gnu.tar.gz) | [Download](https://github.com/geeknonerd/stuntdouble/releases/latest/download/stuntdouble-x86_64-unknown-linux-gnu.tar.gz.sha256) |
+| macOS Apple Silicon | [Download](https://github.com/geeknonerd/stuntdouble/releases/latest/download/stuntdouble-aarch64-apple-darwin.tar.gz) | [Download](https://github.com/geeknonerd/stuntdouble/releases/latest/download/stuntdouble-aarch64-apple-darwin.tar.gz.sha256) |
+| Windows x64 | [Download](https://github.com/geeknonerd/stuntdouble/releases/latest/download/stuntdouble-x86_64-pc-windows-msvc.zip) | [Download](https://github.com/geeknonerd/stuntdouble/releases/latest/download/stuntdouble-x86_64-pc-windows-msvc.zip.sha256) |
+
+The Linux and macOS commands below pass only the first line of the sidecar to the checksum tool, so an extra trailing blank line does not trigger a format warning.
+
+### Linux (x86_64)
+
+```sh
+head -n 1 stuntdouble-x86_64-unknown-linux-gnu.tar.gz.sha256 | sha256sum --check -
+tar -xzf stuntdouble-x86_64-unknown-linux-gnu.tar.gz
+cd stuntdouble-x86_64-unknown-linux-gnu
+./stuntdouble --version
+```
+
+### macOS (Apple Silicon)
+
+```sh
+head -n 1 stuntdouble-aarch64-apple-darwin.tar.gz.sha256 | shasum -a 256 -c -
+tar -xzf stuntdouble-aarch64-apple-darwin.tar.gz
+cd stuntdouble-aarch64-apple-darwin
+./stuntdouble --version
+```
+
+### Windows (x64, PowerShell)
+
+```powershell
+$expected = (Get-Content -Raw .\stuntdouble-x86_64-pc-windows-msvc.zip.sha256).Trim().Split(' ')[0]
+$actual = (Get-FileHash .\stuntdouble-x86_64-pc-windows-msvc.zip -Algorithm SHA256).Hash
+if ($actual -ne $expected) { throw "SHA-256 mismatch" }
+"SHA-256 verified"
+Expand-Archive -Path .\stuntdouble-x86_64-pc-windows-msvc.zip -DestinationPath .\stuntdouble-x86_64-pc-windows-msvc
+Set-Location .\stuntdouble-x86_64-pc-windows-msvc
+.\stuntdouble.exe --version
+```
+
+If a checksum does not match, do not run the archive; download both files again and retry. The extracted directory contains the executable, so no installer or administrator access is needed.
+
+### Optional: verify release provenance
+
+The SHA-256 commands check that the archive matches the checksum published with the release. They do not verify how it was built. To verify the GitHub artifact attestation and build provenance, install the [GitHub CLI (`gh`)](https://github.com/cli/cli#installation) separately, then run this with the archive you downloaded:
+
+```sh
 gh attestation verify stuntdouble-x86_64-unknown-linux-gnu.tar.gz --repo geeknonerd/stuntdouble
 ```
 
-Or run the container image (set `server.bind = "0.0.0.0"` in the mounted configuration):
+Replace the example filename with your downloaded archive. GitHub CLI is not required to install or run Stunt Double.
 
-```bash
-docker run --rm -p 8080:8080 \
-  -v "$PWD/stuntdouble.toml:/etc/stuntdouble/stuntdouble.toml:ro" \
+### Run the container image (optional)
+
+This option requires Docker. In `stuntdouble.toml`, keep your existing `config_version` and `routes`, and edit the existing `[server]` and `[files]` tables to use these values (do not add duplicate tables):
+
+```toml
+[server]
+bind = "0.0.0.0"
+port = 8080
+
+[files]
+root = "./files"
+```
+
+Keep the referenced `files/` directory and route scripts in the same project directory as `stuntdouble.toml`. From a macOS or Linux shell in that directory, run:
+
+```sh
+docker run --rm -p 127.0.0.1:8080:8080 \
+  -v "$PWD:/etc/stuntdouble:ro" \
   ghcr.io/geeknonerd/stuntdouble:v1.0.1
 ```
 
-Contributors install from source with `cargo install --path .`; the full asset list and release checklist live in [docs/development.md](docs/development.md).
+The image reads `/etc/stuntdouble/stuntdouble.toml` and serves on port `8080`.
+
+### Build from source (contributors)
+
+This path is for contributors with a repository checkout and a Rust toolchain:
+
+```sh
+cargo install --path .
+```
+
+See [docs/development.md](docs/development.md) for the full release asset list and release checklist.
 
 ## Features
 

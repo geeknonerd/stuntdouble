@@ -6,21 +6,15 @@ This page walks through the smallest useful Stunt Double setup: install the bina
 
 ## Requirements
 
-- A Rust toolchain. The crate builds on stable Rust; `Cargo.toml` declares the MSRV floor.
+Use a terminal on one of the [supported platforms](../../README.md#install). The prebuilt binary needs no Rust, Cargo, GitHub CLI, or Docker for this walkthrough.
 
 ## Install
 
-```bash
-cargo install --path .          # installs the stuntdouble binary
-# or run straight from the checkout
-cargo run -- serve --config stuntdouble.toml
-```
-
-Release builds also target Linux x86_64, macOS arm64, and Windows x86_64 and publish a container image covering `linux/amd64` and `linux/arm64`. The release contract requires archives, checksums, attestations, an SBOM, the `ctx` API type definition, and a GHCR tag plus digest for each release; download and verification commands are in the [README's Install and verify section](../../README.md#install-and-verify).
+Follow the [README installation steps](../../README.md#install) to download the prebuilt binary, verify its SHA-256 checksum, and extract it. The optional GitHub attestation check requires the separate GitHub CLI and is not needed here. For this walkthrough, use the extracted directory as your project directory and run commands from there.
 
 ## Write a configuration
 
-Create `stuntdouble.toml` next to your scripts:
+Create an empty `files/` directory next to the binary, then save `stuntdouble.toml` in the same directory:
 
 ```toml
 config_version = "1"
@@ -36,27 +30,37 @@ root = "./files"
 name = "hello"
 method = "GET"
 path = "/hello/:name"
-script = "scripts/hello.js"
+script = "hello.js"
 ```
 
-`files.root` must exist; it is the only directory `ctx.file` can read. The [configuration contract](../contracts/config.md) lists every key and its validation rules.
+`files.root` must name an existing directory, even if this route does not read files. It is the only directory `ctx.file` can read. The [configuration contract](../contracts/config.md) lists every key and its validation rules.
 
 ## Write your first route
 
-`scripts/hello.js`:
+Save this as `hello.js` beside `stuntdouble.toml`:
 
 ```js
 const name = ctx.request.params.name;
-ctx.respond(200, { "Content-Type": "text/plain; charset=utf-8" }, "hello " + name + "\n");
+ctx.respond(200, { "Content-Type": "text/plain; charset=utf-8" }, "Hello, " + name + "!\n");
 ```
 
 ## Validate and run
 
-```bash
-stuntdouble validate --config stuntdouble.toml   # schema and file checks, no sockets
-stuntdouble serve --config stuntdouble.toml
-curl -i http://127.0.0.1:3000/hello/world
+macOS or Linux:
+
+```sh
+./stuntdouble validate --config stuntdouble.toml
+./stuntdouble serve --config stuntdouble.toml
 ```
+
+Windows PowerShell:
+
+```powershell
+.\stuntdouble.exe validate --config .\stuntdouble.toml
+.\stuntdouble.exe serve --config .\stuntdouble.toml
+```
+
+Open <http://127.0.0.1:3000/hello/world> in a browser. The response is `Hello, world!` followed by a newline.
 
 ## Stop the server
 

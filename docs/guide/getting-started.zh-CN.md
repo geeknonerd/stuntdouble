@@ -8,21 +8,15 @@
 
 ## 前置条件
 
-- Rust 工具链。crate 在 stable Rust 上构建；`Cargo.toml` 声明 MSRV 下限。
+使用[支持的平台](../../README.zh-CN.md#安装)和终端即可。本教程运行预编译二进制，不需要 Rust、Cargo、GitHub CLI 或 Docker。
 
 ## 安装
 
-```bash
-cargo install --path .          # 安装 stuntdouble 二进制
-# 或直接在检出目录运行
-cargo run -- serve --config stuntdouble.toml
-```
-
-发布构建还覆盖 Linux x86_64、macOS arm64、Windows x86_64，并发布覆盖 `linux/amd64`、`linux/arm64` 的容器镜像。发布契约要求每个 Release 包含归档、校验和、attestation、SBOM、`ctx` API 类型定义以及 GHCR tag 与 digest；下载与验证命令见 [README 的安装与验证段](../../README.zh-CN.md#安装与验证)。
+按 [README 安装说明](../../README.zh-CN.md#安装)下载预编译二进制、校验 SHA-256 并解压。可选的 GitHub Attestation 校验需要另行安装 GitHub CLI，本教程不需要它。本文把解压目录作为项目目录，以下命令都从该目录运行。
 
 ## 写配置
 
-在脚本旁边创建 `stuntdouble.toml`：
+在二进制旁创建空的 `files/` 目录，再在同一目录保存 `stuntdouble.toml`：
 
 ```toml
 config_version = "1"
@@ -38,27 +32,37 @@ root = "./files"
 name = "hello"
 method = "GET"
 path = "/hello/:name"
-script = "scripts/hello.js"
+script = "hello.js"
 ```
 
-`files.root` 必须存在；它是 `ctx.file` 唯一可读取的目录。[配置契约](../contracts/config.zh-CN.md)列出了全部键与校验规则。
+即使这条 Route 不读文件，`files.root` 仍必须指向一个已存在的目录。它是 `ctx.file` 唯一可读取的目录。[配置契约](../contracts/config.zh-CN.md)列出了全部键与校验规则。
 
 ## 写第一个 Route
 
-`scripts/hello.js`：
+将下面内容保存为 `hello.js`，与 `stuntdouble.toml` 放在一起：
 
 ```js
 const name = ctx.request.params.name;
-ctx.respond(200, { "Content-Type": "text/plain; charset=utf-8" }, "hello " + name + "\n");
+ctx.respond(200, { "Content-Type": "text/plain; charset=utf-8" }, "Hello, " + name + "!\n");
 ```
 
 ## 校验并运行
 
-```bash
-stuntdouble validate --config stuntdouble.toml   # 校验 schema 与文件，不打开 socket
-stuntdouble serve --config stuntdouble.toml
-curl -i http://127.0.0.1:3000/hello/world
+macOS 或 Linux：
+
+```sh
+./stuntdouble validate --config stuntdouble.toml
+./stuntdouble serve --config stuntdouble.toml
 ```
+
+Windows PowerShell：
+
+```powershell
+.\stuntdouble.exe validate --config .\stuntdouble.toml
+.\stuntdouble.exe serve --config .\stuntdouble.toml
+```
+
+在浏览器打开 <http://127.0.0.1:3000/hello/world>，响应为 `Hello, world!` 并以换行符结尾。
 
 ## 停止服务
 
