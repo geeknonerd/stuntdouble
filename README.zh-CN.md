@@ -1,6 +1,6 @@
 # Stunt Double
 
-[English](README.md) | **中文**
+[English](README.md) \| **中文**
 
 > 本页是英文版 [README.md](README.md) 的译本；如有出入，以英文版为准。
 
@@ -12,26 +12,65 @@ Stunt Double 是一个用 Rust 实现的 Mock Server，面向需要对接真实�
 [![Release](https://img.shields.io/github/v/release/geeknonerd/stuntdouble)](https://github.com/geeknonerd/stuntdouble/releases)
 [![CI](https://github.com/geeknonerd/stuntdouble/actions/workflows/ci.yml/badge.svg)](https://github.com/geeknonerd/stuntdouble/actions/workflows/ci.yml)
 
-v1.0.1 已发布，配置、`ctx` API、CLI 三契约已冻结。执行模型与安全边界见 [plans/adr/](plans/adr/)，细节见 [docs/](docs/README.md)。
+v1 的配置、`ctx` API、CLI 三契约已冻结。执行模型与安全边界见 [plans/adr/](plans/adr/)，细节见 [docs/](docs/README.md)。
 
-## 快速开始（60 秒）
+## 快速开始
 
-从 checkout 直接跑离线 demo——无需新建文件，无需联网：
+本教程使用预编译 Release 二进制，无需 Rust/Cargo、GitHub CLI、Docker 或源码 checkout。先按[安装说明](#安装)下载、校验并解压对应平台的二进制，然后在解压后的目录打开终端。
 
-```bash
-cargo run -- serve --config demo/stuntdouble.toml
-curl -i http://127.0.0.1:3000/demo/documents/local-manifest/group-a
+在二进制旁创建空的 `files/` 文件夹，并保存以下两个文件。
+
+`stuntdouble.toml`：
+
+```toml
+config_version = "1"
+
+[server]
+bind = "127.0.0.1"
+port = 3000
+
+[files]
+root = "./files"
+
+[[routes]]
+name = "hello"
+method = "GET"
+path = "/hello/:name"
+script = "hello.js"
 ```
 
-期望返回 `200` 与 CSV：
+`hello.js`：
+
+```js
+const name = ctx.request.params.name;
+ctx.respond(200, { "Content-Type": "text/plain; charset=utf-8" }, "Hello, " + name + "!\n");
+```
+
+在解压目录中校验配置并启动服务。
+
+macOS 或 Linux：
+
+```sh
+./stuntdouble validate --config stuntdouble.toml
+./stuntdouble serve --config stuntdouble.toml
+```
+
+Windows PowerShell：
+
+```powershell
+.\stuntdouble.exe validate --config .\stuntdouble.toml
+.\stuntdouble.exe serve --config .\stuntdouble.toml
+```
+
+在浏览器打开 <http://127.0.0.1:3000/hello/world>，响应内容为：
 
 ```text
-文件编码,文件标题,系统代码
-DOC-0001,示例设备 A 安装手册,SYS-A
-DOC-0002,示例设备 B 运行手册,SYS-B
+Hello, world!
 ```
 
-下一步：[快速开始](docs/guide/getting-started.zh-CN.md) 从零建第一条路由；[Mock 场景示例](docs/guide/mock-recipes.zh-CN.md) 覆盖上游、文件与上传流程。
+按 Ctrl-C 停止服务。
+
+下一步：[快速开始指南](docs/guide/getting-started.zh-CN.md)会更详细地走一遍第一条 Route；[Mock 场景示例](docs/guide/mock-recipes.zh-CN.md)覆盖上游、文件与上传流程。
 
 ## 为什么做 Stunt Double
 
@@ -51,21 +90,90 @@ DOC-0002,示例设备 B 运行手册,SYS-B
 
 ## 安装
 
-从 [releases 页面](https://github.com/geeknonerd/stuntdouble/releases)下载对应平台归档，再验证构建来源：
+普通使用推荐下载预编译二进制，不需要安装 Rust 或 Cargo。从[最新 Release](https://github.com/geeknonerd/stuntdouble/releases/latest)下载对应平台的归档和同名 `.sha256` 校验文件，保存到同一目录；打开该目录中的终端或 PowerShell，先校验再解压。
 
-```bash
+| 平台 | 归档 | SHA-256 校验文件 |
+|---|---|---|
+| Linux x86_64 | [下载](https://github.com/geeknonerd/stuntdouble/releases/latest/download/stuntdouble-x86_64-unknown-linux-gnu.tar.gz) | [下载](https://github.com/geeknonerd/stuntdouble/releases/latest/download/stuntdouble-x86_64-unknown-linux-gnu.tar.gz.sha256) |
+| macOS Apple Silicon | [下载](https://github.com/geeknonerd/stuntdouble/releases/latest/download/stuntdouble-aarch64-apple-darwin.tar.gz) | [下载](https://github.com/geeknonerd/stuntdouble/releases/latest/download/stuntdouble-aarch64-apple-darwin.tar.gz.sha256) |
+| Windows x64 | [下载](https://github.com/geeknonerd/stuntdouble/releases/latest/download/stuntdouble-x86_64-pc-windows-msvc.zip) | [下载](https://github.com/geeknonerd/stuntdouble/releases/latest/download/stuntdouble-x86_64-pc-windows-msvc.zip.sha256) |
+
+Linux/macOS 命令只把校验文件首行传给校验工具，因此末尾空行不会造成格式警告。
+
+### Linux（x86_64）
+
+```sh
+head -n 1 stuntdouble-x86_64-unknown-linux-gnu.tar.gz.sha256 | sha256sum --check -
+tar -xzf stuntdouble-x86_64-unknown-linux-gnu.tar.gz
+cd stuntdouble-x86_64-unknown-linux-gnu
+./stuntdouble --version
+```
+
+### macOS（Apple Silicon）
+
+```sh
+head -n 1 stuntdouble-aarch64-apple-darwin.tar.gz.sha256 | shasum -a 256 -c -
+tar -xzf stuntdouble-aarch64-apple-darwin.tar.gz
+cd stuntdouble-aarch64-apple-darwin
+./stuntdouble --version
+```
+
+### Windows（x64，PowerShell）
+
+```powershell
+$expected = (Get-Content -Raw .\stuntdouble-x86_64-pc-windows-msvc.zip.sha256).Trim().Split(' ')[0]
+$actual = (Get-FileHash .\stuntdouble-x86_64-pc-windows-msvc.zip -Algorithm SHA256).Hash
+if ($actual -ne $expected) { throw "SHA-256 mismatch" }
+"SHA-256 verified"
+Expand-Archive -Path .\stuntdouble-x86_64-pc-windows-msvc.zip -DestinationPath .\stuntdouble-x86_64-pc-windows-msvc
+Set-Location .\stuntdouble-x86_64-pc-windows-msvc
+.\stuntdouble.exe --version
+```
+
+如果校验和不匹配，不要运行归档；请重新下载两个文件后再试。解压后的目录中包含可执行文件，无需安装程序或管理员权限。
+
+### 可选：验证 Release 构建来源
+
+上面的 SHA-256 命令用于确认归档与 Release 附带的校验和一致，但不验证归档如何构建。若要验证 GitHub Artifact Attestation（构建来源证明），需要另行安装 [GitHub CLI（`gh`）](https://github.com/cli/cli#installation)，再对下载的归档运行：
+
+```sh
 gh attestation verify stuntdouble-x86_64-unknown-linux-gnu.tar.gz --repo geeknonerd/stuntdouble
 ```
 
-或跑容器镜像（挂载配置里设置 `server.bind = "0.0.0.0"`）：
+示例使用 Linux 文件名；请替换成实际下载的归档。安装和运行 Stunt Double 不需要 GitHub CLI。
 
-```bash
-docker run --rm -p 8080:8080 \
-  -v "$PWD/stuntdouble.toml:/etc/stuntdouble/stuntdouble.toml:ro" \
+### 使用容器镜像（可选）
+
+此方式需要 Docker。保留 `stuntdouble.toml` 中现有的 `config_version` 与 `routes`，并将已有的 `[server]`、`[files]` 表改为以下值（不要重复添加表）：
+
+```toml
+[server]
+bind = "0.0.0.0"
+port = 8080
+
+[files]
+root = "./files"
+```
+
+将引用到的 `files/` 目录与路由脚本放在 `stuntdouble.toml` 所在的项目目录中。在 macOS 或 Linux 终端进入该目录后运行：
+
+```sh
+docker run --rm -p 127.0.0.1:8080:8080 \
+  -v "$PWD:/etc/stuntdouble:ro" \
   ghcr.io/geeknonerd/stuntdouble:v1.0.1
 ```
 
-贡献者用 `cargo install --path .` 从源码安装；完整资产清单与发布检查表见 [docs/development.md](docs/development.md)。
+镜像从 `/etc/stuntdouble/stuntdouble.toml` 读取配置，并监听 `8080` 端口。
+
+### 从源码构建（贡献者）
+
+此路径仅适用于有仓库 checkout 和 Rust 工具链的贡献者：
+
+```sh
+cargo install --path .
+```
+
+完整 Release 资产清单与发布检查表见[开发文档](docs/development.md)。
 
 ## 功能
 
