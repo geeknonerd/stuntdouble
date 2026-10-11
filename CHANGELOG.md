@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.2](https://github.com/geeknonerd/stuntdouble/compare/v1.0.1...v1.0.2) - 2026-10-11
+
+### Other
+
+- keep dist-managed actions out of dependabot and check release.yml drift ([#139](https://github.com/geeknonerd/stuntdouble/pull/139))
+- *(deps)* bump the patch group across 1 directory with 2 updates ([#135](https://github.com/geeknonerd/stuntdouble/pull/135))
+- *(deps)* bump debian from `3783cc0` to `7c7b2c9` ([#134](https://github.com/geeknonerd/stuntdouble/pull/134))
+- *(deps)* bump hyper from 1.11.1 to 1.12.0 ([#136](https://github.com/geeknonerd/stuntdouble/pull/136))
+- *(deps)* bump rust from 1.98-bookworm to 1.99-bookworm ([#133](https://github.com/geeknonerd/stuntdouble/pull/133))
+- clarify prebuilt installation and quickstart ([#132](https://github.com/geeknonerd/stuntdouble/pull/132))
+- restructure readme around offline quickstart ([#131](https://github.com/geeknonerd/stuntdouble/pull/131))
+- cut dev profile debug info to shrink target ([#130](https://github.com/geeknonerd/stuntdouble/pull/130))
+- cut dev profile debug info to shrink target ([#129](https://github.com/geeknonerd/stuntdouble/pull/129))
+- keep assert-is-empty under new clippy lint with MSRV-compatible allow ([#128](https://github.com/geeknonerd/stuntdouble/pull/128))
+
 ## [1.0.1](https://github.com/geeknonerd/stuntdouble/compare/v1.0.0...v1.0.1) - 2026-10-03
 
 ### Other
