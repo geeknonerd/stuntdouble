@@ -56,6 +56,18 @@ jobs:
           ./.github/scripts/check-release-assets.sh --self-test
           ./.github/scripts/ensure-draft-release.sh --self-test
 
+  release-drift:
+    name: release-drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install cargo-dist
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.33.0/cargo-dist-installer.sh | sh
+      - name: Check release.yml matches dist-workspace.toml
+        run: dist generate --check
+
   docs:
     name: docs
     runs-on: ubuntu-latest
