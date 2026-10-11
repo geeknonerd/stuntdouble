@@ -17,7 +17,7 @@
 每个 pull request 必须：
 
 - 使用 Conventional Commits 标题，因为 squash commit 会继承它
-- 通过 `fmt`、`clippy`、`test`、`docs`、`docs-links`、`deny`、`audit`、`msrv`、`pr-title`、`dco`
+- 通过 `fmt`、`clippy`、`test`、`release-drift`、`docs`、`docs-links`、`deny`、`audit`、`msrv`、`pr-title`、`dco`
 - 解决全部 review 会话
 - 与 `main` 保持同步
 - 每个 commit 带 DCO 签名（`git commit -s`）；release-plz 生成的 release PR 是唯一例外（见「发布流程」）
@@ -191,9 +191,9 @@ lychee --offline --no-progress --exclude-path target --exclude-path .git './**/*
 
 ## 发布自动化配置
 
-- `.github/workflows/ci.yml`：`fmt`、`clippy`、`test`、`docs`、`docs-links`、`deny`、`audit`、`msrv` 八个 job，全部 action 按 SHA 固定。`audit` job 不再经第三方审查 action：直接跑固定版本的 `cargo-audit`，有漏洞即以非 0 退出使 job 失败，也不创建 issue；版本升级需人工改 workflow。原因、实测耗时、运行时核查方法与仍属外部的注解见 [solutions/ci/node20-deprecation-annotations-only-cover-node20-actions.md](solutions/ci/node20-deprecation-annotations-only-cover-node20-actions.md)。
+- `.github/workflows/ci.yml`：`fmt`、`clippy`、`test`、`release-drift`、`docs`、`docs-links`、`deny`、`audit`、`msrv` 九个 job，全部 action 按 SHA 固定。`release-drift` 按 `dist-workspace.toml` 声明的版本安装 cargo-dist，校验 `release.yml` 与配置一致，并拒绝手写 workflow 里 dist 托管 action 的 pin 漂移（见「dist 托管 action 的升级与对账」）。`audit` job 不再经第三方审查 action：直接跑固定版本的 `cargo-audit`，有漏洞即以非 0 退出使 job 失败，也不创建 issue；版本升级需人工改 workflow。原因、实测耗时、运行时核查方法与仍属外部的注解见 [solutions/ci/node20-deprecation-annotations-only-cover-node20-actions.md](solutions/ci/node20-deprecation-annotations-only-cover-node20-actions.md)。
 - `.github/workflows/release-plz.yml`：release PR、tag 与 cargo-dist 触发。
-- `.github/workflows/release.yml`：由 `dist-workspace.toml` 生成；改配置后运行 `dist generate`，不要手工编辑该文件。
+- `.github/workflows/release.yml`：由 `dist-workspace.toml` 生成；改配置后运行 `dist generate`，不要手工编辑该文件。Dependabot 通过 `exclude-paths` 跳过该文件。
 - `.github/workflows/release-extras.yml`：cargo-dist 的 publish job，负责创建 draft Release、SBOM、GHCR 镜像、digest，并在公告前验证二进制、容器与“将公开资产全集”。
 - `.github/release-build-setup.yml`：cargo-dist 注入到每个构建 job 的步骤，拒绝非 tag 或其他 ref 的发布构建。
 - `.github/workflows/codeql.yml`：Rust 高级代码扫描，在 `main`、pull request 与每周计划任务上运行；它不加入 required checks，改由 ruleset「CodeQL merge protection」参与合并判定（阈值与误报处置见「Pull request」）。
@@ -204,6 +204,12 @@ lychee --offline --no-progress --exclude-path target --exclude-path .git './**/*
 - 更新 PAT 后，用一次由该 PAT 发起的测试 PR 验证 `pull_request` workflows 会自动排队；不要只以 secret 名称存在作为验证。
 
 注意：MSRV（`rust-version`）声明在 [Cargo.toml](../Cargo.toml)，必须等于依赖树中的最高要求；MSRV CI job 用精确的该版本构建并检查锁定的依赖图。
+
+### dist 托管 action 的升级与对账
+
+`release.yml` 由 cargo-dist 生成，其中 `actions/checkout`、`actions/upload-artifact`、`actions/download-artifact`、`actions/attest` 的 SHA 以 `dist-workspace.toml` 的 `[dist.github-action-commits]` 为唯一来源；`release-drift` 拒绝手写 workflow 与它之间的任何 pin 漂移。`dependabot.yml` 因此用 `exclude-paths` 跳过生成文件（`ignore` 会连这四个 action 的安全更新一起冻结），并把这四个 action 放进排在最前的 `dist-managed` group 单独开 PR——Dependabot 只把依赖归入第一个匹配的 group，所以它必须排在通配 group 之前。
+
+处理 `dist-managed` 升级 PR：把新 SHA 写进 `[dist.github-action-commits]`，运行 `dist generate`，与升级一起提交，`release-drift` 转绿后合并。升级 `cargo-dist-version` 走同一路径：只改 `dist-workspace.toml`，再运行 `dist generate` 并提交生成结果；CI 按该版本号安装 cargo-dist，版本号不设第二处来源。
 
 ### 已评估的后续硬化项
 

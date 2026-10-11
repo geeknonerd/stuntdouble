@@ -64,9 +64,45 @@ jobs:
         with:
           persist-credentials: false
       - name: Install cargo-dist
-        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.33.0/cargo-dist-installer.sh | sh
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(awk -F'"' '/^cargo-dist-version/ { print $2; exit }' dist-workspace.toml)
+          if [ -z "$version" ]; then
+            echo "dist-workspace.toml is missing cargo-dist-version" >&2
+            exit 1
+          fi
+          curl --proto '=https' --tlsv1.2 -LsSf "https://github.com/axodotdev/cargo-dist/releases/download/v${version}/cargo-dist-installer.sh" | sh
       - name: Check release.yml matches dist-workspace.toml
         run: dist generate --check
+      - name: Check dist-managed action pins match dist-workspace.toml
+        shell: bash
+        run: |
+          set -euo pipefail
+          # release.yml is generated and covered by the step above; every
+          # hand-written workflow pins the same four actions and must track
+          # [dist.github-action-commits].
+          declare -A pins=()
+          while read -r action sha; do
+            pins["$action"]="$sha"
+          done < <(awk -F'"' '/^\[dist\.github-action-commits\]/ { in_section=1; next } /^\[/ { in_section=0 } in_section && $2 != "" { print $2, $4 }' dist-workspace.toml)
+          if [ "${#pins[@]}" -eq 0 ]; then
+            echo "::error::no pin found in the [dist.github-action-commits] section of dist-workspace.toml" >&2
+            exit 1
+          fi
+          failed=0
+          while IFS= read -r file; do
+            for action in "${!pins[@]}"; do
+              while IFS=: read -r lineno text; do
+                actual=$(sed -n "s|.*${action}@\([^[:space:]]*\).*|\1|p" <<< "$text")
+                if [ "$actual" != "${pins[$action]}" ]; then
+                  echo "::error file=$file,line=$lineno::${action} is pinned to '${actual}', but dist-workspace.toml pins '${pins[$action]}'" >&2
+                  failed=1
+                fi
+              done < <(grep -nF -- "${action}@" "$file" || true)
+            done
+          done < <(find .github/workflows -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) ! -name 'release.yml' | sort)
+          exit "$failed"
 
   docs:
     name: docs
