@@ -27,6 +27,13 @@ updates:
       day: sunday
       time: "04:00"
     open-pull-requests-limit: 5
+    # 由 cargo-dist 生成的 release.yml 固定这些 pin,升级须走 dist-workspace.toml 的
+    # [dist.github-action-commits] 并运行 `dist generate`,否则 release.yml 漂移。
+    ignore:
+      - dependency-name: "actions/checkout"
+      - dependency-name: "actions/upload-artifact"
+      - dependency-name: "actions/download-artifact"
+      - dependency-name: "actions/attest"
     groups:
       actions:
         patterns:
