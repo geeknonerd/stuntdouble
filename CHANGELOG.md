@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.3](https://github.com/geeknonerd/stuntdouble/compare/v1.0.2...v1.0.3) - 2026-10-12
+
+### Other
+
+- name the .github/ language boundary in ADR 0013 ([#144](https://github.com/geeknonerd/stuntdouble/pull/144))
+- *(deps)* bump actions/download-artifact from 8.0.1 to 8.0.2 in the dist-managed group ([#143](https://github.com/geeknonerd/stuntdouble/pull/143))
+- replace dependabot ignores with scoped scanning and pin checks ([#142](https://github.com/geeknonerd/stuntdouble/pull/142))
+- *(deps)* bump the actions group with 3 updates ([#140](https://github.com/geeknonerd/stuntdouble/pull/140))
+
 ## [1.0.2](https://github.com/geeknonerd/stuntdouble/compare/v1.0.1...v1.0.2) - 2026-10-11
 
 ### Other
