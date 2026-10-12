@@ -41,3 +41,7 @@
 - `docs/en/` + `docs/zh-CN/` 语言目录（拒绝：英文路径被迫带 `/en/` 或依赖根级重定向，当前只有两种语言，收益为零；记为升级路径）。
 - mdBook / Docusaurus i18n（拒绝：新增依赖，GitHub Pages 现为 legacy Jekyll 构建，不支持）。
 - 全部文档双语（拒绝：维护成本翻倍，设计文档没有英文读者）。
+
+## 修订（2026-10-12，PR #142）：`.github/` 的配置与 workflow 同属 A 层
+
+「决策」把 A 层写作「`.github/` 模板」，没有点名 `.github/dependabot.yml` 这类配置文件和 `.github/workflows/**`。PR #142 把 `dependabot.yml` 的中文注释改成英文前排查过，当时 `.github/` 下只剩这一个文件含中文。现明确：A 层覆盖 `.github/` 下一切由人书写、会出现在 GitHub 界面或 workflow 日志里的内容——模板文案、配置注释、workflow 的 `name`、步骤名与说明——一律英文；写给维护者的中文说明留在 C 层文档，不写进 `.github/`。

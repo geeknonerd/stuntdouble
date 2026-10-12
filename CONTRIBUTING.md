@@ -75,7 +75,7 @@ Contributions will be reviewed against these rules before being accepted.
 
 English is the authoritative language for every document in the repository. Chinese translations live next to the English file with a `.zh-CN.md` suffix, and both pages carry a language switch line under the title.
 
-- **English only:** `CONTRIBUTING.md`, `GOVERNANCE.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `CHANGELOG.md`, the `.github/` templates, and commit and pull request titles.
+- **English only:** `CONTRIBUTING.md`, `GOVERNANCE.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `CHANGELOG.md`, everything under `.github/` (templates, configuration, and workflow files), and commit and pull request titles.
 - **English plus a Chinese translation:** the README pair, the GitHub Pages landing page, `docs/guide/`, `docs/contracts/`, and `demo/README.md`.
 - **Chinese only:** `AGENTS.md`, `CONTEXT.md`, `plans/`, `research/`, `docs/development.md`, `docs/agents/`, and `docs/solutions/`. Design documents are written in Chinese because the maintainer works in Chinese.
 
