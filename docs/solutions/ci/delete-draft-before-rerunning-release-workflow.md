@@ -88,6 +88,7 @@ v0.5.3 首次真实发布中的取消演练验证了这条安全边界，也暴�
 
 - `release.yml` 在 `release-extras` 阶段失败或取消，draft 上可能已有 extras 或部分 dist 资产。
 - announce 阶段失败或取消，draft 上可能已部分上传 dist 产物。
+- announce 在 undraft 时收到 `HTTP 403: Resource not accessible by integration` 时**不适用**本协议：那是 `GITHUB_TOKEN` 拿不到 workflow 修改授权（tag 提交与默认分支的 workflow 文件存在差异），删 draft 并重跑会对同一 target 再次 PATCH、再次 403；应改用带 workflow scope 的凭据 undraft，见 [undraft-403-when-tag-commit-differs-from-main-in-workflows.md](undraft-403-when-tag-commit-differs-from-main-in-workflows.md)。
 - 为同一 tag 再次手工触发 `release.yml`，且该 tag 已存在非公开 draft。
 - 对发布编排做结构性修改后执行失败路径演练；升级 cargo-dist 后还应按 `docs/development.md` 的「失败路径演练」重做结构检查，确认 announce 的 Cleanup、upload 顺序和 `find` 集合仍与断言一致。
 - 发现 Release 已公开时不要套用本协议。此时应保留已公开事实，修问题并发新的 patch 版本。
@@ -129,5 +130,6 @@ gh workflow run release.yml --ref v0.5.3 -f "tag=v0.5.3"
 - [derive-required-release-assets-from-dist-manifest.md](derive-required-release-assets-from-dist-manifest.md) — 同样处理 `release-extras` 的公告前资产断言，但那篇解决“必需资产清单硬编码漂移”，本篇解决“名称齐全的资产仍可能跨 run 混合”。names-only 断言正是本篇风险能穿过的边界。
 - [docs/development.md](../../development.md) — 发布流程、失败恢复命令与失败路径演练的权威手册。
 - [ADR 0012](../../../plans/adr/0012-release-artifacts-and-supply-chain.md) — draft 编排的决策记录与 v0.5.3 取消演练审计轨迹（#41 修订）。
+- [undraft-403-when-tag-commit-differs-from-main-in-workflows.md](undraft-403-when-tag-commit-differs-from-main-in-workflows.md) — 同样是 announce 阶段卡在 draft 的恢复面，但适用边界与本篇互斥：那篇是 `GITHUB_TOKEN` 拿不到 workflow 修改授权导致的 undraft 403，差异不因删 draft 而消失，重跑必再 403，只能用带 workflow scope 的凭据 undraft；本篇是跨 run draft 资产复用的完整性风险，必须删 draft 重跑。
 - [cross-compile-arm64-container-image-on-amd64-runner.md](cross-compile-arm64-container-image-on-amd64-runner.md) — 相邻的 `release-extras` 公告前验证面；那篇管镜像平台覆盖，不解决 draft 状态复用。
 - issue #41（发布原子性）、#43（从 dist manifest 派生资产清单）、#112（draft 编排实现）、#113（恢复手册与 draft 生命周期防护）、#114（v0.5.3 发布列车）。

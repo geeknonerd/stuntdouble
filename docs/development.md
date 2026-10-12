@@ -74,7 +74,8 @@ docs: describe the release process
 ### 发布验证
 
 ```bash
-tag=v0.2.0
+# 默认验证最新一次发布；验证历史 tag 时覆盖此值。
+tag=$(gh release view --repo geeknonerd/stuntdouble --json tagName --jq .tagName)
 gh release view "$tag" --repo geeknonerd/stuntdouble
 gh release download "$tag" --repo geeknonerd/stuntdouble --pattern '*x86_64-unknown-linux-gnu.tar.gz'
 gh attestation verify stuntdouble-x86_64-unknown-linux-gnu.tar.gz --repo geeknonerd/stuntdouble
@@ -200,7 +201,7 @@ lychee --offline --no-progress --exclude-path target --exclude-path .git './**/*
 - 仓库必须允许 GitHub Actions 创建 pull request（Settings → Actions → General → Workflow permissions）。
 - crates.io 发布默认关闭（`release-plz.toml` 的 `publish = false`）。启用时把 `publish` 改为 `true`，并在 `release-plz.yml` 的 release job 中提供 `CARGO_REGISTRY_TOKEN`。
 - `RELEASE_PLZ_TOKEN`（推荐）：细粒度 PAT，权限为 `Contents: Read and write` 与 `Pull requests: Read and write`。它供 release-plz 创建 tag、分支和 release PR，使 PAT 创建的 release PR 自动触发 CI；PAT 不需要 `Actions: write`，触发 `release.yml` 使用 job 内 `GITHUB_TOKEN` 的 `actions: write`。
-- 未配置或 token 失效时，workflow 回退到 `GITHUB_TOKEN`：PR 仍会创建，但其 required checks 可能停在 `Expected` 等待人工批准；批准对应 run，或编辑 PR 触发 `edited` 事件，可恢复 `pr-title` 等检查。
+- `RELEASE_PLZ_TOKEN` 未配置或为空时，workflow 回退到 `GITHUB_TOKEN`：PR 仍会创建，但其 required checks 可能停在 `Expected` 等待人工批准；批准对应 run，或编辑 PR 触发 `edited` 事件，可恢复 `pr-title` 等检查。非空但失效的 token 仍会被选中，release-plz 直接失败，不会自动回退。
 - 更新 PAT 后，用一次由该 PAT 发起的测试 PR 验证 `pull_request` workflows 会自动排队；不要只以 secret 名称存在作为验证。
 
 注意：MSRV（`rust-version`）声明在 [Cargo.toml](../Cargo.toml)，必须等于依赖树中的最高要求；MSRV CI job 用精确的该版本构建并检查锁定的依赖图。

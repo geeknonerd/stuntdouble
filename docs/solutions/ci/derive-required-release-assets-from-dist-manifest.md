@@ -31,7 +31,7 @@ tags: [release-assets, cargo-dist, dist-manifest, single-source-of-truth, releas
 
 会话实测：plan job 的真实输入来自 `dist host --steps=create --tag=... --output-format=json`（`.github/workflows/release.yml:82-87`），该输出与 `dist plan` 的 `artifacts` 一致；因此 `.artifacts` 是 manifest 显式声明为 artifacts 的 dist 产物集合的安全来源；workflow 另行上传的发布元数据（如 `dist-manifest.json`）不在该集合内。
 
-当前实现由 `.github/scripts/check-release-assets.sh` 读取 plan：`required_assets()` 从 `.artifacts` 的键派生 dist 产物，再补 release-extras 自产的资产（`.github/scripts/check-release-assets.sh:19-33`）。`release-extras` 把 plan 与 GitHub Release 的实际资产名交给脚本（`.github/workflows/release-extras.yml:281-299`）；开发文档只指向该脚本作为权威来源（`docs/development.md:88`），ADR 0012 也有 #43 修订（`plans/adr/0012-release-artifacts-and-supply-chain.md:79-85`）。
+当前实现由 `.github/scripts/check-release-assets.sh` 读取 plan：`required_assets()` 从 `.artifacts` 的键派生 dist 产物，再补 release-extras 自产的资产（`.github/scripts/check-release-assets.sh:19-33`）。`release-extras` 把 plan 与 GitHub Release 的实际资产名交给脚本（`.github/workflows/release-extras.yml:281-299`）；开发文档只指向该脚本作为权威来源（`docs/development.md:89`），ADR 0012 也有 #43 修订（`plans/adr/0012-release-artifacts-and-supply-chain.md:79-85`）。
 
 > **2026-09-29 更新（#41）**：`release-extras` 已前移为 cargo-dist publish job，断言对象改为“draft 已附加的 extras 与 announce 即将上传的 dist 产物”的并集，失败或取消时 Release 保持 draft（不再需要 Withdraw 回退）。本文关于 manifest 派生、fail closed 与自测的知识不变；正文引用的岗位名与行号已按当前工作流刷新。draft 复用的恢复协议见 [delete-draft-before-rerunning-release-workflow.md](delete-draft-before-rerunning-release-workflow.md)。
 
@@ -55,7 +55,7 @@ tags: [release-assets, cargo-dist, dist-manifest, single-source-of-truth, releas
 
 5. **用 `--self-test` 覆盖“新增声明应通过”和“缺声明必须失败”，并放进必需的 `test` job。** self-test 构造包含虚构 `ctx-api-v2.d.ts` 的 plan（`.github/scripts/check-release-assets.sh:57-65`），完整 actual 应通过（`.github/scripts/check-release-assets.sh:67-80`）；随后从 actual 删除该文件，检查必须失败（`.github/scripts/check-release-assets.sh:82-95`），全部通过时输出 `self-test passed`（`.github/scripts/check-release-assets.sh:98`）。CI 的 `test` job 运行它（`.github/workflows/ci.yml:54-57`）。`ctx-api-v2.d.ts` 只是测试夹具，不代表仓库已经支持 apiVersion 2。
 
-6. **文档只描述来源与例外，不复制派生清单。** `docs/development.md:88` 指定脚本为权威来源，并单独列出 release-extras 自产资产；ADR 0012 的 #43 修订记录同一决策（`plans/adr/0012-release-artifacts-and-supply-chain.md:79-85`）。新增类型定义时应先进入 `dist.extra-artifacts`（`dist-workspace.toml:46-48`），由 manifest 派生覆盖，而不是再次编辑发布工作流内的数组。
+6. **文档只描述来源与例外，不复制派生清单。** `docs/development.md:89` 指定脚本为权威来源，并单独列出 release-extras 自产资产；ADR 0012 的 #43 修订记录同一决策（`plans/adr/0012-release-artifacts-and-supply-chain.md:79-85`）。新增类型定义时应先进入 `dist.extra-artifacts`（`dist-workspace.toml:46-48`），由 manifest 派生覆盖，而不是再次编辑发布工作流内的数组。
 
 ## 为什么重要（Why This Matters）
 

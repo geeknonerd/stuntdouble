@@ -26,7 +26,7 @@ tags: [docker-buildx, multi-platform, arm64, cross-compilation, rustup, qemu, gh
 
 ## 背景（Context）
 
-发布契约把容器镜像与三平台归档并列发布（`docs/development.md:103`）。原来的 `release-extras` 调用 `docker/build-push-action` 时没有传 `platforms`，tag 因此只承载 runner 自身的架构：issue #67 核实发布时的历史 tag `ghcr.io/geeknonerd/stuntdouble:v0.2.1`（registry 引用，不是仓库路径）是单个 amd64 的 OCI image manifest，arm64 主机只能退回模拟运行，而 cargo-dist 早已发布 `aarch64-apple-darwin` 归档。决策与实测记录在 ADR 0012 的 #67 修订（`plans/adr/0012-release-artifacts-and-supply-chain.md:69-77`）。
+发布契约把容器镜像与三平台归档并列发布（`docs/development.md:104-113`）。原来的 `release-extras` 调用 `docker/build-push-action` 时没有传 `platforms`，tag 因此只承载 runner 自身的架构：issue #67 核实发布时的历史 tag `ghcr.io/geeknonerd/stuntdouble:v0.2.1`（registry 引用，不是仓库路径）是单个 amd64 的 OCI image manifest，arm64 主机只能退回模拟运行，而 cargo-dist 早已发布 `aarch64-apple-darwin` 归档。决策与实测记录在 ADR 0012 的 #67 修订（`plans/adr/0012-release-artifacts-and-supply-chain.md:69-77`）。
 
 （session history）更早一轮里 #67 还带着 `needs-triage`，发布链已经在推送 GHCR 镜像并把 digest 写进 `stuntdouble-<version>-image.txt`：「镜像推没推」早有证据源，缺的是「推出去的 tag 是否覆盖两个架构」这层保证。
 
@@ -38,8 +38,8 @@ tags: [docker-buildx, multi-platform, arm64, cross-compilation, rustup, qemu, gh
 4. **workflow 传 `platforms`，并在公告前断言 registry 里的原始索引。** `platforms: linux/amd64,linux/arm64`（`.github/workflows/release-extras.yml:148`）；断言读取 raw index 并要求 Linux 架构集合恰为 `amd64 arm64`（`.github/workflows/release-extras.yml:194-205`），`select(.platform.os == "linux")` 让 attestation 的 `unknown/unknown` manifest 不影响判定。
 5. **QEMU 只服务于 runtime 阶段。** arm64 的 runtime 阶段仍要跑 `apt-get install ca-certificates`（`Dockerfile:54-56`），所以 workflow 仍需在 Buildx 之前 setup QEMU（`.github/workflows/release-extras.yml:91-95`）；arm64 的 Rust 编译不在模拟下发生，这正是它比全量模拟快一个量级的原因。
 6. **基础镜像 pin 必须是索引 digest。** `Dockerfile:1` 与 `Dockerfile:52` 的 `@sha256:` pin 要能按架构解析；两条构建路径都成功即证明它们是索引 digest——若 pin 成按架构的 manifest digest，arm64 会直接解析失败。
-7. **不要用「能拉取」代替平台断言。** 旧的发布验证只检查 tag 可拉取与 digest（`docs/development.md:81-82`），发现不了 arm64 主机实际拿到 amd64 manifest；与断言同语义的人工命令及期望输出见 `docs/development.md:83-85`。
-8. **旧 tag 保持旧形状。** `v0.2.1` 及更早仍是单平台，重跑它们的 `release-extras` 会在断言处失败，这是「不覆盖已有产物」的预期行为（`docs/development.md:90`）。
+7. **不要用「能拉取」代替平台断言。** 旧的发布验证只检查 tag 可拉取与 digest（`docs/development.md:82-83`），发现不了 arm64 主机实际拿到 amd64 manifest；与断言同语义的人工命令及期望输出见 `docs/development.md:84-86`。
+8. **旧 tag 保持旧形状。** `v0.2.1` 及更早仍是单平台，重跑它们的 `release-extras` 会在断言处失败，这是「不覆盖已有产物」的预期行为（`docs/development.md:91`）。
 
 ## 为什么重要（Why This Matters）
 
