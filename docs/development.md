@@ -155,7 +155,7 @@ cargo audit
 
 | 层 | 范围 | 语言 |
 | --- | --- | --- |
-| A | `CONTRIBUTING.md`、`GOVERNANCE.md`、`SECURITY.md`、`CODE_OF_CONDUCT.md`、`CHANGELOG.md`、`.github/` 模板 | 英文单语 |
+| A | `CONTRIBUTING.md`、`GOVERNANCE.md`、`SECURITY.md`、`CODE_OF_CONDUCT.md`、`CHANGELOG.md`、`.github/`（模板、配置与 workflow） | 英文单语 |
 | B | `README.md`、`docs/index.md`、`docs/guide/**`、`docs/contracts/**`、`demo/README.md` | 英文权威 + `.zh-CN.md` 译本 |
 | C | `AGENTS.md`、`CONTEXT.md`、`plans/**`、`research/**`、`docs/development.md`、`docs/agents/**`、`docs/solutions/**` | 中文单语 |
 
