@@ -82,4 +82,4 @@ fn out_of_range_updates_are_noops() {
 - [Cargo doctests require a library target](doctest-lib-target-required.md) — 同一 CI/clippy pedantic 压力面：那篇是加 `#[must_use]` 过 pedantic，本篇是函数级 allow 过新 lint；lint 不同、修法不同，`deny pedantic` 的上下文相同。
 - [toml 1.x `FromStr` parses a value, not a document](../config/toml-1-fromstr-parses-a-value.md) — 同一工具链/依赖漂移家族：那篇是升级语义与 MSRV/deny 取舍（toml 1.x、Boa、安全公告），本篇是 clippy/lint 侧的漂移。
 - [Cross-compile the linux/arm64 release container image on an amd64-only runner](cross-compile-arm64-container-image-on-amd64-runner.md) — 同一 `rust-toolchain.toml` stable 机制面（channel 固定与工具链选择意外），那篇是构建镜像 concern，本篇是 lint allow concern。
-- PR #125（`src/request_log.rs` 调用链统一）是这次修复的载体；`docs/development.md:122` 的 CI stable 主门禁 + MSRV job 双轨是这次漂移的制度背景。
+- PR #125（`src/request_log.rs` 调用链统一）是这次修复的载体；`docs/development.md:125` 的 CI stable 主门禁 + MSRV job 双轨是这次漂移的制度背景。

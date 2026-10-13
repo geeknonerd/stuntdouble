@@ -71,6 +71,8 @@ docs: describe the release process
 
 `release-extras` 失败或取消时，Release 仍停留在 draft，从未公开；修复后重跑 release workflow（`gh workflow run release.yml --ref <tag> -f tag=<tag>`）。若上一次运行已在 draft 上附加 extras 资产（SBOM、`SHA256SUMS`、镜像 digest）或在 announce 阶段部分上传 dist 产物，先删除该 draft（`gh release delete <tag> --yes`，tag 保留）再重跑：前者会被幂等检查复用、与新构建的 dist 产物混用，后者会让 upload 因资产重名失败。不得覆盖已公开 Release 的资产；发布后发现产物问题应发新的 patch 版本（本项目不使用 prerelease 版本，见「版本号」）。只有 crates.io 发布损坏时才用 `cargo yank`，绝不删除已发布的版本。
 
+announce 的 upload 已成功、随后 undraft 报 `HTTP 403: Resource not accessible by integration`（URL 是 release PATCH 端点）时不属于上述协议：根因是 tag 提交与默认分支的 `.github/workflows/` 文件存在差异，`GITHUB_TOKEN` 拿不到 workflow 修改授权，删 draft 与重跑都会再次 403。处置：保留 draft，用带 workflow 修改授权的本地凭据执行 `gh release edit <tag> --draft=false` 公开，再按「发布验证」复核；诊断三步与发布窗口防复发见 [solutions/ci/undraft-403-when-tag-commit-differs-from-main-in-workflows.md](solutions/ci/undraft-403-when-tag-commit-differs-from-main-in-workflows.md)。
+
 ### 发布验证
 
 ```bash
