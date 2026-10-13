@@ -160,7 +160,7 @@ root = "./files"
 ```sh
 docker run --rm -p 127.0.0.1:8080:8080 \
   -v "$PWD:/etc/stuntdouble:ro" \
-  ghcr.io/geeknonerd/stuntdouble:v1.0.1
+  ghcr.io/geeknonerd/stuntdouble:v1.0.3
 ```
 
 镜像从 `/etc/stuntdouble/stuntdouble.toml` 读取配置，并监听 `8080` 端口。

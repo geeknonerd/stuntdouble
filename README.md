@@ -158,7 +158,7 @@ Keep the referenced `files/` directory and route scripts in the same project dir
 ```sh
 docker run --rm -p 127.0.0.1:8080:8080 \
   -v "$PWD:/etc/stuntdouble:ro" \
-  ghcr.io/geeknonerd/stuntdouble:v1.0.1
+  ghcr.io/geeknonerd/stuntdouble:v1.0.3
 ```
 
 The image reads `/etc/stuntdouble/stuntdouble.toml` and serves on port `8080`.
