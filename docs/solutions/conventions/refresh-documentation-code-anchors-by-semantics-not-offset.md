@@ -111,5 +111,5 @@ assert_anchor("src/script.rs", 1269, 1286,
 - [slice-status-surface-sweep.md](slice-status-surface-sweep.md) — 同类文档漂移约定：状态面与当前树描述需要语义核对；本文把方法收窄到内嵌源码行号锚点。
 - [blocking-upstream-body-to-async-stream-bridge.md](../architecture-patterns/blocking-upstream-body-to-async-stream-bridge.md) — 直接刷新实例；文内已注明 T6 代码行号会漂移。
 - [script-worker-contract-max-and-post-deadline-held-slot-tests.md](script-worker-contract-max-and-post-deadline-held-slot-tests.md) — 直接刷新实例；protocol-error 锚点从错误位置修正到 `unexpected_worker_error`。
-- [docs/development.md](../../development.md) — `docs-links` 只验证本地链接可达与双语配对，不检查内嵌代码锚点的语义漂移（`docs/development.md:175`）。
+- [docs/development.md](../../development.md) — `docs-links` 只验证本地链接可达与双语配对，不检查内嵌代码锚点的语义漂移（`docs/development.md:185`）。
 - GitHub: [issue #95](https://github.com/geeknonerd/stuntdouble/issues/95), [PR #104](https://github.com/geeknonerd/stuntdouble/pull/104) — 触发本次锚点刷新的类型化 worker 协议变更。
