@@ -3733,16 +3733,18 @@ ctx.respond(200, {}, JSON.stringify({
     });
     assert_eq!(response.status, 200, "body: {}", response.body);
     let json: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
-    // URL-shaped strings stay relative names inside the root, never system paths.
-    assert_eq!(json["url"], "file_not_found");
     #[cfg(unix)]
     {
+        // URL-shaped strings stay relative names inside the root, never system paths.
+        assert_eq!(json["url"], "file_not_found");
         // Backslashes are ordinary name bytes on Unix, so these stay in-root.
         assert_eq!(json["drive"], "file_not_found");
         assert_eq!(json["backslash"], "file_not_found");
     }
     #[cfg(windows)]
     {
+        // URL-shaped strings contain `:` which is illegal in Windows filenames, failing canonicalize with an I/O error.
+        assert_eq!(json["url"], "file_io_error");
         // On Windows the same strings are absolute and parent-directory escapes.
         assert_eq!(json["drive"], "file_path_invalid");
         assert_eq!(json["backslash"], "file_path_invalid");
