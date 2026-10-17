@@ -48,6 +48,13 @@ const LOOP_ITERATION_LIMIT: u64 = 100_000_000;
 const RECURSION_LIMIT: usize = 512;
 const VM_STACK_SIZE_LIMIT: usize = 10_240;
 
+/// Native stack for the thread that runs Boa. Windows gives the process main
+/// thread a 1 MiB stack, which Boa can exhaust during initialization or a
+/// normal script; Linux and macOS happen to have enough. The worker is
+/// disposable and already bounded by its deadline, so use one explicit size on
+/// every platform instead of relying on the host default.
+const SCRIPT_THREAD_STACK_SIZE: usize = 8 * 1024 * 1024;
+
 #[cfg(unix)]
 const SENTINEL_STACK_SIZE: usize = 256 * 1024;
 
@@ -1718,7 +1725,25 @@ fn worker_main(memory_limit_mb: u64) -> std::io::Result<()> {
             "expected a job line",
         ));
     };
-    let message = match evaluate_in_worker(&script, &request) {
+    // Boa recurses on the native stack; run it on a thread with a fixed,
+    // platform-independent stack so Windows' 1 MiB main-thread default cannot
+    // turn an ordinary script into a stack-overflow crash.
+    std::thread::Builder::new()
+        .name("script-worker-eval".into())
+        .stack_size(SCRIPT_THREAD_STACK_SIZE)
+        .spawn(move || run_job(&script, &request))
+        .map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("cannot start script evaluation thread: {error}"),
+            )
+        })?
+        .join()
+        .map_err(|_| std::io::Error::other("script evaluation thread panicked"))?
+}
+
+fn run_job(script: &str, request: &Json) -> std::io::Result<()> {
+    let message = match evaluate_in_worker(script, request) {
         Ok(result) => WorkerMessage::FinalResult(FinalResult::Success(result)),
         Err(Error::UpstreamUnreachable { message, kind }) => {
             let Some(kind) = FinalErrorKind::from_upstream(kind) else {
