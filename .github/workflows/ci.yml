@@ -56,6 +56,31 @@ jobs:
           ./.github/scripts/check-release-assets.sh --self-test
           ./.github/scripts/ensure-draft-release.sh --self-test
 
+  test-macos:
+    name: test-macos
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: cargo
+        run: echo "exists=$([ -f Cargo.toml ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - if: steps.cargo.outputs.exists == 'true'
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - if: steps.cargo.outputs.exists == 'true'
+        run: cargo test --workspace --all-features
+
+  test-windows:
+    name: test-windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: cargo
+        shell: bash
+        run: echo "exists=$([ -f Cargo.toml ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - if: steps.cargo.outputs.exists == 'true'
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - if: steps.cargo.outputs.exists == 'true'
+        run: cargo test --workspace --all-features
+
   release-drift:
     name: release-drift
     runs-on: ubuntu-latest
