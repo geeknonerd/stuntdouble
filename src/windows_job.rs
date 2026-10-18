@@ -9,14 +9,18 @@
 //! terminates the worker in the kernel on every exit path, including a hard
 //! kill of the server, which replaces the Unix parent sentinel.
 //!
+//! The job handle is stored as `std::os::windows::io::OwnedHandle`, which
+//! closes it exactly once and is `Send`, so holding the guard across awaits
+//! keeps the request-handler future `Send`.
+//!
 //! ADR 0014 (revised by #102) records this module as the crate's single
 //! reviewed `unsafe` exception: the crate denies `unsafe_code`, and every
 //! block below states the invariant it relies on.
 
 use std::io;
-use std::os::windows::io::RawHandle;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
+use windows_sys::Win32::Foundation::GetLastError;
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
     SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
@@ -25,7 +29,14 @@ use windows_sys::Win32::System::JobObjects::{
 
 /// An anonymous job object that terminates its workers when the last handle
 /// closes. It owns the only handle the process creates for the job.
-pub(crate) struct WorkerJob(HANDLE);
+pub(crate) struct WorkerJob(OwnedHandle);
+
+// The worker runs inside a request-handler future, so the guard has to stay
+// `Send` even though the future holds it across awaits.
+const _: fn() = || {
+    fn assert_send<T: Send>() {}
+    assert_send::<WorkerJob>();
+};
 
 impl WorkerJob {
     /// Create an empty job holding the configured commit cap and the
@@ -39,6 +50,10 @@ impl WorkerJob {
         if handle.is_null() {
             return Err(os_error());
         }
+        // SAFETY: `handle` is a live job handle from CreateJobObjectW, and no
+        // other owner exists, so moving it into an OwnedHandle makes that
+        // guard the single owning reference that closes it exactly once.
+        let job = unsafe { OwnedHandle::from_raw_handle(handle) };
         let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
         info.BasicLimitInformation.LimitFlags =
             JOB_OBJECT_LIMIT_PROCESS_MEMORY | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -49,47 +64,33 @@ impl WorkerJob {
         // argument is exactly its size. The pointer stays valid for the call.
         let applied = unsafe {
             SetInformationJobObject(
-                handle,
+                job.as_raw_handle(),
                 JobObjectExtendedLimitInformation,
                 (&raw const info).cast(),
                 size_of_extended_limit_info(),
             )
         };
         if applied == 0 {
-            let error = os_error();
-            // SAFETY: `handle` came from CreateJobObjectW, is non-null, and no
-            // other owner exists yet, so this closes the only reference.
-            unsafe { CloseHandle(handle) };
-            return Err(error);
+            // `job` drops here and closes the handle.
+            return Err(os_error());
         }
-        Ok(Self(handle))
+        Ok(Self(job))
     }
 
     /// Associate a running worker with this job. The caller must pass the
     /// process handle of a worker it just spawned, and must keep this value
     /// alive until that worker is reaped.
     pub(crate) fn assign(&self, process: RawHandle) -> io::Result<()> {
-        // SAFETY: `self.0` is a live job handle exclusively owned by this
+        // SAFETY: `self.0` holds a live job handle exclusively owned by this
         // value, and `process` is the caller's live process handle. Handles
         // from `CreateProcess` carry the required
         // PROCESS_SET_QUOTA | PROCESS_TERMINATE rights, and the job handle
         // carries JOB_OBJECT_ASSIGN_PROCESS because this process created it.
-        let assigned = unsafe { AssignProcessToJobObject(self.0, process) };
+        let assigned = unsafe { AssignProcessToJobObject(self.0.as_raw_handle(), process) };
         if assigned == 0 {
             return Err(os_error());
         }
         Ok(())
-    }
-}
-
-impl Drop for WorkerJob {
-    fn drop(&mut self) {
-        // SAFETY: the handle was created by CreateJobObjectW and is owned by
-        // this value alone, so it is closed exactly once. Closing the last
-        // handle is what terminates a worker that outlived the server.
-        unsafe {
-            CloseHandle(self.0);
-        }
     }
 }
 
