@@ -1,7 +1,7 @@
 ---
 title: "Bridge blocking upstream reads into an async streaming response"
 date: 2026-09-21
-last_updated: 2026-09-29
+last_updated: 2026-10-18
 category: architecture-patterns
 module: upstream HTTP streaming bridge
 problem_type: architecture_pattern
@@ -22,17 +22,17 @@ tags: [streaming, backpressure, axum, tokio, spawn-blocking, ureq, ctx-http-pipe
 
 这条 knowledge-track 学习记录 `ctx.http.pipe` 背后的引擎模式（T6，issue #9，PR #19；T7 的完成日志扩展见 PR #25 与下方「T7 扩展」）。它是架构模式，不是某个路由的错误映射约定：主题是如何把同步、阻塞的字节生产者接到异步 HTTP 响应上，同时不让 body 进入 JavaScript 堆。
 
-脚本在每请求独立的 worker 进程里运行（#90；`plans/adr/0014-process-isolated-script-runner.md:18`），宿主能力与阻塞客户端留在父进程：父进程用 `tokio::task::spawn_blocking` 分发 `ctx.http.*` 等 bridge 调用，因此 `ctx.http.get` 与 `ctx.http.pipe` 仍可调用 `ureq` 的阻塞客户端而不占用 Tokio 的异步 worker（`src/script.rs:1344-1361` 的 `dispatch_host`；同步宿主约束另见 `src/upstream.rs:4-8`）。`ctx.http.pipe` 增加了第二个生产者：上游响应头确定之后，body 由阻塞的 `ureq` reader 读取，最终必须送达异步的 axum `Body`。
+脚本在每请求独立的 worker 进程里运行（#90；`plans/adr/0014-process-isolated-script-runner.md:18`），宿主能力与阻塞客户端留在父进程：父进程用 `tokio::task::spawn_blocking` 分发 `ctx.http.*` 等 bridge 调用，因此 `ctx.http.get` 与 `ctx.http.pipe` 仍可调用 `ureq` 的阻塞客户端而不占用 Tokio 的异步 worker（`src/script.rs:1356-1373` 的 `dispatch_host`；同步宿主约束另见 `src/upstream.rs:4-8`）。`ctx.http.pipe` 增加了第二个生产者：上游响应头确定之后，body 由阻塞的 `ureq` reader 读取，最终必须送达异步的 axum `Body`。
 
-#82（issue #29）把并发 worker 数量限制为宿主持有的 4–16 槽 semaphore：取不到槽的 Route 立即以 500 `script_error` 失败，`--verbose` detail 为 `script worker capacity exhausted`（`src/server.rs:264-279`、`docs/contracts/ctx-api.md:79`）。#90 之后 permit 的生命周期就是 worker 进程的生命周期：deadline 到期由 `run_worker` 强杀并回收子进程，permit 在 `execute` 返回时释放（`src/script.rs:1462-1559`、`src/script.rs:1585-1594`），不再有「跨过 reply deadline 一直持有到循环上限」的语义。父进程也只在成功的 `final_result` 之后才经 `finish_outcome` / `HostState::take_streams` 把 pipe 流交给响应构建路径，deadline 或崩溃路径则随 `HostState` 丢弃它，客户端拿到 500 而不是 partial 200（`src/script.rs:1302-1312`、`src/script.rs:1533-1541`；回归 `piped_body_is_dropped_when_the_worker_exceeds_the_deadline`，`tests/cli.rs:2060-2086`）。这不改变流式接缝本身，但给该接缝加了一个容量前提；对应的契约级回归设计见 [script-worker-contract-max-and-post-deadline-held-slot-tests.md](../conventions/script-worker-contract-max-and-post-deadline-held-slot-tests.md)。
+#82（issue #29）把并发 worker 数量限制为宿主持有的 4–16 槽 semaphore：取不到槽的 Route 立即以 500 `script_error` 失败，`--verbose` detail 为 `script worker capacity exhausted`（`src/server.rs:264-279`、`docs/contracts/ctx-api.md:79`）。#90 之后 permit 的生命周期就是 worker 进程的生命周期：deadline 到期由 `run_worker` 强杀并回收子进程，permit 在 `execute` 返回时释放（`src/script.rs:1477-1590`、`src/script.rs:1640-1649`），不再有「跨过 reply deadline 一直持有到循环上限」的语义。父进程也只在成功的 `final_result` 之后才经 `finish_outcome` / `HostState::take_streams` 把 pipe 流交给响应构建路径，deadline 或崩溃路径则随 `HostState` 丢弃它，客户端拿到 500 而不是 partial 200（`src/script.rs:1314-1324`、`src/script.rs:1564-1572`；回归 `piped_body_is_dropped_when_the_worker_exceeds_the_deadline`，`tests/cli.rs:2167-2193`）。这不改变流式接缝本身，但给该接缝加了一个容量前提；对应的契约级回归设计见 [script-worker-contract-max-and-post-deadline-held-slot-tests.md](../conventions/script-worker-contract-max-and-post-deadline-held-slot-tests.md)。
 
 T11（issue #52）已落地本地文件流：`ctx.file.stream` 复用「由宿主持有有界 channel，而不是脚本堆」这条接缝，错误分类与 framing header 决策则独立定义（见下方「T11 扩展」）。上传方向（T12，PR #57）也已落在同一接缝上：`ctx.request.files[].stream()` 复用同一条有界 channel 路径。
 
 实现分三层：
 
-1. JS prelude 校验调用，只记录 stream 标记与客户端 status/headers（`src/script.rs:524-542`）。
-2. 原生桥接调用 `UpstreamAccess::pipe`，把上游 `PipeBody` 存进父进程请求级的 `HostState.pipe`（不再是线程局部存储），只把 status/header 元数据返回给 worker（`src/script.rs:832-838`、`src/script.rs:1269-1286`）。
-3. worker 成功退出后，`finish_outcome` 用 `HostState::take_streams()` 取走 stream，`parse_script_body` 把它转换为 `ResponseBody::Stream`，axum 在 `server::stream_body` 用 `Body::from_stream(ReceiverStream::new(receiver))` 适配（`src/script.rs:1158-1172`、`src/script.rs:1302-1312`、`src/script.rs:1567-1578`、`src/server.rs:859-880`）。
+1. JS prelude 校验调用，只记录 stream 标记与客户端 status/headers（`src/script.rs:532-550`）。
+2. 原生桥接调用 `UpstreamAccess::pipe`，把上游 `PipeBody` 存进父进程请求级的 `HostState.pipe`（不再是线程局部存储），只把 status/header 元数据返回给 worker（`src/script.rs:840-846`、`src/script.rs:1281-1298`）。
+3. worker 成功退出后，`finish_outcome` 用 `HostState::take_streams()` 取走 stream，`parse_script_body` 把它转换为 `ResponseBody::Stream`，axum 在 `server::stream_body` 用 `Body::from_stream(ReceiverStream::new(receiver))` 适配（`src/script.rs:1170-1184`、`src/script.rs:1314-1324`、`src/script.rs:1623-1634`、`src/server.rs:859-880`）。
 
 公开契约给出可观察的结果：body 直接流向客户端，从不进入脚本堆，并保留上游 2xx 状态与相关 range header（`docs/contracts/ctx-api.md:51-58`）。ADR 记录了这条路径为何偏离 `ctx.http.get` 的普通「HTTP 响应即数据」规则（`plans/adr/0005-upstream-failure-semantics.md:45-56`）。
 
@@ -42,7 +42,7 @@ T11（issue #52）已落地本地文件流：`ctx.file.stream` 复用「由宿�
 
 ### 1. 让字节流留在 JavaScript 堆之外
 
-`ctx.http.pipe` 不是返回字节的 API。它的 JS wrapper 校验 `{status, headers}`、调用原生桥接，并记录 `{stream: true, status, headers}`；它从不接收 body 字节（`src/script.rs:524-542`）。worker 侧原生回调只把调用转交给父进程（`src/script.rs:832-838`）；父进程的 `HostState::dispatch` 把 `PipeBody`（上游 stream 与调用终止句柄）存进请求级 `HostState.pipe`，只把 status/header 的 JSON 返回 worker（`src/script.rs:1269-1286`）。`ResponseBody::Stream` 在文档注释中明确写着：把帧从上游连接搬到客户端，且不进入 JavaScript 堆（`src/script.rs:140-142`）。
+`ctx.http.pipe` 不是返回字节的 API。它的 JS wrapper 校验 `{status, headers}`、调用原生桥接，并记录 `{stream: true, status, headers}`；它从不接收 body 字节（`src/script.rs:532-550`）。worker 侧原生回调只把调用转交给父进程（`src/script.rs:840-846`）；父进程的 `HostState::dispatch` 把 `PipeBody`（上游 stream 与调用终止句柄）存进请求级 `HostState.pipe`，只把 status/header 的 JSON 返回 worker（`src/script.rs:1281-1298`）。`ResponseBody::Stream` 在文档注释中明确写着：把帧从上游连接搬到客户端，且不进入 JavaScript 堆（`src/script.rs:147-149`）。
 
 宿主侧表示是带类型的 receiver，而不是 `Vec<u8>` 或 JavaScript 数组：
 
@@ -55,33 +55,33 @@ pub type BodyStream =
 
 ### 2. 在暴露 body 之前先定下响应头
 
-`UpstreamAccess::pipe` 有意按这个顺序执行（`src/upstream.rs:393-448`）：
+`UpstreamAccess::pipe` 有意按这个顺序执行（`src/upstream.rs:353-410`）：
 
-1. 解析并校验 URL，包含首次 allowlist 检查（`src/upstream.rs:398-402`）。
-2. 跟随重定向并取得上游响应头（`src/upstream.rs:403-412`）。
-3. 在创建 body channel 之前拒绝最终非 2xx 状态（`src/upstream.rs:414-417`）。
-4. 合并脚本 header 与上游 range 元数据，然后选定客户端状态（`src/upstream.rs:424-438`）。
-5. 创建有界 channel，把阻塞 reader 移入 `spawn_blocking(pump_body)`，返回 `PipeResponse`（`src/upstream.rs:439-448`）。
+1. 解析并校验 URL，包含首次 allowlist 检查（`src/upstream.rs:360-363`）。
+2. 跟随重定向并取得上游响应头（`src/upstream.rs:367-374`）。
+3. 在创建 body channel 之前拒绝最终非 2xx 状态（`src/upstream.rs:377-379`）。
+4. 合并脚本 header 与上游 range 元数据，然后选定客户端状态（`src/upstream.rs:381-398`）。
+5. 创建有界 channel，把阻塞 reader 移入 `spawn_blocking(pump_body)`，返回 `PipeResponse`（`src/upstream.rs:399-409`）。
 
-状态默认值就是上游的 2xx 状态：`client_status.unwrap_or(upstream_status)`（`src/upstream.rs:438`）。因此普通下载答 200，而 Range 响应答 206 时保留 206；测试 `ctx_http_pipe_defaults_to_the_upstream_2xx_status` 用 207 响应证明这是透传而不是硬编码 200（`tests/cli.rs:4537-4549`）。契约记录了同一条规则（`docs/contracts/ctx-api.md:54`）。
+状态默认值就是上游的 2xx 状态：`client_status.unwrap_or(upstream_status)`（`src/upstream.rs:398`）。因此普通下载答 200，而 Range 响应答 206 时保留 206；测试 `ctx_http_pipe_defaults_to_the_upstream_2xx_status` 用 207 响应证明这是透传而不是硬编码 200（`tests/cli.rs:4647-4659`）。契约记录了同一条规则（`docs/contracts/ctx-api.md:54`）。
 
 这个顺序正是最终非 2xx 无法沿用 `ctx.http.get`「响应即数据」规则的原因。一旦 status 与 headers 返回给异步侧，脚本就无法先检查 body 再改写响应头。因此 T6 修订改为抛出可捕获的 `upstream_http_error`（`plans/adr/0005-upstream-failure-semantics.md:45-56`；`docs/contracts/ctx-api.md:56`）。
 
 ### 3. 在流开始前完成失败分类，并保持策略边界
 
-引擎错误变体在 `src/upstream.rs:243-277` 映射为稳定的脚本可见错误码：
+引擎错误变体在 `src/upstream.rs:227-238` 映射为稳定的脚本可见错误码：
 
 | 流开始前的失败 | `error.code` | 当前代码树行为 |
 | --- | --- | --- |
-| 初始 URL 解析失败，或 scheme 不是 `http`/`https` | `upstream_url_invalid` | `pipe` 把 `Url::parse` 与初始 scheme 校验映射为 `Error::InvalidUrl`（`src/upstream.rs:398-402`、`src/upstream.rs:684-691`）。 |
-| 重定向链超过三跳、`Location` 不是可见 ASCII header 值（`HeaderValue::to_str()` 失败）、`Location` 无法 join，或重定向目标使用非 HTTP scheme | `upstream_redirect_error` | `send_following_redirects` 对这些情况调用它的 `redirect_error` 分类器（`src/upstream.rs:518-557`；上限是 `src/upstream.rs:20-21` 的 `MAX_REDIRECTS = 3`）。 |
-| DNS、连接、TLS 或超时失败 | `upstream_unreachable` | `Error::Transport` 在 `src/upstream.rs:270-277` 映射；`ctx_http_pipe_transport_failure_is_catchable` 覆盖连接失败（`tests/cli.rs:4417-4436`），pipe 专属的超时目前还没有专门回归测试。 |
-| 上游最终非 2xx 响应 | `upstream_http_error` | `pipe` 在创建 channel 之前拒绝该状态（`src/upstream.rs:414-417`）；未捕获时变成普通的 500 `script_error`，脚本也可以捕获并映射（`tests/cli.rs:4380-4414`）。 |
-| URL 或 host 被策略拒绝，包括 allowlist 未命中 | `script_error` | 对不在 allowlist 中的 host，`validate` 始终返回 `Error::Policy`，不伪装成上游故障（`src/upstream.rs:684-711`）。 |
+| 初始 URL 解析失败，或 scheme 不是 `http`/`https` | `upstream_url_invalid` | `pipe` 把 `Url::parse` 与初始 scheme 校验映射为 `Error::InvalidUrl`（`src/upstream.rs:360-363`、`src/upstream.rs:635-643`）。 |
+| 重定向链超过三跳、`Location` 不是可见 ASCII header 值（`HeaderValue::to_str()` 失败）、`Location` 无法 join，或重定向目标使用非 HTTP scheme | `upstream_redirect_error` | `send_following_redirects` 对这些情况调用它的 `redirect_error` 分类器（`src/upstream.rs:487-506`；上限是 `src/upstream.rs:20-21` 的 `MAX_REDIRECTS = 3`）。 |
+| DNS、连接、TLS 或超时失败 | `upstream_unreachable` | `Error::Transport` 在 `src/upstream.rs:231-237` 映射；`ctx_http_pipe_transport_failure_is_catchable` 覆盖连接失败（`tests/cli.rs:4527-4546`），pipe 专属的超时目前还没有专门回归测试。 |
+| 上游最终非 2xx 响应 | `upstream_http_error` | `pipe` 在创建 channel 之前拒绝该状态（`src/upstream.rs:377-379`）；未捕获时变成普通的 500 `script_error`，脚本也可以捕获并映射（`tests/cli.rs:4490-4524`）。 |
+| URL 或 host 被策略拒绝，包括 allowlist 未命中 | `script_error` | 对不在 allowlist 中的 host，`validate` 始终返回 `Error::Policy`，不伪装成上游故障（`src/upstream.rs:635-660`）。 |
 
-allowlist 边界是有意为之。每个重定向目标都会重新校验，allowlist 拒绝始终保持策略错误，即使调用方 API 会把错误 scheme 归类为 `upstream_redirect_error` 或 `upstream_url_invalid`（`src/upstream.rs:518-557`、`src/upstream.rs:684-711`）。demo 路由把 `upstream_url_invalid`、`upstream_http_error`、`upstream_redirect_error`、`upstream_unreachable` 映射为业务 502，但有意重新抛出其他错误，使 allowlist／配置故障保持 `script_error`（`demo/scripts/download.js:77-101`；`tests/cli.rs:4946-4954`）。
+allowlist 边界是有意为之。每个重定向目标都会重新校验，allowlist 拒绝始终保持策略错误，即使调用方 API 会把错误 scheme 归类为 `upstream_redirect_error` 或 `upstream_url_invalid`（`src/upstream.rs:487-506`、`src/upstream.rs:635-660`）。demo 路由把 `upstream_url_invalid`、`upstream_http_error`、`upstream_redirect_error`、`upstream_unreachable` 映射为业务 502，但有意重新抛出其他错误，使 allowlist／配置故障保持 `script_error`（`demo/scripts/download.js:72-103`；`tests/cli.rs:5056-5064`）。
 
-当前代码树有一个容易忽略的边界情况：**没有** `Location` 的 3xx 响应不会被 `send_following_redirects` 转成 `Error::Redirect`，而是作为最终响应落回（`src/upstream.rs:546-555`）。接着 `pipe` 把该 3xx 当作非 2xx，抛出 `upstream_http_error` 而不是 `upstream_redirect_error`（`src/upstream.rs:414-417`）。demo 同时捕获这两类并答 `pdf_bad_gateway`，因此它的 502 级测试无法区分二者（`tests/cli.rs:4979-4993`）。按本次会话的结论，不要假定 ADR 中「`Location` 不可用」的措辞涵盖当前实现里缺失 `Location` 的情况；如果这个代码差异有实际影响，需要显式增加宿主分支、对 `error.code` 的回归断言，并同步更新契约与 ADR。
+当前代码树有一个容易忽略的边界情况：**没有** `Location` 的 3xx 响应不会被 `send_following_redirects` 转成 `Error::Redirect`，而是作为最终响应落回（`src/upstream.rs:498-506`）。接着 `pipe` 把该 3xx 当作非 2xx，抛出 `upstream_http_error` 而不是 `upstream_redirect_error`（`src/upstream.rs:377-379`）。demo 同时捕获这两类并答 `pdf_bad_gateway`，因此它的 502 级测试无法区分二者（`tests/cli.rs:5089-5103`）。按本次会话的结论，不要假定 ADR 中「`Location` 不可用」的措辞涵盖当前实现里缺失 `Location` 的情况；如果这个代码差异有实际影响，需要显式增加宿主分支、对 `error.code` 的回归断言，并同步更新契约与 ADR。
 
 引擎级错误分类只是故事的前半段。客户端可见的业务错误表由路由脚本掌握；这一独立关注点记录在 `docs/solutions/conventions/script-owned-upstream-error-mapping.md`，不应在此重复。
 
@@ -91,12 +91,12 @@ pipe 路径不缓冲上游 body。它使用：
 
 - 容量为四帧的 channel（`PIPE_CHANNEL_CAPACITY = 4`，`src/upstream.rs:27-28`）；
 - 每次读取最多 64 KiB 的读缓冲（`PIPE_CHUNK_BYTES = 64 * 1024`，`src/upstream.rs:30-31`）；
-- `UpstreamAccess::pipe` 中的 `tokio::sync::mpsc::channel(PIPE_CHANNEL_CAPACITY)`（`src/upstream.rs:439-441`）；
-- 为阻塞 `ureq` reader 使用 `tokio::task::spawn_blocking`（`src/upstream.rs:440-441`）。
+- `UpstreamAccess::pipe` 中的 `tokio::sync::mpsc::channel(PIPE_CHANNEL_CAPACITY)`（`src/upstream.rs:399-401`）；
+- 为阻塞 `ureq` reader 使用 `tokio::task::spawn_blocking`（`src/upstream.rs:400-401`）。
 
-生产者循环 `std::io::Read`，用 `blocking_send` 发送每一帧，把发送失败视为任务结束（`src/upstream.rs:747-768`）。`blocking_send` 就是背压点：reader 无法任意超前于 HTTP 消费者，因此慢客户端不会让宿主缓冲整个文件。同一个发送失败分支也是取消点——当响应 body（以及 receiver）被丢弃时命中（`src/upstream.rs:755-758`）。
+生产者循环 `std::io::Read`，用 `blocking_send` 发送每一帧，把发送失败视为任务结束（`src/upstream.rs:694-714`）。`blocking_send` 就是背压点：reader 无法任意超前于 HTTP 消费者，因此慢客户端不会让宿主缓冲整个文件。同一个发送失败分支也是取消点——当响应 body（以及 receiver）被丢弃时命中（`src/upstream.rs:703-705`）。
 
-这也解释了为什么 `ctx.http.pipe` 不受 `ctx.http.get` 的 body 上限约束。`get` 用 `.limit(MAX_RESPONSE_BYTES).read_to_vec()` 读取（`src/upstream.rs:365-368`），上限是 8 MiB（`src/upstream.rs:24-25`）。pipe 路径从不调用该上限，而是通过有界 channel 流式发送帧。`ctx_http_pipe_streams_bodies_larger_than_the_get_cap` 发送 8 MiB + 1 字节并校验完整长度（`tests/cli.rs:4606-4619`）。按本次会话的结论，正确的内存模型是「有界帧数加上 reader 当前缓冲」，既不是「无界文件」，也不是「与 `get` 相同的 8 MiB 上限」；channel 与读取常量就是预期的边界。
+这也解释了为什么 `ctx.http.pipe` 不受 `ctx.http.get` 的 body 上限约束。`get` 用 `.limit(MAX_RESPONSE_BYTES).read_to_vec()` 读取（`src/upstream.rs:327-328`），上限是 8 MiB（`src/upstream.rs:24-25`）。pipe 路径从不调用该上限，而是通过有界 channel 流式发送帧。`ctx_http_pipe_streams_bodies_larger_than_the_get_cap` 发送 8 MiB + 1 字节并校验完整长度（`tests/cli.rs:4716-4729`）。按本次会话的结论，正确的内存模型是「有界帧数加上 reader 当前缓冲」，既不是「无界文件」，也不是「与 `get` 相同的 8 MiB 上限」；channel 与读取常量就是预期的边界。
 
 消费者侧在 T6 时同样很小；T7 起由 `stream_body` / `relay_stream` 接管：
 
@@ -109,15 +109,15 @@ T7 的 `server::stream_body` 先把 `PipeBody` 解构，经 relay channel 转发
 
 ### 5. 保持 range 语义与 header 归属
 
-客户端 `Range` header 在 `execute` 构建请求级 `UpstreamAccess` 时从请求快照捕获（`src/script.rs:1602-1612`）。`ctx.http.get` 明确向 fetch 路径传 `None`，因此不转发客户端 range（`src/upstream.rs:336-347`）。`ctx.http.pipe` 把 `self.client_range` 传入跟随重定向的 fetch 路径（`src/upstream.rs:405-412`），`fetch` 再把它加为上游 `Range` header（`src/upstream.rs:561-576`）。
+客户端 `Range` header 在 `execute` 构建请求级 `UpstreamAccess` 时从请求快照捕获（`src/script.rs:1657-1670`）。`ctx.http.get` 明确向 fetch 路径传 `None`，因此不转发客户端 range（`src/upstream.rs:304-311`）。`ctx.http.pipe` 把 `self.client_range` 传入跟随重定向的 fetch 路径（`src/upstream.rs:367-374`），`fetch` 再把它加为上游 `Range` header（`src/upstream.rs:523-525`）。
 
-响应 header 方面，脚本给出的 header 是基础列表。宿主只在脚本没有设置同名（大小写不敏感）header 时复制上游的 `Content-Range` 与 `Content-Length`（`src/upstream.rs:424-436`），不会盲目透传全部上游 header。这样脚本掌握 `Content-Type`、`Content-Disposition` 等 header，同时保留客户端需要的 range 元数据。`ctx_http_pipe_streams_upstream_bytes_with_status_and_headers` 校验脚本 header 与上游 `Content-Length`（`tests/cli.rs:4189-4228`）；demo 的 Range 测试校验 `Range` 抵达上游、客户端状态保持 206、body 为部分内容、`Content-Range` 抵达客户端（`tests/cli.rs:4918-4943`）。
+响应 header 方面，脚本给出的 header 是基础列表。宿主只在脚本没有设置同名（大小写不敏感）header 时复制上游的 `Content-Range` 与 `Content-Length`（`src/upstream.rs:386-397`），不会盲目透传全部上游 header。这样脚本掌握 `Content-Type`、`Content-Disposition` 等 header，同时保留客户端需要的 range 元数据。`ctx_http_pipe_streams_upstream_bytes_with_status_and_headers` 校验脚本 header 与上游 `Content-Length`（`tests/cli.rs:4299-4338`）；demo 的 Range 测试校验 `Range` 抵达上游、客户端状态保持 206、body 为部分内容、`Content-Range` 抵达客户端（`tests/cli.rs:5028-5053`）。
 
 `Content-Length` 是保留而非合成：如果上游使用 chunked 传输且没有提供 `Content-Length`，pipe 路径没有长度可加。demo README 说明此时客户端收到的是 chunked 响应，body 中途失败只能截断它（`demo/README.md:101-105`）。
 
 ### 6. 把流开始后的失败当作 body 终止，而不是新状态
 
-`pipe` 返回之后，HTTP 响应头已经固定。如果 `pump_body` 遇到读取错误，它把 `Err(error)` 作为下一个 channel 项发送并停止（`src/upstream.rs:760-764`）。`Body::from_stream` 把该项暴露为 body 错误；它无法追溯修改状态或 header。ADR 与公开契约直接写明后果：流一旦开始，body 中途的上游失败只能截断客户端 body（`plans/adr/0005-upstream-failure-semantics.md:56`；`docs/contracts/ctx-api.md:58`）。
+`pipe` 返回之后，HTTP 响应头已经固定。如果 `pump_body` 遇到读取错误，它把 `Err(error)` 作为下一个 channel 项发送并停止（`src/upstream.rs:708-711`）。`Body::from_stream` 把该项暴露为 body 错误；它无法追溯修改状态或 header。ADR 与公开契约直接写明后果：流一旦开始，body 中途的上游失败只能截断客户端 body（`plans/adr/0005-upstream-failure-semantics.md:56`；`docs/contracts/ctx-api.md:58`）。
 
 这就是错误分类存在硬边界的原因：
 
@@ -128,23 +128,23 @@ T7 的 `server::stream_body` 先把 `PipeBody` 解构，经 relay channel 转发
 
 ### 7. 让归属保持请求级，清理自动发生
 
-`ctx.http.*` 与 `ctx.request.files[].stream()` 的流由父进程请求级的 `HostState` 持有，不是全局状态（`src/script.rs:1221-1227`、`src/script.rs:1302-1312`）；worker 只是请求方。宿主只在成功 `final_result` 后 `take_streams()`；脚本抛错、超时或崩溃时 stream 随 `HostState` 一起 drop，`pump_body` 通过 `blocking_send` 观察到 receiver 消失并退出。预期的生命周期也覆盖客户端断开：当异步响应 body 丢弃 receiver 时，阻塞生产者下一次发送失败，阻塞任务随之结束（`src/upstream.rs:755-758`）。
+`ctx.http.*` 与 `ctx.request.files[].stream()` 的流由父进程请求级的 `HostState` 持有，不是全局状态（`src/script.rs:1234-1239`、`src/script.rs:1314-1324`）；worker 只是请求方。宿主只在成功 `final_result` 后 `take_streams()`；脚本抛错、超时或崩溃时 stream 随 `HostState` 一起 drop，`pump_body` 通过 `blocking_send` 观察到 receiver 消失并退出。预期的生命周期也覆盖客户端断开：当异步响应 body 丢弃 receiver 时，阻塞生产者下一次发送失败，阻塞任务随之结束（`src/upstream.rs:703-705`）。
 
-`script::execute` 的文档写明 permit 持有整个 worker 生命周期（`src/script.rs:1581-1594`）；worker 在独立进程里执行，deadline 由 `run_worker` 的强杀与回收兜底（`src/script.rs:1462-1559`）。因此流式设计不依赖中止生产者任务，而依赖 receiver 被丢弃。T11 起两个流式路径都有专门的客户端断开回归测试：`ctx_http_pipe_client_disconnect_mid_body_is_logged` 与 `ctx_file_stream_client_disconnect_mid_body_is_logged`；两者都断言完成日志记为 `client_disconnected`，且 relay 未跑完全部字节。
+`script::execute` 的文档写明 permit 持有整个 worker 生命周期（`src/script.rs:1636-1649`）；worker 在独立进程里执行，deadline 由 `run_worker` 的强杀与回收兜底（`src/script.rs:1477-1590`）。因此流式设计不依赖中止生产者任务，而依赖 receiver 被丢弃。T11 起两个流式路径都有专门的客户端断开回归测试：`ctx_http_pipe_client_disconnect_mid_body_is_logged` 与 `ctx_file_stream_client_disconnect_mid_body_is_logged`；两者都断言完成日志记为 `client_disconnected`，且 relay 未跑完全部字节。
 
 ## 为什么重要
 
-1. **它让二进制传输无需脚本堆拷贝。** `ctx.http.get` 返回 `text()`/`bytes()`，上限 8 MiB（`docs/contracts/ctx-api.md:43-49`）；pipe 路径把字节留在有界宿主 channel 中，并测试了超过该上限的情况（`tests/cli.rs:4606-4619`）。没有这条接缝，任何大响应或二进制响应要么失败，要么把显式缓冲策略硬塞进脚本运行时。
+1. **它让二进制传输无需脚本堆拷贝。** `ctx.http.get` 返回 `text()`/`bytes()`，上限 8 MiB（`docs/contracts/ctx-api.md:43-49`）；pipe 路径把字节留在有界宿主 channel 中，并测试了超过该上限的情况（`tests/cli.rs:4716-4729`）。没有这条接缝，任何大响应或二进制响应要么失败，要么把显式缓冲策略硬塞进脚本运行时。
 
-2. **它让 HTTP head/body 的顺序显式化。** status 与 headers 只在上游响应头已知之后、body reader 暴露之前选定（`src/upstream.rs:393-448`）。这正是 `upstream_http_error` 这条偏差必要且可预测、而不是与 `ctx.http.get` 偶然不一致的原因（ADR 0005 T6 修订，`plans/adr/0005-upstream-failure-semantics.md:45-56`）。
+2. **它让 HTTP head/body 的顺序显式化。** status 与 headers 只在上游响应头已知之后、body reader 暴露之前选定（`src/upstream.rs:353-410`）。这正是 `upstream_http_error` 这条偏差必要且可预测、而不是与 `ctx.http.get` 偶然不一致的原因（ADR 0005 T6 修订，`plans/adr/0005-upstream-failure-semantics.md:45-56`）。
 
-3. **它让策略失败与上游失败保持可区分。** allowlist 拒绝仍是 `script_error`，而 URL 畸形、不可跟随的重定向、传输层失败与上游最终状态各有可捕获错误码（`src/upstream.rs:243-277`、`src/upstream.rs:684-711`）。因此路由可以答业务 502，同时不掩盖运维配置故障。
+3. **它让策略失败与上游失败保持可区分。** allowlist 拒绝仍是 `script_error`，而 URL 畸形、不可跟随的重定向、传输层失败与上游最终状态各有可捕获错误码（`src/upstream.rs:227-238`、`src/upstream.rs:635-660`）。因此路由可以答业务 502，同时不掩盖运维配置故障。
 
 4. **它提供背压与清理信号，而不引入第二套执行模型。** 有界 channel 限制预读；T6 时 receiver 丢弃既是客户端断开信号也是生产者退出信号，T7 起改由 `relay_stream` 的 `sender.closed()` 显式观察客户端断开，channel 仍是生产者退出信号（`pump_body` / `relay_stream`）。脚本保持同步，HTTP 层保持异步，唯一的共享对象是由宿主持有的 stream。
 
 ## 何时适用
 
-- 新增或评审 `ctx.http.pipe` 行为时：状态选择、重定向处理、allowlist 行为、响应 header 与 Range 语义都穿过同一条「流前／流后」边界（`src/upstream.rs:393-448`；`docs/contracts/ctx-api.md:51-58`）。
+- 新增或评审 `ctx.http.pipe` 行为时：状态选择、重定向处理、allowlist 行为、响应 header 与 Range 语义都穿过同一条「流前／流后」边界（`src/upstream.rs:353-410`；`docs/contracts/ctx-api.md:51-58`）。
 - 把另一类字节源流进 axum 响应时。T11 的 `ctx.file.stream` 已按同一「有界 `mpsc` + `Body::from_stream`」接缝落地（读取端是 `tokio::fs::File`，而非 `spawn_blocking` + `ureq`），错误分类与响应头决策针对文件能力单独定义，没有照抄 HTTP 上游语义；上传（T12，PR #57）也是同一接缝的使用者（`docs/contracts/ctx-api.md`）。
 - 实现反向上传方向时：沿用同样的有界 channel 与背压原则，但归属与失败映射要贴合上传契约。
 - 路由需要在响应前检查、变换或完整校验 body 时：使用 `ctx.http.get` 而不是 `pipe`，并考虑 8 MiB 上限（`docs/contracts/ctx-api.md:48`）。
@@ -197,7 +197,7 @@ fn pump_body(
 }
 ```
 
-这是 `src/upstream.rs:747-768` 的当前实现；`Interrupted` 分支是有意保留的，因为阻塞读取可能被中断而不代表 body 结束。
+这是 `src/upstream.rs:694-714` 的当前实现；`Interrupted` 分支是有意保留的，因为阻塞读取可能被中断而不代表 body 结束。
 
 ### 异步适配器
 
@@ -236,7 +236,7 @@ try {
 }
 ```
 
-这与 `demo/scripts/download.js:77-101` 一致。`throw error` 就是策略边界：allowlist 拒绝不会被转成网关故障。路由级映射约定的完整内容见 `docs/solutions/conventions/script-owned-upstream-error-mapping.md`。
+这与 `demo/scripts/download.js:72-103` 一致。`throw error` 就是策略边界：allowlist 拒绝不会被转成网关故障。路由级映射约定的完整内容见 `docs/solutions/conventions/script-owned-upstream-error-mapping.md`。
 
 验证接缝本身也是一个持久决策（会话历史）：更早的 spec 会话把端到端检查固定在构建出的二进制 + 真实 HTTP + 标准库 fake upstream 上，因此流式 body 的不变量是通过外部边界断言，而不是对桥接内部做私有断言。
 
@@ -244,19 +244,19 @@ try {
 
 | 不变量 | 测试／证据 |
 | --- | --- |
-| 脚本 status/headers、上游字节与上游 `Content-Length` 随流一起传递 | `ctx_http_pipe_streams_upstream_bytes_with_status_and_headers`（`tests/cli.rs:4189-4228`） |
+| 脚本 status/headers、上游字节与上游 `Content-Length` 随流一起传递 | `ctx_http_pipe_streams_upstream_bytes_with_status_and_headers`（`tests/cli.rs:4299-4338`） |
 | 完成日志在 body 结束后写出，并记录精确 relay 字节数 | `ctx_http_pipe_streams_upstream_bytes_with_status_and_headers`（断言完成日志、`response_bytes`、空 error）；通道先关闭时的分类见下方「完成态与客户端断开的竞态（issue #37）」 |
 | 中途上游读取失败记为 `upstream_stream_error`，不改变已发出的状态 | `ctx_http_pipe_mid_stream_failure_is_logged_after_headers`（截断 `Content-Length`；断言 error/kind/duration 与 relay bytes；客户端长度只断言 `<=` 上游长度） |
 | 客户端中途断开的 `client_disconnected` 分类 | `ctx_http_pipe_client_disconnect_mid_body_is_logged`（8 MiB body，客户端读 1 字节后断开）端到端断言该分类；`StreamOutcome::from_channel_close` 的三个单测覆盖长度匹配、长度不足与无长度三种判定 |
-| 最终非 2xx 可作为 `upstream_http_error` 捕获，未捕获时为 500 `script_error` | `tests/cli.rs:4380-4414` |
-| 传输层失败可作为 `upstream_unreachable` 捕获 | `tests/cli.rs:4417-4436` |
-| 默认状态是上游 2xx 状态，不是硬编码 200 | `ctx_http_pipe_defaults_to_the_upstream_2xx_status`（`tests/cli.rs:4537-4549`） |
-| 初始 URL 非法可作为 `upstream_url_invalid` 捕获 | `tests/cli.rs:4552-4573` |
-| 超过三次重定向可作为 `upstream_redirect_error` 捕获 | `tests/cli.rs:4576-4603` |
-| pipe 可传输超过 `get` 8 MiB 上限的 body | `tests/cli.rs:4606-4619` |
-| Range 被转发，206/`Content-Range` 保留 | `demo_download_route_forwards_range_and_preserves_content_range`（`tests/cli.rs:4918-4943`） |
-| demo 中 allowlist 拒绝仍是对客户端可见的 `script_error` | `tests/cli.rs:4946-4954` |
-| 缺失 `Location` 目前经最终状态路径变成客户端可见的 502 | `tests/cli.rs:4979-4993`；按本次会话的结论，它没有断言 `error.code`，因此无法区分 `upstream_http_error` 与 `upstream_redirect_error` |
+| 最终非 2xx 可作为 `upstream_http_error` 捕获，未捕获时为 500 `script_error` | `tests/cli.rs:4490-4524` |
+| 传输层失败可作为 `upstream_unreachable` 捕获 | `tests/cli.rs:4527-4546` |
+| 默认状态是上游 2xx 状态，不是硬编码 200 | `ctx_http_pipe_defaults_to_the_upstream_2xx_status`（`tests/cli.rs:4647-4659`） |
+| 初始 URL 非法可作为 `upstream_url_invalid` 捕获 | `tests/cli.rs:4662-4683` |
+| 超过三次重定向可作为 `upstream_redirect_error` 捕获 | `tests/cli.rs:4686-4713` |
+| pipe 可传输超过 `get` 8 MiB 上限的 body | `tests/cli.rs:4716-4729` |
+| Range 被转发，206/`Content-Range` 保留 | `demo_download_route_forwards_range_and_preserves_content_range`（`tests/cli.rs:5028-5053`） |
+| demo 中 allowlist 拒绝仍是对客户端可见的 `script_error` | `tests/cli.rs:5056-5064` |
+| 缺失 `Location` 目前经最终状态路径变成客户端可见的 502 | `tests/cli.rs:5089-5103`；按本次会话的结论，它没有断言 `error.code`，因此无法区分 `upstream_http_error` 与 `upstream_redirect_error` |
 
 ## T7 扩展：完成日志与客户端断开（issue #10，PR #25）
 
