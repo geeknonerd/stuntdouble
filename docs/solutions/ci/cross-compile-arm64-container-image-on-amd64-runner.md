@@ -1,7 +1,7 @@
 ---
 title: "Cross-compile the linux/arm64 release container image on an amd64-only runner"
 date: 2026-09-24
-last_updated: 2026-09-29
+last_updated: 2026-10-19
 category: ci
 module: multi-platform release image
 problem_type: tooling_decision
@@ -35,8 +35,8 @@ tags: [docker-buildx, multi-platform, arm64, cross-compilation, rustup, qemu, gh
 1. **builder 固定在宿主平台，按 `TARGETARCH` 选择本机或交叉目标。** `FROM --platform=$BUILDPLATFORM ...`（`Dockerfile:1`）让 builder 始终原生执行；amd64 分支不装交叉包，arm64 走交叉分支（`Dockerfile:11-25`）。产物统一落到 `/stuntdouble` 再 COPY 进 runtime 阶段（`Dockerfile:50`、`Dockerfile:58`），两个平台共用同一条 COPY 路径。
 2. **交叉编译器与目标 libc 头是两件事。** arm64 分支安装 `gcc-aarch64-linux-gnu` 与 `libc6-dev-arm64-cross`（`Dockerfile:16-18`），并用 `CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER` 指向交叉 linker（`Dockerfile:8`）；否则 rustc 仍会调用宿主 `cc`。
 3. **`rustup target add` 必须放在 `COPY . .` 之后。** `rust-toolchain.toml` 把 channel 固定为 `stable`（`rust-toolchain.toml:1-3`），rustup 会据此另装并选用一套 `stable` 工具链；在复制源码之前安装 target 会落到镜像原有的默认工具链，cargo 用的却是另一套。当前顺序是 `COPY . .`（`Dockerfile:28`）在前，`rustup target add` 与 `cargo build --target`（`Dockerfile:41`、`Dockerfile:48`）在后。
-4. **workflow 传 `platforms`，并在公告前断言 registry 里的原始索引。** `platforms: linux/amd64,linux/arm64`（`.github/workflows/release-extras.yml:148`）；断言读取 raw index 并要求 Linux 架构集合恰为 `amd64 arm64`（`.github/workflows/release-extras.yml:194-205`），`select(.platform.os == "linux")` 让 attestation 的 `unknown/unknown` manifest 不影响判定。
-5. **QEMU 只服务于 runtime 阶段。** arm64 的 runtime 阶段仍要跑 `apt-get install ca-certificates`（`Dockerfile:54-56`），所以 workflow 仍需在 Buildx 之前 setup QEMU（`.github/workflows/release-extras.yml:91-95`）；arm64 的 Rust 编译不在模拟下发生，这正是它比全量模拟快一个量级的原因。
+4. **workflow 传 `platforms`，并在公告前断言 registry 里的原始索引。** `platforms: linux/amd64,linux/arm64`（`.github/workflows/release-extras.yml:167`）；断言读取 raw index 并要求 Linux 架构集合恰为 `amd64 arm64`（`.github/workflows/release-extras.yml:213-224`），`select(.platform.os == "linux")` 让 attestation 的 `unknown/unknown` manifest 不影响判定。
+5. **QEMU 只服务于 runtime 阶段。** arm64 的 runtime 阶段仍要跑 `apt-get install ca-certificates`（`Dockerfile:54-56`），所以 workflow 仍需在 Buildx 之前 setup QEMU（`.github/workflows/release-extras.yml:110-114`）；arm64 的 Rust 编译不在模拟下发生，这正是它比全量模拟快一个量级的原因。
 6. **基础镜像 pin 必须是索引 digest。** `Dockerfile:1` 与 `Dockerfile:52` 的 `@sha256:` pin 要能按架构解析；两条构建路径都成功即证明它们是索引 digest——若 pin 成按架构的 manifest digest，arm64 会直接解析失败。
 7. **不要用「能拉取」代替平台断言。** 旧的发布验证只检查 tag 可拉取与 digest（`docs/development.md:84-85`），发现不了 arm64 主机实际拿到 amd64 manifest；与断言同语义的人工命令及期望输出见 `docs/development.md:86-88`。
 8. **旧 tag 保持旧形状。** `v0.2.1` 及更早仍是单平台，重跑它们的 `release-extras` 会在断言处失败，这是「不覆盖已有产物」的预期行为（`docs/development.md:93`）。
