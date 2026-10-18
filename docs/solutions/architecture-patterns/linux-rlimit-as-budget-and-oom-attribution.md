@@ -11,7 +11,7 @@ applies_when:
   - "Changing the worker startup shape, IPC or serialization buffers, or the supported buffered file-read cap."
   - "Classifying worker death or engine errors as memory-limit exhaustion versus a normal script error."
   - "Deciding whether RLIMIT_AS headroom is sufficient for the largest documented buffered file read."
-  - "Reviewing platform differences where Linux enforces RLIMIT_AS but macOS and Windows do not provide this hard bound."
+  - "Reviewing platform differences where Linux uses RLIMIT_AS and Windows a Job Object commit cap, while macOS provides no hard memory bound."
 related_components:
   - script
   - config
@@ -64,7 +64,7 @@ tags:
 - **旧默认值会误杀文档支持的正常操作。** 64 MiB 甚至低于 8 MiB `ctx.file.readText` 约 192 MiB 的最低可用 `RLIMIT_AS`（观测 `VmPeak` 为 173.1 MiB）；这不是脚本恶意分配，而是 IPC 与多层字符串/JSON 表示的正常放大。把 floor 当 default 会让受支持用例在 Linux 上稳定失败。
 - **引擎基线会制造错误的安全感。** 15.2 MiB VMS 只覆盖 Boa 与简单脚本；最终 runner 的协议和宿主调用路径使峰值与引擎基线脱钩。继续用旧数字外推，会重复 #91 的预算错误。
 - **错误的归因会掩盖真正的脚本错误。** `capacity overflow` 等 `RangeError` 可能来自普通脚本逻辑或数据形状错误；把它们标成“配置内存限制”会误导脚本作者和运维，并把客户端可见的稳定 detail 变成错误结论（`src/script.rs` 的 `Error::MemoryLimitExceeded`）。
-- **预算和平台边界必须一起说明。** Linux 才执行 `RLIMIT_AS`；macOS 与 Windows 保留进程隔离和 deadline kill，但没有硬内存上限（`docs/contracts/config.md`、`SECURITY.md`）。不能把 Linux 的 256 MiB 默认值描述成跨平台的内存保证。
+- **预算和平台边界必须一起说明。** 同一个 `sandbox.script_memory_limit_mb` 在 Linux 是 `RLIMIT_AS` 虚拟地址空间上限、在 Windows 是父进程分配的 Job Object 提交内存上限（[#102](https://github.com/geeknonerd/stuntdouble/issues/102)），macOS 保留进程隔离和 deadline kill 但没有硬内存上限（`docs/contracts/config.md`、`SECURITY.md:14`）。不能把 Linux 的 256 MiB 虚拟地址空间口径说成跨平台的内存保证，Windows 的提交内存口径也不等于 RSS。
 
 ## 何时适用（When to Apply）
 
@@ -72,7 +72,7 @@ tags:
 - 修改 script worker 的 IPC/JSON Lines 协议、请求快照序列化、Boa 字符串桥接、`ctx.file.readText` / `readBytes` 的 8 MiB 上限，或任何会改变 worker 峰值分配的功能时。
 - 升级 Boa，尤其是需要重新验证 allocator failure 文本、`RangeError` 形状或 `AlignedVec` 归因时；当前匹配规则带有 Boa 0.22 版本前提（`src/script.rs` 的 `engine_out_of_memory`）。
 - 评估并发槽位池或整体资源上限时；默认值变化会改变 ADR 0014 的“单进程上限 × 槽位数”总量口径（ADR 0014 D12）。
-- 只适用于需要 Linux 硬内存边界的 worker。macOS/Windows 没有硬上界，不能用本文的 256 MiB/64 MiB 结论替代平台专属的 deadline 与隔离验证。
+- 只适用于以 Linux `RLIMIT_AS`（虚拟地址空间）为口径的 worker。Windows 的 Job Object 口径是提交内存、macOS 没有硬上界，都不能用本文的 256 MiB/64 MiB 结论替代平台专属的验证。
 
 ## 示例（Examples）
 

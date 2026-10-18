@@ -301,6 +301,100 @@ fn wait_for_process_gone(pid: u32, timeout: Duration) {
     }
 }
 
+/// Direct child PIDs from the OS process table, scoped to one server process
+/// so concurrent fixtures in the same test binary cannot interfere.
+#[cfg(windows)]
+fn child_pids(parent: u32) -> Vec<u32> {
+    let output = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            &format!(
+                "(Get-CimInstance Win32_Process -Filter \"ParentProcessId={parent}\").ProcessId"
+            ),
+        ])
+        .output()
+        .expect("Get-CimInstance");
+    assert!(
+        output.status.success(),
+        "Get-CimInstance failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .filter_map(|field| field.parse::<u32>().ok())
+        .collect()
+}
+
+/// Poll the process table until `parent` has, or no longer has, a child.
+/// A bounded failure keeps a leaked worker from hanging the suite. Windows
+/// polls are slower than Unix ones because each one pays for a PowerShell
+/// start, so the budget is wider.
+#[cfg(windows)]
+fn wait_for_child_count(parent: u32, present: bool) -> Vec<u32> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let pids = child_pids(parent);
+        if present != pids.is_empty() {
+            return pids;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "worker child present={present} expectation not met for server {parent}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Poll the process table until a captured PID is gone.
+#[cfg(windows)]
+fn wait_for_process_gone(pid: u32, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if !process_present(pid) {
+            return;
+        }
+        if Instant::now() >= deadline {
+            // Keep a failed orphan assertion from leaving a busy worker behind
+            // for the rest of the suite.
+            let _ = Command::new("taskkill")
+                .args(["/F", "/PID", &pid.to_string()])
+                .output();
+            panic!("process {pid} was still present after {timeout:?}");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Whether the process table still lists `pid`.
+#[cfg(windows)]
+fn process_present(pid: u32) -> bool {
+    let output = Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+        .output()
+        .expect("tasklist");
+    String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\""))
+}
+
+/// Hard-kill one process without touching its children: `SIGKILL` on Unix and
+/// `TerminateProcess` (no `/T`) on Windows, so the orphan checks observe each
+/// platform's own parent-death mechanism instead of a tree kill.
+#[cfg(unix)]
+fn hard_kill(pid: u32) -> std::process::ExitStatus {
+    Command::new("kill")
+        .args(["-9", &pid.to_string()])
+        .status()
+        .expect("kill -9")
+}
+
+#[cfg(windows)]
+fn hard_kill(pid: u32) -> std::process::ExitStatus {
+    Command::new("taskkill")
+        .args(["/F", "/PID", &pid.to_string()])
+        .status()
+        .expect("taskkill /F")
+}
+
 /// Spawn `serve` with its stderr captured in `log`, which carries both the
 /// startup announcement and the request logs the tests assert on.
 fn serve_with_args(config: &Path, env: &[(&str, &str)], args: &[&str], log: &Path) -> Child {
@@ -1829,16 +1923,19 @@ fn script_timeout_maps_to_500_script_error() {
     );
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn script_deadline_kills_the_worker_process() {
     let dir = tempfile::tempdir().expect("tempdir");
+    // The Windows process-table probe costs a PowerShell start per poll, so
+    // the worker has to outlive a poll or two for the test to observe it.
+    let timeout_ms = if cfg!(windows) { 5000 } else { 1000 };
     let (mut child, _log, port) = start_serve(
         |port| {
             fixture_with_script(
                 dir.path(),
                 port,
-                &with_sandbox(good_config(), 1000),
+                &with_sandbox(good_config(), timeout_ms),
                 "while (true) {}",
             )
         },
@@ -1861,7 +1958,7 @@ fn script_deadline_kills_the_worker_process() {
     stop(&mut child);
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn hard_killed_server_leaves_no_orphaned_worker() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1888,21 +1985,20 @@ fn hard_killed_server_leaves_no_orphaned_worker() {
     assert_eq!(workers.len(), 1, "unexpected workers: {workers:?}");
     let worker_pid = workers[0];
 
-    let server_pid = parent_pid.to_string();
-    let status = Command::new("kill")
-        .args(["-9", &server_pid])
-        .status()
-        .expect("kill server");
-    assert!(status.success(), "kill failed: {status}");
+    let status = hard_kill(parent_pid);
+    assert!(status.success(), "hard kill failed: {status}");
     let _ = child.wait().expect("reap server");
 
-    // No parent remains to reap this process; the worker-side sentinel must
-    // notice the reparent and exit on its own.
+    // No parent remains to clean this worker up: the Unix sentinel notices the
+    // reparent and exits on its own, and the Windows worker dies when the
+    // kernel closes the Job Object handle the killed server still owned.
     wait_for_process_gone(worker_pid, Duration::from_secs(5));
     drop(client);
 }
 
-#[cfg(target_os = "linux")]
+/// Both platforms enforce a process memory bound: Linux through `RLIMIT_AS`
+/// and Windows through the per-worker Job Object commit cap.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 const MEMORY_BOMB_SCRIPT: &str = r#"
 var buffers = [];
 for (var i = 0; i < 128; i++) {
@@ -1911,7 +2007,7 @@ for (var i = 0; i < 128; i++) {
 ctx.respond(200, {}, "allocated");
 "#;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[test]
 fn ordinary_script_runs_at_configured_memory_floor() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1925,7 +2021,7 @@ fn ordinary_script_runs_at_configured_memory_floor() {
     assert_eq!(response.status, 200, "body: {}", response.body);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[test]
 fn memory_bomb_is_stopped_and_reported_by_the_configured_limit() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1972,7 +2068,7 @@ fn memory_bomb_is_stopped_and_reported_by_the_configured_limit() {
     stop(&mut child);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[test]
 fn memory_limit_detail_is_hidden_without_verbose() {
     let dir = tempfile::tempdir().expect("tempdir");

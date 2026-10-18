@@ -43,7 +43,7 @@ Unix 上父进程死亡不会连带结束子进程（子进程会被系统收养
 2. **脚本超时或异常**：主进程立即强杀，槽位即时回收。
 3. **主进程被 `SIGKILL`**（来不及做任何清理）：子进程内的哨兵线程每 1 秒检查一次 `std::os::unix::process::parent_id()`，一旦发现父 PID 变化（说明已被收养）就自行退出。哨兵线程独立于运行脚本的主线程，不受脚本死循环影响。
 
-不采用 `PR_SET_PDEATHSIG`：它仅 Linux 可用且需要 unsafe。轮询使用标准库安全 API，Linux/macOS 通用；最坏情况下孤儿进程多存活约 1 秒（Linux 上另有 256 MiB 内存硬限兜底，macOS 无内存硬限）。Windows 的对应机制是 Job Object kill-on-close，随 [#102](https://github.com/geeknonerd/stuntdouble/issues/102) 处理。
+不采用 `PR_SET_PDEATHSIG`：它仅 Linux 可用且需要 unsafe。轮询使用标准库安全 API，Linux/macOS 通用；最坏情况下孤儿进程多存活约 1 秒（Linux 上另有 256 MiB 内存硬限兜底，macOS 无内存硬限）。Windows 不需要哨兵线程：每个 worker 自成 Job Object 并带 kill-on-close，服务器死亡时内核关闭最后一个 handle 即刻终止 worker（见修订（#102））。
 
 ### 可观测性
 
@@ -51,7 +51,7 @@ Unix 上父进程死亡不会连带结束子进程（子进程会被系统收养
 
 ### 平台范围
 
-- **D7 Windows 延后**：本期覆盖 Linux 的完整硬边界；macOS 的内存硬限经 S1 实测失败（见「验证结果」），与 Windows 一样只获得进程隔离与超时强杀。Windows 的内存硬限（需要未封装的 Win32 FFI）延后，文档化这两个平台差异。不为 Windows 提前引入 unsafe 例外。后续 Windows Job Object 工作（内存硬限与 hard-kill 孤儿清理）由 [#102](https://github.com/geeknonerd/stuntdouble/issues/102) 跟踪。
+- **D7 平台范围（#102 修订）**：Linux 有完整硬边界；Windows 自 #102 起由父进程用 Job Object 施加提交内存硬限，并以 kill-on-close 完成 hard-kill 孤儿治理（见修订（#102））。macOS 的内存硬限经 S1 实测失败（见「验证结果」），只获得进程隔离与超时强杀，是当前唯一没有硬内存上限的平台。
 
 ## 考虑过的替代方案
 
@@ -91,10 +91,21 @@ S1、S2 已于 2026-09-27 在一次性探针上执行（分支 `ci/89-process-is
 
 本结果是既定降级分支的落地记录，D1–D13 的决策本身不变；D6/D7 的平台口径与备选说明按此结果收敛。评估文档的对应更新见 [方案评估](../../research/process-isolation-assessment.md) §5.3。
 
+## 修订（#102，2026-10-18）：Windows Job Object 内存硬限与 hard-kill 孤儿清理
+
+Windows 补齐 D7 延后的两项能力。执行模型、worker 协议、配置与 `ctx` 契约均不变：
+
+- **每 worker 一个 Job Object**：父进程在 spawn 之后、写入 job 行之前新建空 job，设 `JOB_OBJECT_LIMIT_PROCESS_MEMORY = sandbox.script_memory_limit_mb`（同一配置，下限 64 MiB）与 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`，并把 worker 分配进去；guard 持有 handle 直到 worker 结束。空 job 满足 Windows 8+ 嵌套 job 的 "must be empty or in the job hierarchy" 约束，父进程本身已在 job 内（CI runner 即如此）也能分配。
+- **fail-closed**：创建或分配失败时拒绝该 worker（500 `script_error`），与 Linux `setrlimit` 失败即 worker 无法启动一致，不允许无界执行。该分支只能靠评审覆盖：注入 Win32 失败需要在产品代码里加测试专用故障钩子，仓库没有此类先例，Linux 的 `setrlimit` 失败路径同样无测试。
+- **口径差异与归因边界**：Linux `RLIMIT_AS` 限制虚拟地址空间，Windows 限制 commit charge（提交内存）；超限表现为分配失败，`--verbose` detail 仍是既有稳定文本 `script exceeded the configured memory limit`。归因有两条通道，`cfg` 门都从 linux 扩到 windows：`engine_out_of_memory`（Boa allocation error）已由 spike 直接观测（bomb 按 `memory_limit` 归类、stderr 为空），是 Windows 的承重通道；stderr 的 Rust allocator abort 行则是对称假设，spike 未在 Windows 观测到。该假设沿用 Linux 的精确整行匹配（`src/script.rs` 的 `is_allocator_abort_line`），并由单测随平台门一并锁定；若未来观察到误归因，升级路径是 Job Object completion port 的 `JOB_OBJECT_MSG_PROCESS_MEMORY_LIMIT` 通知这类权威信号（Microsoft Learn：进程超过内存上限时发送），而不是继续依赖字符串推断。
+- **unsafe 例外**：crate 级 `unsafe_code = "deny"` 保持；唯一例外是 `src/windows_job.rs`（模块声明处 `#[allow(unsafe_code)]`），只用 `windows-sys` 的 `CreateJobObjectW` / `SetInformationJobObject` / `AssignProcessToJobObject` 三个调用（错误码另经 `GetLastError` 读取），每个 `unsafe` 块写明不变量。句柄所有权交给标准库 `std::os::windows::io::OwnedHandle`，由它保证只关闭一次并提供 `Send`——worker 运行在请求处理 future 内，guard 跨 await 持有，若退回裸 `HANDLE`（`*mut c_void`）会因不满足 `Send` 而让 axum handler 无法编译；模块内以 `const _` 静态断言锁住该约束。不用 safe crate 的原因：`win32job` 2.0.3 不暴露 process/job 内存上限（其 `ExtendedLimitInfo` 字段 crate-private），而 `windows-sys` 0.61（MIT OR Apache-2.0）本就在依赖图中。
+- **实测证据**（2026-10-18，windows-latest，[#102 评论](https://github.com/geeknonerd/stuntdouble/issues/102#issuecomment-6246805322)）：嵌套环境下分配成功；`taskkill /F` 硬杀持有者后 worker 41–42 ms 内消失；64 MiB floor 下普通脚本峰值提交内存约 5 MiB、再加 8 MiB 堆约 13–14 MiB；128 MiB memory bomb 在约 63 MiB 被截停并按 `memory_limit` 归类。
+- **Windows 回归测试**：`tests/cli.rs` 增加 Windows 的进程表查询与强杀辅助函数，并让 deadline 强杀、hard-kill 孤儿清理与内存上限三组端到端测试同时覆盖 Windows；`src/script.rs` 的单测 `allocation_abort_is_attributed_to_the_memory_limit` 的平台门同步扩到 Windows，锁定上一条的 stderr 归因假设。
+
 ## 后果
 
-**正面**：超时从"杀不掉的线程"变为确定性强杀；内存获得 OS 级硬限（Linux；macOS 见「验证结果」）；崩溃隔离由进程边界保证；`ctx` 契约与脚本源码不变；upstream/files 策略逻辑零重写，改造集中在桥的调用侧。
+**正面**：超时从"杀不掉的线程"变为确定性强杀；内存获得 OS 级硬限（Linux 与 Windows；macOS 见「验证结果」）；崩溃隔离由进程边界保证；`ctx` 契约与脚本源码不变；upstream/files 策略逻辑零重写，改造集中在桥的调用侧。
 
-**负面（接受）**：每请求增加一次子进程启动开销（S2 量化）；`RLIMIT_AS` 限制的是虚拟地址空间而非 RSS；macOS 无法设置有效硬内存限（S1 实测 `EINVAL`），与 Windows 一样只有进程隔离与超时强杀；新增一个极轻依赖（`rlimit`，MIT）用于安全设置 rlimit；Windows 的硬内存限与 hard-kill 孤儿清理路径见 [#102](https://github.com/geeknonerd/stuntdouble/issues/102)。
+**负面（接受）**：每请求增加一次子进程启动开销（S2 量化）；Linux 的 `RLIMIT_AS` 限制虚拟地址空间而非 RSS，Windows 限制的是提交内存，两端口径不同；macOS 无法设置有效硬内存限（S1 实测 `EINVAL`），只有进程隔离与超时强杀，是当前唯一没有硬内存上限的平台；新增两个极轻依赖（`rlimit`，MIT；`windows-sys`，MIT OR Apache-2.0，仅 Windows）用于设置资源上限；Windows 侧新增一处评审过的最小 unsafe 例外（`src/windows_job.rs`）。
 
 **中性**：执行单元从线程变为进程，"script worker"的领域含义同步更新到 CONTEXT.md。

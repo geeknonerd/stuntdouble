@@ -23,7 +23,7 @@ tags: [contract-tests, script-worker-pool, semaphore, capacity-fast-fail, permit
 
 issue #90 让每个命中 Route 的脚本在 fresh worker process 中运行：脚本仍拿到同一份 `ctx` 契约，父进程保留 host function 与流的所有权，子进程只运行 Boa 并通过 JSON Lines 协议与父进程往返（`plans/adr/0014-process-isolated-script-runner.md:17-20`、`src/script.rs:1344-1433`）。
 
-> 后续修订（#91，2026-09-28）：Linux worker 已落地 `RLIMIT_AS` 硬内存上限（默认 256 MiB、下限 64 MiB）并同步公开契约；本文其余内容仍记录 #90 的容量与 deadline 测试契约，macOS 与 Windows 仍无硬内存上限。
+> 后续修订（#91，2026-09-28；#102，2026-10-18）：Linux worker 已落地 `RLIMIT_AS` 硬内存上限，Windows worker 已由每 worker 一个 Job Object 施加同预算的提交内存上限（默认 256 MiB、下限 64 MiB，见 [#102](https://github.com/geeknonerd/stuntdouble/issues/102)），两者都同步了公开契约；本文其余内容仍记录 #90 的容量与 deadline 测试契约，macOS 仍无硬内存上限。
 
 本文件最初的版本记录的是旧模型：`sandbox.script_timeout_ms` 只结束客户端等待，不取消不可中断的 blocking worker，超时 worker 继续持有 permit，直到循环次数兜底结束（`plans/adr/0003-script-first-multi-runtime.md:73`、`plans/adr/0003-script-first-multi-runtime.md:84`）。进程隔离使这条推理整体失效：公开契约写明脚本在 fresh process 中运行、deadline 到期时宿主立即杀死 worker 进程并释放槽位（`docs/contracts/ctx-api.md:79`）；安全说明同样把 deadline 的兑现方式记为杀死 worker 进程（`SECURITY.md:13`）；ADR 0014 的 D2/D5/D12 把「每请求一个新子进程」「到期强杀、槽位即时回收」「槽位语义是同时运行的脚本进程数上限」定为核心决策（`plans/adr/0014-process-isolated-script-runner.md:18`、`:24`、`:26`）。
 
@@ -85,7 +85,7 @@ permit 是 `execute` 的参数，绑定为 `_slot`（`src/script.rs:1592-1594`�
 
 ### 6. 不把进程隔离等同于跨平台内存硬限制
 
-#90 建立的是 deadline 强杀、进程隔离、槽位回收与稳定错误映射，没有建立内存硬限；#91 随后在 Linux 为 worker 落地 `RLIMIT_AS` 硬上限（默认 256 MiB、下限 64 MiB，见 `docs/contracts/config.md:33`），macOS 与 Windows 仍没有硬内存上限（`SECURITY.md:13`、`docs/contracts/ctx-api.md:96`）。`RLIMIT_AS` 限制虚拟地址空间而非 RSS，进程会被杀死也不等于内存已被准确封顶；不要从容量与 deadline 测试推出内存结论。
+#90 建立的是 deadline 强杀、进程隔离、槽位回收与稳定错误映射，没有建立内存硬限；#91 随后在 Linux 为 worker 落地 `RLIMIT_AS` 硬上限，[#102](https://github.com/geeknonerd/stuntdouble/issues/102) 又在 Windows 用每 worker 一个 Job Object 施加同预算的提交内存上限（默认 256 MiB、下限 64 MiB，见 `docs/contracts/config.md:33`），macOS 仍没有硬内存上限（`SECURITY.md:14`、`docs/contracts/ctx-api.md:96`）。`RLIMIT_AS` 限制虚拟地址空间、Job Object 限制提交内存，两者都不是 RSS；不要从容量与 deadline 测试推出内存结论。
 
 ## 为什么重要
 
@@ -93,7 +93,7 @@ permit 是 `execute` 的参数，绑定为 `_slot`（`src/script.rs:1592-1594`�
 - **它把三个失败模式拆开：** 没杀进程、杀了但没 reap、reap 了但槽位没释放。process-table poll、`after_deadline` 收到 timeout、`after_deadline` 不含 capacity，各自提供独立反事实，任何一项反转都会被单独抓到。
 - **它防止容量契约被过时的 held 模型锁死。** #90 之前「超时 worker 仍持有 permit」是既定行为；#90 之后同一断言变成缺陷探针。继续保留旧断言，正确的强杀实现反而会被判为失败。
 - **它让容量测试保持公开契约驱动。** 4–16 上限是文档化的外部 oracle；复制私有公式会把实现错误带进测试，上下一起漂移。capacity 路径后的 mpsc + 404 liveness 把可用性观察钉在 capacity 失败之后、全部请求结算之前，而不是全部结算之后。
-- **它防止「进程隔离」被过度解读。** deadline 强杀与 Linux `RLIMIT_AS` 是两个独立边界，macOS/Windows 仍没有硬内存上限。混写这些边界会制造错误安全感，并误导后续评审降低内存风险的优先级。
+- **它防止「进程隔离」被过度解读。** deadline 强杀与平台内存上限是相互独立的边界：Linux 是 `RLIMIT_AS`（虚拟地址空间），Windows 是 Job Object（提交内存），macOS 没有硬上界。混写这些边界会制造错误安全感，并误导后续评审降低内存风险的优先级。
 
 ## 何时适用
 
@@ -101,7 +101,7 @@ permit 是 `execute` 的参数，绑定为 `_slot`（`src/script.rs:1592-1594`�
 - 为 fresh-process / worker-per-request 模型增加 deadline、崩溃、协议错误、pipe/file/upload 流丢弃或槽位生命周期回归时。
 - 评审看到「timeout 返回 500」就认为生命周期正确时；继续追问 child 是否消失、槽位是否复用、失败响应是否仍有稳定 envelope。
 - 验证公开容量范围时：probe 数从 4–16 契约推导，而不是调用生产私有公式。
-- 只适用于当前「deadline 能真正终止执行单元」的模型。若执行单元重新变成不可取消，旧模型中的 held-permit 语义可能重新成立，不能机械套用本文的 `after_deadline` 断言；两者切换时必须同步刷新本文件。本文件不替代 Linux `RLIMIT_AS` 验证、RSS 观测、macOS/Windows 内存边界或整体 DoS 测试。
+- 只适用于当前「deadline 能真正终止执行单元」的模型。若执行单元重新变成不可取消，旧模型中的 held-permit 语义可能重新成立，不能机械套用本文的 `after_deadline` 断言；两者切换时必须同步刷新本文件。本文件不替代 Linux `RLIMIT_AS` 与 Windows Job Object 上限的验证、RSS 观测、macOS 内存边界或整体 DoS 测试。
 
 ## 示例
 
