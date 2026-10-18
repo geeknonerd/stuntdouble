@@ -56,3 +56,13 @@ lto = "thin"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rlimit = "0.11"
+
+# Spike for #102 (throwaway, see tests/windows_job_spike.rs): raw Job Object
+# bindings until the per-worker Windows sandbox lands.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+] }

@@ -1,0 +1,21 @@
+name: spike-102
+
+# Throwaway workflow for the #102 Windows Job Object spike. It only fires on
+# the spike branch and is deleted together with it.
+on:
+  push:
+    branches: [ci/102-windows-job-object-spike]
+
+permissions:
+  contents: read
+
+jobs:
+  spike-windows:
+    name: spike-windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - run: cargo test --test windows_job_spike -- --nocapture --test-threads=1
+        env:
+          RUST_BACKTRACE: "1"
