@@ -175,7 +175,8 @@ pub enum Error {
     Failed(String),
     /// Wall-clock deadline exceeded.
     TimedOut,
-    /// The worker exceeded the configured Linux virtual-address-space bound.
+    /// The worker exceeded the configured memory bound: virtual address space
+    /// on Linux (`RLIMIT_AS`), commit charge on Windows (Job Object).
     MemoryLimitExceeded,
     /// Every script worker slot is busy; the host failed fast instead of
     /// letting queued scripts wait behind running workers.
@@ -997,7 +998,11 @@ fn evaluate_in_worker(source: &str, request: &Json) -> Result<Json, Error> {
                     message: error.to_string(),
                     kind,
                 }),
-                None if cfg!(target_os = "linux") && engine_out_of_memory(&error) => {
+                // The Job Object commit cap fails allocations inside Boa on
+                // Windows, so the engine-level detector is not Linux-only.
+                None if cfg!(any(target_os = "linux", target_os = "windows"))
+                    && engine_out_of_memory(&error) =>
+                {
                     Err(Error::MemoryLimitExceeded)
                 }
                 None => Err(Error::Failed(error.to_string())),
@@ -1459,7 +1464,10 @@ async fn forward_worker_stderr(stderr: tokio::process::ChildStderr) -> WorkerDia
 }
 
 fn unexpected_worker_error(diagnostics: &WorkerDiagnostics) -> Error {
-    if cfg!(target_os = "linux") && diagnostics.memory_allocation_failed {
+    // Both platforms enforce a process memory bound, so the allocator abort
+    // line is a memory-limit signal on either one.
+    if cfg!(any(target_os = "linux", target_os = "windows")) && diagnostics.memory_allocation_failed
+    {
         Error::MemoryLimitExceeded
     } else {
         Error::WorkerTerminated
@@ -1503,6 +1511,22 @@ async fn run_worker(
         // Inner `Err` is a join error; `Ok(Err)` is a failed `Command::spawn`.
         Ok(Err(_) | Ok(Err(_))) => return Outcome::failed(Error::WorkerTerminated),
         Ok(Ok(Ok(child))) => child,
+    };
+    // ADR 0014: Windows has no in-process bound, so the parent puts the worker
+    // into its own Job Object before the worker can read the job line. This is
+    // fail-closed like a failing Linux `setrlimit`: without the job the worker
+    // would run unbounded, so refuse to use it. The guard stays alive (and so
+    // keeps the job open) until this function drops it after the worker ended.
+    #[cfg(windows)]
+    let _worker_job = match assign_worker_job(&child, memory_limit_mb) {
+        Ok(worker_job) => worker_job,
+        Err(error) => {
+            // Operator-facing only; the client still sees a generic script
+            // error and never an internal diagnostic.
+            eprintln!("script worker job object failed: {error}");
+            terminate(&mut child).await;
+            return Outcome::failed(Error::WorkerTerminated);
+        }
     };
     let Some(stdin) = child.stdin.take() else {
         terminate(&mut child).await;
@@ -1569,6 +1593,30 @@ async fn run_worker(
 async fn terminate(child: &mut Child) {
     let _ = child.kill().await;
     let _ = child.wait().await;
+}
+
+/// Put a freshly spawned worker into its own Job Object (Windows only).
+///
+/// The cap is the same `sandbox.script_memory_limit_mb` value Linux applies as
+/// `RLIMIT_AS`; on Windows it bounds commit charge, and kill-on-close makes a
+/// hard-killed server take its workers down with it.
+#[cfg(windows)]
+fn assign_worker_job(
+    child: &Child,
+    memory_limit_mb: u64,
+) -> std::io::Result<crate::windows_job::WorkerJob> {
+    let bytes = memory_limit_mb
+        .checked_mul(1024 * 1024)
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "memory limit too large")
+        })?;
+    let process = child
+        .raw_handle()
+        .ok_or_else(|| std::io::Error::other("worker exited before its job was assigned"))?;
+    let worker_job = crate::windows_job::WorkerJob::create(bytes)?;
+    worker_job.assign(process)?;
+    Ok(worker_job)
 }
 
 /// Map one complete `final_result` onto the existing Outcome shape.
@@ -1706,10 +1754,11 @@ fn worker_main(memory_limit_mb: u64) -> std::io::Result<()> {
     // worker environment sets MALLOC_ARENA_MAX=1, so the thread costs only its
     // small stack instead of a 64 MiB glibc arena.
     spawn_parent_sentinel()?;
-    // Apply the Linux bound before reading the job. Parsing a large script or
-    // request snapshot is itself a meaningful allocation.
-    // Other platforms deliberately keep process isolation and deadline kill
-    // without claiming a hard memory bound.
+    // Linux applies its bound here, before reading the job, because parsing a
+    // large script or request snapshot is itself a meaningful allocation.
+    // Windows is bounded from the parent's side: its Job Object is already
+    // assigned before this process can read the job line. macOS keeps process
+    // isolation and deadline kill without claiming a hard memory bound.
     apply_worker_memory_limit(memory_limit_mb)?;
     let Some(line) = read_protocol_line()? else {
         return Err(std::io::Error::new(
@@ -1787,6 +1836,8 @@ fn apply_worker_memory_limit(memory_limit_mb: u64) -> std::io::Result<()> {
 
 #[cfg(not(target_os = "linux"))]
 fn apply_worker_memory_limit(_memory_limit_mb: u64) -> std::io::Result<()> {
+    // Windows is already bounded by the parent-assigned Job Object, and macOS
+    // has no process memory bound; both parents check the floor before spawn.
     Ok(())
 }
 

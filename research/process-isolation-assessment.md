@@ -146,6 +146,7 @@ issue #28 的目标：用 OS 级机制给出硬内存（~64MB）与硬超时边�
 - **S1 → NO-GO（macOS arm64）**：GitHub `macos-15`（Apple M1 Virtual，macOS 15.7.9）上，`setrlimit(RLIMIT_AS)` 在 64 MiB、512 MiB、64 GiB 三档均为 `EINVAL`；进程启动后 VM map 约 391.6 GiB，限制必须高于当前 VM map 才被接受（512 GiB 可设但无意义）。峰值 RSS 11–12 MiB。触发降级对策：macOS 无内存硬限。
 - **S2 → GO**：release 构建、各 100 次测量（开发机 Linux 与 CI `ubuntu-24.04`），spawn 往返相对进程内路径的配对延迟中位数 3.0–3.9 ms、p95 3.5–4.4 ms；占默认 `script_timeout_ms = 10000` 的 0.11% 以下。不做进程池。该数值是最终 runner 形态到来前的估计。
 - **S3 → GO（#91/#93）**：最终 runner 的正式复测把 8 MiB `ctx.file.readText` 的 `VmPeak` 定为 173.1 MiB，把 memory bomb 的观测 `VmPeak` 定为 255.9 MiB（距 256 MiB 上限 124 KiB）；五条 demo 路由为 21.0–21.1 MiB。结果决定保留 256 MiB 默认值与 64 MiB floor：8 MiB 缓冲读取在默认值下有 82.9 MiB（32.4%）余量，而 #91 校准的最低可用限制约为 192 MiB。完整表格、测量口径与决策见 [ADR 0014 验证结果](../plans/adr/0014-process-isolated-script-runner.md)与 [#93 评论](https://github.com/geeknonerd/stuntdouble/issues/93#issuecomment-5880243728)。
+- **#102 后续（2026-10-18）**：Windows 以"每 worker 一个 Job Object + kill-on-close"补齐内存硬限（commit charge 口径）与 hard-kill 孤儿治理，spike 数据见 [#102 评论](https://github.com/geeknonerd/stuntdouble/issues/102#issuecomment-6246805322)。表 2 的 D7 与该表 D12 中"macOS/Windows 没有每 worker 硬内存上限"的表述按此收敛：Windows 已有限制，macOS 仍是唯一无硬内存上限的平台；当前决策与 unsafe 边界见 [ADR 0014 修订（#102）](../plans/adr/0014-process-isolated-script-runner.md)。
 
 ### 5.4 后续步骤（本评估通过后）
 

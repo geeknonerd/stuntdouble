@@ -56,3 +56,15 @@ lto = "thin"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rlimit = "0.11"
+
+# Windows bounds each script worker from the parent's side with a Job Object.
+# No safe crate exposes the process memory cap (win32job 2.0.3 keeps its
+# `JOBOBJECT_EXTENDED_LIMIT_INFORMATION` crate-private), so bind the four
+# kernel32 calls directly; src/windows_job.rs is the reviewed `unsafe` surface.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+] }
