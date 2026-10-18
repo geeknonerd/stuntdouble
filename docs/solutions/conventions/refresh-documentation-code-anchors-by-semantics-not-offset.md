@@ -1,6 +1,7 @@
 ---
 title: "Refresh documentation code anchors by intended semantics, not line offsets"
 date: 2026-09-29
+last_updated: 2026-10-19
 category: conventions
 module: documentation code-anchor maintenance
 problem_type: convention
@@ -22,11 +23,11 @@ tags: [documentation-maintenance, code-anchors, line-references, semantic-verifi
 
 ## Context
 
-PR #104 将 `src/script.rs` 的 worker 通信收紧为类型化协议：`BridgeName`、`ParentMessage` 与 `WorkerMessage` 在当前树中明确描述可调用的宿主桥、父到子消息和子到父消息（`src/script.rs:598-639`）。这次重构没有改变公开 CLI、`ctx` API 或配置契约，却使两篇既有 knowledge-track 文档中的几十个 `src/script.rs` 行号引用发生移动，例如 `docs/solutions/conventions/script-worker-contract-max-and-post-deadline-held-slot-tests.md` 与 `docs/solutions/architecture-patterns/blocking-upstream-body-to-async-stream-bridge.md`。
+PR #104 将 `src/script.rs` 的 worker 通信收紧为类型化协议：`BridgeName`、`ParentMessage` 与 `WorkerMessage` 在当前树中明确描述可调用的宿主桥、父到子消息和子到父消息（`src/script.rs:606-647`）。这次重构没有改变公开 CLI、`ctx` API 或配置契约，却使两篇既有 knowledge-track 文档中的几十个 `src/script.rs` 行号引用发生移动，例如 `docs/solutions/conventions/script-worker-contract-max-and-post-deadline-held-slot-tests.md` 与 `docs/solutions/architecture-patterns/blocking-upstream-body-to-async-stream-bridge.md`。
 
-真正的问题不只是“行号变了”。部分旧锚点在这次重构之前已经错位，因此用 diff 计算一个统一偏移量再批量套到旧锚点上，会把错误引用从一个位置搬到另一个位置，并继续显得可信。已确认的代表性例子是：旧锚点 `src/script.rs:1288-1294` 被用来证明 `unexpected_worker_error` 会将协议失败映射到 `Error::WorkerTerminated`，但它实际落在 `forward_worker_stderr`；语义正确的当前范围是 `src/script.rs:1454-1460`。同样，旧锚点 `1220`、`1249`、`1257` 对应三个 deadline 站点，却分别落在函数参数或 JSON 解析附近；当前正确位置是 stdout 读取 `src/script.rs:1397`、宿主分发 `src/script.rs:1416` 和 stdin 回写 `src/script.rs:1424`。
+真正的问题不只是“行号变了”。部分旧锚点在这次重构之前已经错位，因此用 diff 计算一个统一偏移量再批量套到旧锚点上，会把错误引用从一个位置搬到另一个位置，并继续显得可信。已确认的代表性例子是：旧锚点 `src/script.rs:1288-1294` 被用来证明 `unexpected_worker_error` 会将协议失败映射到 `Error::WorkerTerminated`，但它实际落在 `forward_worker_stderr`；语义正确的当前范围是 `src/script.rs:1466-1475`。同样，旧锚点 `1220`、`1249`、`1257` 对应三个 deadline 站点，却分别落在函数参数或 JSON 解析附近；当前正确位置是 stdout 读取 `src/script.rs:1409`、宿主分发 `src/script.rs:1428` 和 stdin 回写 `src/script.rs:1436`。
 
-因此，本次刷新采用的规则不是“按代码位移修补数字”，而是“按文档命题重新定位代码”：先说明一个锚点究竟要证明什么，再在当前树中找到承载该命题的符号或语句，最后用该范围内的具体 token 做断言。`src/script.rs:662-668` 到 `src/script.rs:832-838` 的 `ctx.http.pipe` 桥接锚点、以及 error class/status/detail 各自收窄到 `src/script.rs:188-201`、`src/script.rs:203-215`、`src/script.rs:220-223`，都是这条规则的实例。
+因此，本次刷新采用的规则不是“按代码位移修补数字”，而是“按文档命题重新定位代码”：先说明一个锚点究竟要证明什么，再在当前树中找到承载该命题的符号或语句，最后用该范围内的具体 token 做断言。`src/script.rs:662-668` 到 `src/script.rs:840-846` 的 `ctx.http.pipe` 桥接锚点、以及 error class/status/detail 各自收窄到 `src/script.rs:196-209`、`src/script.rs:211-223`、`src/script.rs:228-231`，都是这条规则的实例。
 
 这一模式并非孤例：session history 显示，2026-09-23 的一次窄范围 refresh 也遇到旧引用区域被整体替换——`docs/solutions/conventions/serve-shutdown-second-signal-semantics.md` 中旧的 `src/server.rs:171-188` 指向的接线后来被 `serve_connections` 路径取代——当时同样选择按语义重新定位，而不是平移行号。（session history）
 
@@ -38,7 +39,7 @@ PR #104 将 `src/script.rs` 的 worker 通信收紧为类型化协议：`BridgeN
 
 3. **Locate current code。** 用稳定符号名、调用形式或稳定字符串在当前树中定位语义承载点，例如 `unexpected_worker_error`、`worker_http_pipe`、`BridgeName::HttpPipe`、`timeout_at(deadline, ...)`、`self.pipe = Some(response.body)`。优先找到定义、分支或调用语句本身，而不是相近的函数。
 
-4. **Re-anchor。** 为命题选择最小但自足的范围。单行证据就保留单行；需要同时展示枚举定义和返回分支时再扩到连续块。多个独立站点必须保留为多个锚点，不能用一个宽范围掩盖缺失的证据。例如三个 deadline 站点分别锚定为 `src/script.rs:1397`、`src/script.rs:1416`、`src/script.rs:1424`，而不是重新合并成一个大致区间。
+4. **Re-anchor。** 为命题选择最小但自足的范围。单行证据就保留单行；需要同时展示枚举定义和返回分支时再扩到连续块。多个独立站点必须保留为多个锚点，不能用一个宽范围掩盖缺失的证据。例如三个 deadline 站点分别锚定为 `src/script.rs:1409`、`src/script.rs:1428`、`src/script.rs:1436`，而不是重新合并成一个大致区间。
 
 5. **Token-assert。** 为每个新范围指定必须出现的关键 token，并让检查失败时指出具体文件和范围。此次刷新对 `src/script.rs` 的每个重定位范围都执行了 anchor-range/token 断言；范围正确但 token 不在其中，仍应视为失败。断言应固定语义证据，而不是固定整个历史代码块，这样下一次无关重构不会制造无意义的维护噪声。
 
@@ -64,13 +65,13 @@ Token assertion 把“看起来在附近”升级为可重复验证的条件：�
 
 | 文档要证明的命题 | 记录中的旧锚点 | 当前语义锚点 | 必须出现的 token |
 |---|---|---|---|
-| protocol error 归入 `WorkerTerminated` | `src/script.rs:1288-1294` | `src/script.rs:1454-1460` | `fn unexpected_worker_error`、`Error::WorkerTerminated` |
-| stdout 读取受同一 deadline 约束 | `src/script.rs:1220` | `src/script.rs:1397` | `timeout_at(deadline, lines.next_line())` |
-| 宿主分发受同一 deadline 约束 | `src/script.rs:1249` | `src/script.rs:1416` | `timeout_at(deadline, dispatch_host(host, name, payload))` |
-| stdin 回写受同一 deadline 约束 | `src/script.rs:1257` | `src/script.rs:1424` | `timeout_at(deadline, write_json_line(&mut stdin, &reply))` |
-| worker 侧原生桥是 `ctx.http.pipe` | `src/script.rs:662-668` | `src/script.rs:832-838` | `fn worker_http_pipe`、`BridgeName::HttpPipe` |
-| 父进程持有 pipe body | 无独立旧锚点 | `src/script.rs:1269-1286` | `BridgeName::HttpPipe`、`self.pipe = Some(response.body)` |
-| timeout 的 class、status、detail | 旧 class/status/detail 范围均停在真正的 timeout detail 之前 | `src/script.rs:188-201`、`src/script.rs:203-215`、`src/script.rs:220-223` | `Self::TimedOut`、`StatusCode::INTERNAL_SERVER_ERROR`、`script exceeded the configured timeout` |
+| protocol error 归入 `WorkerTerminated` | `src/script.rs:1288-1294` | `src/script.rs:1466-1475` | `fn unexpected_worker_error`、`Error::WorkerTerminated` |
+| stdout 读取受同一 deadline 约束 | `src/script.rs:1220` | `src/script.rs:1409` | `timeout_at(deadline, lines.next_line())` |
+| 宿主分发受同一 deadline 约束 | `src/script.rs:1249` | `src/script.rs:1428` | `timeout_at(deadline, dispatch_host(host, name, payload))` |
+| stdin 回写受同一 deadline 约束 | `src/script.rs:1257` | `src/script.rs:1436` | `timeout_at(deadline, write_json_line(&mut stdin, &reply))` |
+| worker 侧原生桥是 `ctx.http.pipe` | `src/script.rs:662-668` | `src/script.rs:840-846` | `fn worker_http_pipe`、`BridgeName::HttpPipe` |
+| 父进程持有 pipe body | 无独立旧锚点 | `src/script.rs:1281-1298` | `BridgeName::HttpPipe`、`self.pipe = Some(response.body)` |
+| timeout 的 class、status、detail | 旧 class/status/detail 范围均停在真正的 timeout detail 之前 | `src/script.rs:196-209`、`src/script.rs:211-223`、`src/script.rs:228-231` | `Self::TimedOut`、`StatusCode::INTERNAL_SERVER_ERROR`、`script exceeded the configured timeout` |
 
 机械位移的反模式应明确禁止：
 
@@ -88,21 +89,21 @@ def assert_anchor(file, start, end, *tokens):
     missing = [token for token in tokens if token not in text]
     assert not missing, (file, start, end, missing)
 
-assert_anchor("src/script.rs", 1454, 1460,
+assert_anchor("src/script.rs", 1466, 1475,
               "fn unexpected_worker_error", "Error::WorkerTerminated")
-assert_anchor("src/script.rs", 1397, 1397,
+assert_anchor("src/script.rs", 1409, 1409,
               "timeout_at(deadline, lines.next_line())")
-assert_anchor("src/script.rs", 1416, 1416,
+assert_anchor("src/script.rs", 1428, 1428,
               "timeout_at(deadline, dispatch_host(host, name, payload))")
-assert_anchor("src/script.rs", 1424, 1424,
+assert_anchor("src/script.rs", 1436, 1436,
               "timeout_at(deadline, write_json_line(&mut stdin, &reply))")
-assert_anchor("src/script.rs", 832, 838,
+assert_anchor("src/script.rs", 840, 846,
               "fn worker_http_pipe", "BridgeName::HttpPipe")
-assert_anchor("src/script.rs", 1269, 1286,
+assert_anchor("src/script.rs", 1281, 1298,
               "BridgeName::HttpPipe", "self.pipe = Some(response.body)")
 ```
 
-同一轮语义检查还移除了“`feat/90-process-script-worker` 尚未合并到 `main`”这句过期陈述，因为 PR #96 已把 per-request worker process 路径合入；当前树中的 `run_worker` 会创建子进程，并用同一个 deadline 约束 spawn（`src/script.rs:1464`、`src/script.rs:1489-1499`）。这说明行号刷新应把段落当作整体证据重新核对，而不是只替换冒号后的数字。
+同一轮语义检查还移除了“`feat/90-process-script-worker` 尚未合并到 `main`”这句过期陈述，因为 PR #96 已把 per-request worker process 路径合入；当前树中的 `run_worker` 会创建子进程，并用同一个 deadline 约束 spawn（`src/script.rs:1479`、`src/script.rs:1504-1514`）。这说明行号刷新应把段落当作整体证据重新核对，而不是只替换冒号后的数字。
 
 本次刷新最终对每个重定位范围执行了 anchor-range/token 断言，并检查相对链接存在、YAML frontmatter 可解析和 `git diff --check`。这些检查共同证明：新锚点不仅能解析到当前树，而且确实承载了 prose 所声称的行为。
 
