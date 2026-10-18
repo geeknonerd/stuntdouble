@@ -2097,7 +2097,7 @@ mod tests {
         ));
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     #[test]
     fn allocation_abort_is_attributed_to_the_memory_limit() {
         let diagnostics = WorkerDiagnostics {
