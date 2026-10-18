@@ -169,6 +169,10 @@ fn drain(pipe: impl Read + Send + 'static) -> mpsc::Receiver<String> {
 }
 
 /// Feed one job to a fresh worker (optionally job-assigned) and collect the run.
+///
+/// The worker ping-pongs host calls (`__sd_validate_headers`) before it answers,
+/// so this harness replies to every host call with `{"ok": true}` the same way
+/// the real parent does for well-formed headers.
 fn run_worker(job: Option<&Job>, script: &str, timeout: Duration) -> Run {
     let mut child = spawn_worker(FLOOR_MIB);
     if let Some(job) = job {
@@ -177,14 +181,40 @@ fn run_worker(job: Option<&Job>, script: &str, timeout: Duration) -> Run {
             Err(error) => println!("SPIKE: assign=failed error={error}"),
         }
     }
-    let mut stdin = child.stdin.take().expect("worker stdin");
+    let mut stdin = std::io::BufWriter::new(child.stdin.take().expect("worker stdin"));
     stdin
         .write_all(job_line(script).as_bytes())
         .expect("write job line");
-    drop(stdin);
+    stdin.flush().expect("flush job line");
 
-    let stdout = drain(child.stdout.take().expect("worker stdout"));
     let stderr = drain(child.stderr.take().expect("worker stderr"));
+    let stdout = child.stdout.take().expect("worker stdout");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut collected = String::new();
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            collected.push_str(&line);
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                break;
+            };
+            if value.get("type").and_then(|kind| kind.as_str()) != Some("host_call") {
+                break;
+            }
+            let reply = json!({"type": "host_result", "result": {"ok": true}});
+            let mut bytes = serde_json::to_vec(&reply).expect("reply json");
+            bytes.push(b'\n');
+            if stdin.write_all(&bytes).is_err() || stdin.flush().is_err() {
+                break;
+            }
+        }
+        let _ = tx.send(collected);
+    });
 
     let deadline = Instant::now() + timeout;
     let status = loop {
@@ -201,9 +231,7 @@ fn run_worker(job: Option<&Job>, script: &str, timeout: Duration) -> Run {
     Run {
         timed_out: status.is_none(),
         status,
-        stdout: stdout
-            .recv_timeout(Duration::from_secs(10))
-            .unwrap_or_default(),
+        stdout: rx.recv_timeout(Duration::from_secs(10)).unwrap_or_default(),
         stderr: stderr
             .recv_timeout(Duration::from_secs(10))
             .unwrap_or_default(),

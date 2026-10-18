@@ -997,7 +997,11 @@ fn evaluate_in_worker(source: &str, request: &Json) -> Result<Json, Error> {
                     message: error.to_string(),
                     kind,
                 }),
-                None if cfg!(target_os = "linux") && engine_out_of_memory(&error) => {
+                // SPIKE ONLY (#102): widened so the Windows commit-cap failure
+                // can be observed end to end. Revert before any merge.
+                None if cfg!(any(target_os = "linux", target_os = "windows"))
+                    && engine_out_of_memory(&error) =>
+                {
                     Err(Error::MemoryLimitExceeded)
                 }
                 None => Err(Error::Failed(error.to_string())),
@@ -1459,7 +1463,9 @@ async fn forward_worker_stderr(stderr: tokio::process::ChildStderr) -> WorkerDia
 }
 
 fn unexpected_worker_error(diagnostics: &WorkerDiagnostics) -> Error {
-    if cfg!(target_os = "linux") && diagnostics.memory_allocation_failed {
+    // SPIKE ONLY (#102): widened together with the engine-out-of-memory gate.
+    if cfg!(any(target_os = "linux", target_os = "windows")) && diagnostics.memory_allocation_failed
+    {
         Error::MemoryLimitExceeded
     } else {
         Error::WorkerTerminated
