@@ -308,7 +308,7 @@ fn memory_bomb_inside_job_is_stopped() {
     let job = Job::create(FLOOR_MIB * MIB).expect("create job");
     let run = run_worker(Some(&job), BOMB_SCRIPT, Duration::from_secs(60));
     report("bomb_at_floor", &run, job.peak_process_commit());
-    let classification = if run.stdout.contains("memory_limit") {
+    let classification = if run.stdout.contains("\"kind\":\"memory_limit\"") {
         "final_result_memory_limit"
     } else if run
         .stderr
@@ -316,14 +316,16 @@ fn memory_bomb_inside_job_is_stopped() {
         .any(|line| line.starts_with("memory allocation of "))
     {
         "allocator_abort_on_stderr"
+    } else if run.stdout.contains("\"ok\":true") {
+        "unbounded_success"
     } else if !run.status.is_some_and(|status| status.success()) {
         "terminated_without_marker"
     } else {
-        "succeeded"
+        "generic_script_error"
     };
     println!("SPIKE: bomb_classification={classification}");
     assert_ne!(
-        classification, "succeeded",
+        classification, "unbounded_success",
         "the job commit cap did not stop the bomb: {}",
         run.stdout
     );
