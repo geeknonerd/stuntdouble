@@ -1,6 +1,7 @@
 ---
 title: "Keep assert!(x.is_empty()) under new pedantic clippy::assert_is_empty with an MSRV-compatible function-level allow"
 date: 2026-10-04
+last_updated: 2026-10-19
 category: ci
 module: clippy pedantic lint compatibility
 problem_type: tooling_decision
@@ -19,7 +20,7 @@ tags: [clippy, pedantic, toolchain-drift, msrv, stable, ci]
 
 PR #125 把上游与文件的每请求调用链统一进 `src/request_log.rs`（`Chain<T>` / `LogRecord` / `Pending<T>`）。重构推上去之后，CI 的 `clippy` job 失败，本地工具链却一直是绿的。CI 跟随 `rust-toolchain.toml` 的 `stable`（浮动 channel，`rust-toolchain.toml:1-3`），当时已走到 Rust 1.99；本地 checkout 的 `rustc` 还是 1.98。新 stable 在 pedantic 组下新增了 `clippy::assert_is_empty`，而仓库在 `Cargo.toml:35-37` 对 `pedantic` 设了 `deny`。四处可读性测试断言（`assert!(x.is_empty())` 形态）只在 CI 上变成硬错误，本地无法复现（session history）。
 
-当前树上的四个落点（每处一个函数级 allow，无其他改动）：`src/config.rs:857`、`src/request_log.rs:255`、`src/script.rs:1925`、`tests/cli.rs:2804`，分别守住 `assert!(config.upstream.allow_hosts.is_empty())`（`src/config.rs:862`）、`assert!(chain.snapshot().is_empty())`（`src/request_log.rs:259`）、`assert!(parse_query("").is_empty())`（`src/script.rs:1931`）、`assert!(responses[2].body_bytes.is_empty())`（`tests/cli.rs:2874`）。
+当前树上的四个落点（每处一个函数级 allow，无其他改动）：`src/config.rs:857`、`src/request_log.rs:255`、`src/script.rs:2001`、`tests/cli.rs:2911`，分别守住 `assert!(config.upstream.allow_hosts.is_empty())`（`src/config.rs:862`）、`assert!(chain.snapshot().is_empty())`（`src/request_log.rs:259`）、`assert!(parse_query("").is_empty())`（`src/script.rs:2007`）、`assert!(responses[2].body_bytes.is_empty())`（`tests/cli.rs:2981`）。
 
 ## 做法（Guidance）
 
@@ -75,7 +76,7 @@ fn out_of_range_updates_are_noops() {
 }
 ```
 
-同样的前后对照适用于 `src/config.rs:857-862` 的 `allow_hosts.is_empty()`、`src/script.rs:1925-1931` 的 `parse_query("").is_empty()`，以及 `tests/cli.rs:2804` / `tests/cli.rs:2874` 的 `body_bytes.is_empty()`。
+同样的前后对照适用于 `src/config.rs:857-862` 的 `allow_hosts.is_empty()`、`src/script.rs:2001-2007` 的 `parse_query("").is_empty()`，以及 `tests/cli.rs:2911` / `tests/cli.rs:2981` 的 `body_bytes.is_empty()`。
 
 ## 相关（Related）
 
