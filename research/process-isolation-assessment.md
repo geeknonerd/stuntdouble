@@ -24,12 +24,12 @@ issue #28 的目标：用 OS 级机制给出硬内存（~64MB）与硬超时边�
 | D4 | 路径策略 | 单轨替换：删除进程内 `spawn_blocking` 执行路径，所有平台统一进程隔离 |
 | D5 | 超时处置 | 到期立即强杀（SIGKILL / TerminateProcess），无宽限期 |
 | D6 | 内存口径 | 默认 256 MiB（S3 实测后自设计值 64 MiB 调整，见 5.3）、配置键 `sandbox.script_memory_limit_mb`、子进程启动早期自设 `RLIMIT_AS`（soft=hard）；口径为虚拟地址空间（非 RSS）；floor 64 MiB（覆盖普通启动路径） |
-| D7 | Windows | 内存硬限与不安全 FFI 先延后；Windows 先获得进程隔离 + 超时强杀，内存限制文档化平台差异（用户约束：优先避免 unsafe、Linux/macOS 优先） |
+| D7 | Windows | 内存硬限与 unsafe FFI 当时延后；Windows 先获得进程隔离 + 超时强杀（用户约束：优先避免 unsafe、Linux/macOS 优先）；自 #102（2026-10-18）起每 worker 一个 Job Object（提交内存硬限 + kill-on-close 孤儿治理），unsafe 例外限 `src/windows_job.rs`，收敛记录见 5.3 |
 | D8 | IPC 形状 | stdin/stdout + JSON Lines，三类消息（host_call / host_result / final_result），严格一配一；stderr 留子进程诊断 |
 | D9 | 孤儿治理 | Unix：子进程监视线程轮询 `std::os::unix::process::parent_id()`（1s 粒度，安全 API）；优雅关闭时主进程显式 kill 在途子进程；不用 `PR_SET_PDEATHSIG` |
 | D10 | 错误细分 | `--verbose` detail：超时保持原文；新增 `"script exceeded the configured memory limit"`、`"script worker terminated unexpectedly"`；客户端仍 500 `script_error` |
 | D11 | 关闭协调 | 首次关闭信号后等待在途请求在各自 timeout 内自然完成；排空收尾时兜底 kill 存活子进程；不提前杀 |
-| D12 | 并发上限 | 保留 `clamp(4, 16)` 槽位公式，语义改为"同时运行的脚本进程数上限"；Linux 上当前总虚拟地址空间上限 = 256 MiB × 槽位数（1–4 GiB；设计初值为 64 MiB × 槽位数）；macOS/Windows 没有每 worker 硬内存上限 |
+| D12 | 并发上限 | 保留 `clamp(4, 16)` 槽位公式，语义改为"同时运行的脚本进程数上限"；Linux 上当前总虚拟地址空间上限 = 256 MiB × 槽位数（1–4 GiB；设计初值为 64 MiB × 槽位数）；Linux 与 Windows 现在都有每 worker 硬内存上限（口径分别是虚拟地址空间与提交内存），macOS 没有，见 5.3 |
 | D13 | CPU 硬限 | 由 D5 父进程 deadline 强杀承担；暂不加 `RLIMIT_CPU`（避免双计时器语义打架，ADR 记录理由） |
 
 ## 3. 代码侧改造评估
@@ -146,7 +146,7 @@ issue #28 的目标：用 OS 级机制给出硬内存（~64MB）与硬超时边�
 - **S1 → NO-GO（macOS arm64）**：GitHub `macos-15`（Apple M1 Virtual，macOS 15.7.9）上，`setrlimit(RLIMIT_AS)` 在 64 MiB、512 MiB、64 GiB 三档均为 `EINVAL`；进程启动后 VM map 约 391.6 GiB，限制必须高于当前 VM map 才被接受（512 GiB 可设但无意义）。峰值 RSS 11–12 MiB。触发降级对策：macOS 无内存硬限。
 - **S2 → GO**：release 构建、各 100 次测量（开发机 Linux 与 CI `ubuntu-24.04`），spawn 往返相对进程内路径的配对延迟中位数 3.0–3.9 ms、p95 3.5–4.4 ms；占默认 `script_timeout_ms = 10000` 的 0.11% 以下。不做进程池。该数值是最终 runner 形态到来前的估计。
 - **S3 → GO（#91/#93）**：最终 runner 的正式复测把 8 MiB `ctx.file.readText` 的 `VmPeak` 定为 173.1 MiB，把 memory bomb 的观测 `VmPeak` 定为 255.9 MiB（距 256 MiB 上限 124 KiB）；五条 demo 路由为 21.0–21.1 MiB。结果决定保留 256 MiB 默认值与 64 MiB floor：8 MiB 缓冲读取在默认值下有 82.9 MiB（32.4%）余量，而 #91 校准的最低可用限制约为 192 MiB。完整表格、测量口径与决策见 [ADR 0014 验证结果](../plans/adr/0014-process-isolated-script-runner.md)与 [#93 评论](https://github.com/geeknonerd/stuntdouble/issues/93#issuecomment-5880243728)。
-- **#102 后续（2026-10-18）**：Windows 以"每 worker 一个 Job Object + kill-on-close"补齐内存硬限（commit charge 口径）与 hard-kill 孤儿治理，spike 数据见 [#102 评论](https://github.com/geeknonerd/stuntdouble/issues/102#issuecomment-6246805322)。表 2 的 D7 与该表 D12 中"macOS/Windows 没有每 worker 硬内存上限"的表述按此收敛：Windows 已有限制，macOS 仍是唯一无硬内存上限的平台；当前决策与 unsafe 边界见 [ADR 0014 修订（#102）](../plans/adr/0014-process-isolated-script-runner.md)。
+- **#102 后续（2026-10-18）**：Windows 以"每 worker 一个 Job Object + kill-on-close"补齐内存硬限（commit charge 口径）与 hard-kill 孤儿治理，spike 数据见 [#102 评论](https://github.com/geeknonerd/stuntdouble/issues/102#issuecomment-6246805322)。表 2 的 D7 与该表 D12 的平台口径已就地更新：Windows 已有限制，macOS 仍是唯一无硬内存上限的平台；当前决策与 unsafe 边界见 [ADR 0014 修订（#102）](../plans/adr/0014-process-isolated-script-runner.md)。
 
 ### 5.4 后续步骤（本评估通过后）
 

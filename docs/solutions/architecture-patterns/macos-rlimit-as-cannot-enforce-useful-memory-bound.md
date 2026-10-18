@@ -77,6 +77,6 @@ python3 scripts/spike89/macos-rlimit-probe.py \
 ## 相关
 
 - [用最终 runner 峰值校准 Linux script worker 的 `RLIMIT_AS` 预算](./linux-rlimit-as-budget-and-oom-attribution.md)：同一 script worker 资源边界的 Linux 对照；记录默认值/floor、虚拟地址空间口径与 OOM 归因。
-- [在契约上限处测试脚本 worker 容量，并证明 deadline 后槽位可复用](../conventions/script-worker-contract-max-and-post-deadline-held-slot-tests.md)：同一 script worker 资源边界主题；该文记录 #90 的容量与 deadline 测试契约；Linux `RLIMIT_AS` 已由 #91 落地，macOS/Windows 的平台差异以本文与 ADR 0014 D6/D7 为准；Windows Job Object 补齐由 [#102](https://github.com/geeknonerd/stuntdouble/issues/102) 跟踪。
+- [在契约上限处测试脚本 worker 容量，并证明 deadline 后槽位可复用](../conventions/script-worker-contract-max-and-post-deadline-held-slot-tests.md)：同一 script worker 资源边界主题；该文记录 #90 的容量与 deadline 测试契约；Linux `RLIMIT_AS` 已由 #91 落地，Windows 的 Job Object 提交内存上限已由 [#102](https://github.com/geeknonerd/stuntdouble/issues/102) 落地；macOS 的平台差异以本文与 ADR 0014 D6/D7 为准。
 - [Serve 的第二次关闭信号只在第一次被观测后才有保证](../conventions/serve-shutdown-second-signal-semantics.md)：同一原则的另一例——公开承诺要停在操作系统真正保证的边界内。
 - [ADR 0014：进程隔离脚本执行](../../../plans/adr/0014-process-isolated-script-runner.md) 与 [进程隔离方案评估](../../../research/process-isolation-assessment.md)：决策与证据的权威出处。

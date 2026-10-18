@@ -96,11 +96,11 @@ S1、S2 已于 2026-09-27 在一次性探针上执行（分支 `ci/89-process-is
 Windows 补齐 D7 延后的两项能力。执行模型、worker 协议、配置与 `ctx` 契约均不变：
 
 - **每 worker 一个 Job Object**：父进程在 spawn 之后、写入 job 行之前新建空 job，设 `JOB_OBJECT_LIMIT_PROCESS_MEMORY = sandbox.script_memory_limit_mb`（同一配置，下限 64 MiB）与 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`，并把 worker 分配进去；guard 持有 handle 直到 worker 结束。空 job 满足 Windows 8+ 嵌套 job 的 "must be empty or in the job hierarchy" 约束，父进程本身已在 job 内（CI runner 即如此）也能分配。
-- **fail-closed**：创建或分配失败时拒绝该 worker（500 `script_error`），与 Linux `setrlimit` 失败即 worker 无法启动一致，不允许无界执行。
-- **口径差异**：Linux `RLIMIT_AS` 限制虚拟地址空间，Windows 限制 commit charge（提交内存）；超限表现为分配失败，`engine_out_of_memory` 与 stderr 分配失败检测的 `cfg` 门随之从 linux 扩到 windows，`--verbose` detail 仍是既有稳定文本 `script exceeded the configured memory limit`。
+- **fail-closed**：创建或分配失败时拒绝该 worker（500 `script_error`），与 Linux `setrlimit` 失败即 worker 无法启动一致，不允许无界执行。该分支只能靠评审覆盖：注入 Win32 失败需要在产品代码里加测试专用故障钩子，仓库没有此类先例，Linux 的 `setrlimit` 失败路径同样无测试。
+- **口径差异与归因边界**：Linux `RLIMIT_AS` 限制虚拟地址空间，Windows 限制 commit charge（提交内存）；超限表现为分配失败，`--verbose` detail 仍是既有稳定文本 `script exceeded the configured memory limit`。归因有两条通道，`cfg` 门都从 linux 扩到 windows：`engine_out_of_memory`（Boa allocation error）已由 spike 直接观测（bomb 按 `memory_limit` 归类、stderr 为空），是 Windows 的承重通道；stderr 的 Rust allocator abort 行则是对称假设，spike 未在 Windows 观测到。该假设沿用 Linux 的精确整行匹配（`src/script.rs` 的 `is_allocator_abort_line`），并由单测随平台门一并锁定；若未来观察到误归因，升级路径是 Job Object completion port 的 `JOB_OBJECT_MSG_PROCESS_MEMORY_LIMIT` 通知这类权威信号（Microsoft Learn：进程超过内存上限时发送），而不是继续依赖字符串推断。
 - **unsafe 例外**：crate 级 `unsafe_code = "deny"` 保持；唯一例外是 `src/windows_job.rs`（模块声明处 `#[allow(unsafe_code)]`），只用 `windows-sys` 的 `CreateJobObjectW` / `SetInformationJobObject` / `AssignProcessToJobObject` 三个调用（错误码另经 `GetLastError` 读取），每个 `unsafe` 块写明不变量。句柄所有权交给标准库 `std::os::windows::io::OwnedHandle`，由它保证只关闭一次并提供 `Send`——worker 运行在请求处理 future 内，guard 跨 await 持有，若退回裸 `HANDLE`（`*mut c_void`）会因不满足 `Send` 而让 axum handler 无法编译；模块内以 `const _` 静态断言锁住该约束。不用 safe crate 的原因：`win32job` 2.0.3 不暴露 process/job 内存上限（其 `ExtendedLimitInfo` 字段 crate-private），而 `windows-sys` 0.61（MIT OR Apache-2.0）本就在依赖图中。
 - **实测证据**（2026-10-18，windows-latest，[#102 评论](https://github.com/geeknonerd/stuntdouble/issues/102#issuecomment-6246805322)）：嵌套环境下分配成功；`taskkill /F` 硬杀持有者后 worker 41–42 ms 内消失；64 MiB floor 下普通脚本峰值提交内存约 5 MiB、再加 8 MiB 堆约 13–14 MiB；128 MiB memory bomb 在约 63 MiB 被截停并按 `memory_limit` 归类。
-- **Windows 回归测试**：`tests/cli.rs` 增加 Windows 的进程表查询与强杀辅助函数，并让 deadline 强杀、hard-kill 孤儿清理与内存上限三组端到端测试同时覆盖 Windows。
+- **Windows 回归测试**：`tests/cli.rs` 增加 Windows 的进程表查询与强杀辅助函数，并让 deadline 强杀、hard-kill 孤儿清理与内存上限三组端到端测试同时覆盖 Windows；`src/script.rs` 的单测 `allocation_abort_is_attributed_to_the_memory_limit` 的平台门同步扩到 Windows，锁定上一条的 stderr 归因假设。
 
 ## 后果
 
