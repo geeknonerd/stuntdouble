@@ -1,6 +1,7 @@
 ---
 title: "Hold a transient upload temp directory with an unfinished request body"
 date: 2026-09-24
+last_updated: 2026-10-19
 category: test-failures
 module: upload temp directory integration test
 problem_type: test_failure
@@ -27,7 +28,7 @@ tags: [flaky-test, integration-test, async-timing, request-scoped-temp-dir, mult
 
 ## 症状
 
-- 同一条 panic 文本间歇出现：`panicked at tests/cli.rs:566:9: upload temp directory never appeared under /tmp/.tmpXXXX/uploads-tmp`（修复前行号；对应断言现在位于 `tests/cli.rs:569-573`）。
+- 同一条 panic 文本间歇出现：`panicked at tests/cli.rs:566:9: upload temp directory never appeared under /tmp/.tmpXXXX/uploads-tmp`（修复前行号；对应断言现在位于 `tests/cli.rs:734-738`）。
 - 与改动无关：两次失败分别落在两个互不相关的提交上，其中一次是只改文档的 PR。
 - 失败信息本身不足以定位：issue #76 已写明，「目录在窗口内不可见」无法区分「从未创建」「已被删除」「建在别处」，所以根因不能从 panic 文本直接读出来。
 - 本地不复现：修复前连续 33 次本地运行全绿，本地重复不能作为「不存在竞态」的证据。
@@ -43,36 +44,36 @@ tags: [flaky-test, integration-test, async-timing, request-scoped-temp-dir, mult
 
 修复是 PR #77（2026-09-24 合并到 main），只动 `tests/cli.rs`，生产代码不变：
 
-1. **客户端只发一半请求体，然后握着不放。** 写请求头加 multipart body 的开头（file part 头 + 4096 字节数据），不再靠响应阶段决定观察时机（`tests/cli.rs:2603-2623`）。切分点是 part 头之后第一个 `\r\n\r\n` 再加 4 字节，保证解析器能走到「创建文件」这一步（`tests/cli.rs:2603-2609`）。
-2. **把观察窗口挪进解析阶段。** `parse_multipart()` 在读 body 之前就调用 `create_upload_dir()`（`src/files.rs:325`），随后在 `field.chunk()` 循环里逐块落盘（`src/files.rs:355-372`）；请求体读不完它就不会返回，所以 body 未完成期间目录的存在由解析器自己持有，而不是由定时器保证。
-3. **等待助手只用于 fixture 主动持有的状态。** `wait_for_temp_entries` 改名为 `wait_for_entries(root, what)`（`tests/cli.rs:562-576`），同一套收敛等待同时覆盖目录和目录内的文件；它的 doc comment 就是这条规则的落点：`Only use this for a state the fixture holds open (an unfinished request body, for example); a state that can come and go needs a synchronization point instead.`（`tests/cli.rs:559-561`）
-4. **安全断言全部保留。** 等待到的目录必须恰好一个；Unix 上 mode 必须是 `0o700`（`tests/cli.rs:2626-2637`）；目录内文件名必须是不透明数字串，且不等于 `forbidden-client-name.bin`（`tests/cli.rs:2638-2649`）；stderr 不得出现客户端文件名或临时根路径（`tests/cli.rs:2666-2673`）。
-5. **观察完仍走正常路径。** 断言之后补发 body 剩余部分，脚本 `ctx.respond(200, {}, ctx.request.files[0].stream())` 流式返回文件，断言 200，再用 `wait_for_empty_temp` 确认清理（`tests/cli.rs:2653-2663`）——清理断言本身是收敛的，不受本次改动影响。
+1. **客户端只发一半请求体，然后握着不放。** 写请求头加 multipart body 的开头（file part 头 + 4096 字节数据），不再靠响应阶段决定观察时机（`tests/cli.rs:3088-3108`）。切分点是 part 头之后第一个 `\r\n\r\n` 再加 4 字节，保证解析器能走到「创建文件」这一步（`tests/cli.rs:3088-3094`）。
+2. **把观察窗口挪进解析阶段。** `parse_multipart()` 在读 body 之前就调用 `create_upload_dir()`（`src/files.rs:326`），随后在 `field.chunk()` 循环里逐块落盘（`src/files.rs:357-374`）；请求体读不完它就不会返回，所以 body 未完成期间目录的存在由解析器自己持有，而不是由定时器保证。
+3. **等待助手只用于 fixture 主动持有的状态。** `wait_for_temp_entries` 改名为 `wait_for_entries(root, what)`（`tests/cli.rs:727-741`），同一套收敛等待同时覆盖目录和目录内的文件；它的 doc comment 就是这条规则的落点：`Only use this for a state the fixture holds open (an unfinished request body, for example); a state that can come and go needs a synchronization point instead.`（`tests/cli.rs:724-726`）
+4. **安全断言全部保留。** 等待到的目录必须恰好一个；Unix 上 mode 必须是 `0o700`（`tests/cli.rs:3111-3122`）；目录内文件名必须是不透明数字串，且不等于 `forbidden-client-name.bin`（`tests/cli.rs:3123-3134`）；stderr 不得出现客户端文件名或临时根路径（`tests/cli.rs:3151-3158`）。
+5. **观察完仍走正常路径。** 断言之后补发 body 剩余部分，脚本 `ctx.respond(200, {}, ctx.request.files[0].stream())` 流式返回文件，断言 200，再用 `wait_for_empty_temp` 确认清理（`tests/cli.rs:3138-3148`）——清理断言本身是收敛的，不受本次改动影响。
 6. **删掉同步残骸。** 客户端线程、mpsc 握手、2 秒 sleep 全部删除；测试从 2.10 s 降到 0.13 s。
 
 ## 为什么这样可行
 
 根因是所有权，不是时序运气。目录的生命周期如下：
 
-- `create_upload_dir()` 返回 `TempDir`，Unix 下构造时把权限固定成 `0o700`（`src/files.rs:406-413`）。
-- 解析期间它先是 `parse_multipart()` 的局部变量；解析成功后才移进 `UploadStore { dir: Mutex<Option<TempDir>>, .. }`，而该类型的注释写明它就是「在最后一个持有者 drop 时删除随机临时目录」的守卫（`src/files.rs:191-198`、`src/files.rs:397-401`）。
-- 脚本用 `ctx.request.files[0].stream()` 返回文件时，流式响应的 `FileBody` 持有该守卫（`src/files.rs:944-946`），中继函数把它留在函数体内直到返回（`src/server.rs:959-962`）。但这只把生命周期延长到「中继结束」，而中继结束并不要求客户端读过数据：本次实测中 1 MiB 响应在约 53 ms 内就写完了发送路径（`src/server.rs:975-1004`），函数返回守卫释放，目录随即被删除。客户端的 sleep 从来没有让服务器卡住。
+- `create_upload_dir()` 返回 `TempDir`，Unix 下构造时把权限固定成 `0o700`（`src/files.rs:407-414`）。
+- 解析期间它先是 `parse_multipart()` 的局部变量；解析成功后才移进 `UploadStore { dir: Mutex<Option<TempDir>>, .. }`，而该类型的注释写明它就是「在最后一个持有者 drop 时删除随机临时目录」的守卫（`src/files.rs:192-199`、`src/files.rs:398-402`）。
+- 脚本用 `ctx.request.files[0].stream()` 返回文件时，流式响应的 `FileBody` 持有该守卫（`src/files.rs:933-935`），中继函数把它留在函数体内直到返回（`src/server.rs:952-954`）。但这只把生命周期延长到「中继结束」，而中继结束并不要求客户端读过数据：本次实测中 1 MiB 响应在约 53 ms 内就写完了发送路径（`src/server.rs:968-997`），函数返回守卫释放，目录随即被删除。客户端的 sleep 从来没有让服务器卡住。
 
 所以旧测试观察的「响应阶段」是典型的会来又会走的状态；新测试改成观察「解析阶段」：要删掉目录，必须等 `parse_multipart()` 把请求体读完，而请求体的最后一段正握在测试自己手里。`wait_for_entries` 等的事件由测试自身的动作驱动，必然发生，不再需要猜时机。
 
 ## 预防
 
 - **不要断言一个会来又会走的状态。** 观察到它只说明「某个瞬间它在」；观察不到既不能证明它从未存在，也不能证明它被正确清理。这类断言只有两种合法写法：让 fixture 主动持有该状态（本次做法），或断言一个收敛状态（例如清理完成后的空目录，`wait_for_empty_temp`）。
-- **未完成的请求体是把请求级状态钉住的最省事手段。** 它零依赖：不需要探针接口、专用日志或测试后门，直接用客户端握住的连接即可；这条规则已经写进 `wait_for_entries` 的 doc comment（`tests/cli.rs:559-561`）。
+- **未完成的请求体是把请求级状态钉住的最省事手段。** 它零依赖：不需要探针接口、专用日志或测试后门，直接用客户端握住的连接即可；这条规则已经写进 `wait_for_entries` 的 doc comment（`tests/cli.rs:724-726`）。
 - **注释也按断言审查。** 旧注释宣称 sleep 能让服务端 relay 阻塞，从未被验证，且被测量证伪。凡是「我让服务器忙起来了」式的假设，要么用测量支撑（本次是给 `UploadStore` 的创建与 drop 打时间戳），要么删掉。
 - **本地重复不是证据。** 33 次本地运行全绿，缺陷依然存在；间歇性问题要靠插桩/测量定位，「再跑一遍看看」只会延长定位时间。
-- **注意与请求读取期限的耦合。** 保持 body 不完成的观察窗口（本例等待上限 5 s，`tests/cli.rs:563`）必须小于 `server.request_timeout_ms` 的默认值（`src/config.rs:682-684`）；将来若缩短该期限，测试会以「服务器提前结束请求」的形式确定性失败，而不是退回竞态。
+- **注意与请求读取期限的耦合。** 保持 body 不完成的观察窗口（本例等待上限 5 s，`tests/cli.rs:728`）必须小于 `server.request_timeout_ms` 的默认值（`src/config.rs:718-720`）；将来若缩短该期限，测试会以「服务器提前结束请求」的形式确定性失败，而不是退回竞态。
 - **行业实践同向。** Martin Fowler 的 [Eradicating Non-Determinism in Tests](https://martinfowler.com/articles/nonDeterminism.html) 明确反对用 sleep 等待异步状态，要求把异步边界变成可观察事件；Google 的 [flaky 测试统计](https://testing.googleblog.com/2017/04/where-do-our-flaky-tests-come-from.html) 也表明这类失败应按缺陷调查，而不是当作噪声重跑。
 
 ## 相关
 
 - GitHub issue #76：flake 报告，含两次 CI run 与「加长超时只是掩盖竞态」的判断；PR #77：修复并合并（2026-09-24），提交信息记录了 50 次连续运行、全量本地门禁与 CI 转绿。
-- 回归测试：`tests/cli.rs:2568-2674`（本测试）、`tests/cli.rs:559-591`（`wait_for_entries` 与 `wait_for_empty_temp`）。
+- 回归测试：`tests/cli.rs:3053-3159`（本测试）、`tests/cli.rs:724-756`（`wait_for_entries` 与 `wait_for_empty_temp`）。
 - 同一根因的另一半（响应完成不等于客户端读完）：[blocking-upstream-body-to-async-stream-bridge.md](../architecture-patterns/blocking-upstream-body-to-async-stream-bridge.md)。
 - 同一同步原则在 worker-pool 饱和场景的实例：[script-worker-contract-max-and-post-deadline-held-slot-tests.md](../conventions/script-worker-contract-max-and-post-deadline-held-slot-tests.md) —— capacity 信号驱动的饱和窗口观察与 permit 生命周期断言。
 - 同类「用固定 sleep 代替同步」的既有教训：[serve-shutdown-second-signal-semantics.md](../conventions/serve-shutdown-second-signal-semantics.md)。
