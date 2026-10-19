@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0](https://github.com/geeknonerd/stuntdouble/compare/v1.0.3...v1.1.0) - 2026-10-19
+
+### Added
+
+- *(sandbox)* bound Windows script workers with Job Objects ([#150](https://github.com/geeknonerd/stuntdouble/pull/150))
+
+### Other
+
+- fix anchor sweep follow-up defects ([#164](https://github.com/geeknonerd/stuntdouble/pull/164))
+- re-anchor request read deadline references ([#162](https://github.com/geeknonerd/stuntdouble/pull/162))
+- re-anchor arm64 container build references ([#161](https://github.com/geeknonerd/stuntdouble/pull/161))
+- re-anchor clippy assert-is-empty references ([#160](https://github.com/geeknonerd/stuntdouble/pull/160))
+- re-anchor upload temp directory references ([#159](https://github.com/geeknonerd/stuntdouble/pull/159))
+- re-anchor semantic anchor refresh examples ([#158](https://github.com/geeknonerd/stuntdouble/pull/158))
+- re-anchor host boundary references ([#157](https://github.com/geeknonerd/stuntdouble/pull/157))
+- re-anchor script worker capacity references ([#156](https://github.com/geeknonerd/stuntdouble/pull/156))
+- re-anchor multipart budget references ([#155](https://github.com/geeknonerd/stuntdouble/pull/155))
+- re-anchor blocking upstream bridge references ([#154](https://github.com/geeknonerd/stuntdouble/pull/154))
+- refresh the shutdown learning's CI coverage and code anchors ([#152](https://github.com/geeknonerd/stuntdouble/pull/152))
+- run the test suite on macOS and Windows ([#147](https://github.com/geeknonerd/stuntdouble/pull/147))
+- refresh release-recovery docs and document the undraft 403 recovery path ([#145](https://github.com/geeknonerd/stuntdouble/pull/145))
+
 ### Added
 
 - bound Windows script workers with a per-worker Job Object: the configured `sandbox.script_memory_limit_mb` now caps committed memory, and kill-on-close cleans up workers when a hard-killed server dies ([#102](https://github.com/geeknonerd/stuntdouble/issues/102))
