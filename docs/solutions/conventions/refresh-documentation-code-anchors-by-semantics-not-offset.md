@@ -63,15 +63,17 @@ Token assertion 把“看起来在附近”升级为可重复验证的条件：�
 
 ## Examples
 
+<!-- 历史快照：下表用于展示旧锚点漂移；不要按当前代码重锚。 -->
+
 | 文档要证明的命题 | 记录中的旧锚点 | 当前语义锚点 | 必须出现的 token |
 |---|---|---|---|
-| protocol error 归入 `WorkerTerminated` | `src/script.rs:1288-1294` | `src/script.rs:1466-1475` | `fn unexpected_worker_error`、`Error::WorkerTerminated` |
-| stdout 读取受同一 deadline 约束 | `src/script.rs:1220` | `src/script.rs:1409` | `timeout_at(deadline, lines.next_line())` |
-| 宿主分发受同一 deadline 约束 | `src/script.rs:1249` | `src/script.rs:1428` | `timeout_at(deadline, dispatch_host(host, name, payload))` |
-| stdin 回写受同一 deadline 约束 | `src/script.rs:1257` | `src/script.rs:1436` | `timeout_at(deadline, write_json_line(&mut stdin, &reply))` |
-| worker 侧原生桥是 `ctx.http.pipe` | `src/script.rs:662-668` | `src/script.rs:840-846` | `fn worker_http_pipe`、`BridgeName::HttpPipe` |
-| 父进程持有 pipe body | 无独立旧锚点 | `src/script.rs:1281-1298` | `BridgeName::HttpPipe`、`self.pipe = Some(response.body)` |
-| timeout 的 class、status、detail | 旧 class/status/detail 范围均停在真正的 timeout detail 之前 | `src/script.rs:196-209`、`src/script.rs:211-223`、`src/script.rs:228-231` | `Self::TimedOut`、`StatusCode::INTERNAL_SERVER_ERROR`、`script exceeded the configured timeout` |
+| protocol error 归入 `WorkerTerminated` | `src/script.rs:1288-1294` | `src/script.rs:1454-1460` | `fn unexpected_worker_error`、`Error::WorkerTerminated` |
+| stdout 读取受同一 deadline 约束 | `src/script.rs:1220` | `src/script.rs:1397` | `timeout_at(deadline, lines.next_line())` |
+| 宿主分发受同一 deadline 约束 | `src/script.rs:1249` | `src/script.rs:1416` | `timeout_at(deadline, dispatch_host(host, name, payload))` |
+| stdin 回写受同一 deadline 约束 | `src/script.rs:1257` | `src/script.rs:1424` | `timeout_at(deadline, write_json_line(&mut stdin, &reply))` |
+| worker 侧原生桥是 `ctx.http.pipe` | `src/script.rs:662-668` | `src/script.rs:832-838` | `fn worker_http_pipe`、`BridgeName::HttpPipe` |
+| 父进程持有 pipe body | 无独立旧锚点 | `src/script.rs:1269-1286` | `BridgeName::HttpPipe`、`self.pipe = Some(response.body)` |
+| timeout 的 class、status、detail | 旧 class/status/detail 范围均停在真正的 timeout detail 之前 | `src/script.rs:188-201`、`src/script.rs:203-215`、`src/script.rs:220-223` | `Self::TimedOut`、`StatusCode::INTERNAL_SERVER_ERROR`、`script exceeded the configured timeout` |
 
 机械位移的反模式应明确禁止：
 
