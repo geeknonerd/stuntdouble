@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1](https://github.com/geeknonerd/stuntdouble/compare/v1.1.0...v1.1.1) - 2026-10-19
+
+### Other
+
+- *(deps)* bump the patch group across 1 directory with 3 updates ([#148](https://github.com/geeknonerd/stuntdouble/pull/148))
+- *(deps)* bump the actions group with 3 updates ([#149](https://github.com/geeknonerd/stuntdouble/pull/149))
+
 ## [1.1.0](https://github.com/geeknonerd/stuntdouble/compare/v1.0.3...v1.1.0) - 2026-10-19
 
 ### Added
