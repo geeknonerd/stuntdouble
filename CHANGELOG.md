@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- *(sandbox)* bound Windows script workers with Job Objects ([#150](https://github.com/geeknonerd/stuntdouble/pull/150))
+- bound Windows script workers with a per-worker Job Object: the configured `sandbox.script_memory_limit_mb` now caps committed memory, and kill-on-close cleans up workers when a hard-killed server dies ([#150](https://github.com/geeknonerd/stuntdouble/pull/150))
 
 ### Other
 
@@ -28,10 +28,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - refresh the shutdown learning's CI coverage and code anchors ([#152](https://github.com/geeknonerd/stuntdouble/pull/152))
 - run the test suite on macOS and Windows ([#147](https://github.com/geeknonerd/stuntdouble/pull/147))
 - refresh release-recovery docs and document the undraft 403 recovery path ([#145](https://github.com/geeknonerd/stuntdouble/pull/145))
-
-### Added
-
-- bound Windows script workers with a per-worker Job Object: the configured `sandbox.script_memory_limit_mb` now caps committed memory, and kill-on-close cleans up workers when a hard-killed server dies ([#102](https://github.com/geeknonerd/stuntdouble/issues/102))
 
 ## [1.0.3](https://github.com/geeknonerd/stuntdouble/compare/v1.0.2...v1.0.3) - 2026-10-12
 
