@@ -1,7 +1,7 @@
 ---
 title: "Separate multipart data budgets from raw request body limits"
 date: 2026-09-23
-last_updated: 2026-10-18
+last_updated: 2026-10-19
 category: conventions
 module: multipart upload request limits
 problem_type: convention
@@ -123,7 +123,7 @@ tradeoff: 1 MiB 是一个选定的有限 allowance，当前没有枚举验证常
 
 ### 5. 保留非 multipart 的旧 413 形状
 
-multipart 的解析失败走项目 JSON error envelope，包含 `request_id` 和错误类别（`src/server.rs:639`、`docs/contracts/config.md:84`）。非 multipart 超过 2 MiB 时走 `Handled::BodyTooLarge`，返回 413、空 body，不返回 multipart/script 的 JSON envelope（`src/server.rs:565-572`）。代码注释明确把它称为 pre-T12 行为，回归测试 `non_multipart_body_limit_stays_bounded` 构造 2 MiB + 1 字节请求并断言 413 且 body 为空（`tests/cli.rs:2855-2882`）。
+multipart 的解析失败走项目 JSON error envelope，包含 `request_id` 和错误类别（`src/server.rs:638-644`、`src/server.rs:1011-1017`、`docs/contracts/config.md:84`）。非 multipart 超过 2 MiB 时走 `Handled::BodyTooLarge`，返回 413、空 body，不返回 multipart/script 的 JSON envelope（`src/server.rs:565-572`）。代码注释明确把它称为 pre-T12 行为，回归测试 `non_multipart_body_limit_stays_bounded` 构造 2 MiB + 1 字节请求并断言 413 且 body 为空（`tests/cli.rs:2855-2882`）。
 
 这是有意的兼容决定，不是遗漏：T12 首版实现曾把非 multipart 超限改成新的 `request_body_too_large` JSON 公共错误类，评审判定那是超出 spec 的范围蔓延，随后回退（session history）。引入 multipart 的新错误 envelope 时，不应顺手改变原有非 multipart 客户端的响应形状。内部日志仍可使用 `request_body_too_large` 作为 class（`src/server.rs:569`），但客户端看到的是空 body；文档也明确区分这两类失败（`docs/contracts/config.md:84`）。
 
@@ -179,7 +179,7 @@ upload_max_bytes = 20971520  # 20 MiB，只计 part content
 
 `multipart_limit_accepts_the_cap_and_rejects_precheck_chunked_and_form_fields` 把 `upload_max_bytes` 设为 64（`tests/cli.rs:2535-2547`）：
 
-- 64 字节文件返回 200（`tests/cli.rs:2595-2598`、`tests/cli.rs:2595-2598`）。
+- 64 字节文件返回 200（`tests/cli.rs:2595-2598`）。
 - 65 字节文件、65 字节 chunked 请求、65 字节非文件字段都返回 413 `upload_too_large`（`tests/cli.rs:2600-2610`、`tests/cli.rs:2613-2618`）。
 - 一个声明长度为 `64 + 1 MiB + 1` 的 multipart 请求由预检直接返回 413，不需要等待 body（`tests/cli.rs:2587-2594`、`tests/cli.rs:2613-2618`）。
 
