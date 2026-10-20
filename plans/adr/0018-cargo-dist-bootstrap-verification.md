@@ -1,6 +1,6 @@
 # cargo-dist 自举安装：不可变 wrapper 与摘要校验
 
-- 状态：`已接受（分两阶段落地）`
+- 状态：`已接受`
 - 日期：2026-10-20
 - 作者：@geeknonerd
 - 关联：[#44](https://github.com/geeknonerd/stuntdouble/issues/44)、[ADR 0012](0012-release-artifacts-and-supply-chain.md)、[开发指南](../../docs/development.md)、[调研报告](../../research/44-dist-ci-hardening.md)、[后续评估](../../research/44-bootstrap-followup-evaluation.md)
@@ -28,7 +28,7 @@ cargo-dist `0.33.0` 生成的工作流仍有三个问题：
 **正面**
 
 - Release workflow 不再有 PR 触发器，PR 无法获得发布写权限。
-- 所有经 bootstrap wrapper 的安装（当前 CI/release-drift，第二阶段起的 Release）在执行前必须匹配其内嵌 SHA-256；替换 installer、版本或摘要会形成可审查的 diff。
+- 所有经 bootstrap wrapper 的安装（CI/release-drift 与 Release）在执行前必须匹配其内嵌 SHA-256；替换 installer、版本或摘要会形成可审查的 diff。
 - 生成文件仍由 cargo-dist 管理，升级时不需要重放手写补丁。
 - Linux、macOS 与 Windows 分别覆盖 `sha256sum`/`shasum` 与 `Get-FileHash` 路径。
 

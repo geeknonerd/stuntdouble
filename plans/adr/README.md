@@ -21,7 +21,7 @@
 | [0015](0015-python-runtime-deferred-to-v2.md) | Python 脚本运行时推迟到 v2 | 已接受 |
 | [0016](0016-v1-ctx-pending-capabilities-deferred.md) | v1 未实现 `ctx` 能力移出 1.0 | 已接受 |
 | [0017](0017-v1-release-readiness.md) | v1 发布就绪：三项待定推迟与 1.0 门禁 | 已接受 |
-| [0018](0018-cargo-dist-bootstrap-verification.md) | cargo-dist 自举安装：不可变 wrapper 与摘要校验 | 已接受（分两阶段落地） |
+| [0018](0018-cargo-dist-bootstrap-verification.md) | cargo-dist 自举安装：不可变 wrapper 与摘要校验 | 已接受 |
 
 ## 如何新增 ADR
 

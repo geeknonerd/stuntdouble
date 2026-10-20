@@ -10,6 +10,9 @@ ci = "github"
 # Do not run the Release workflow on pull requests. Release workflow writes
 # must remain limited to dispatched tag builds.
 pr-run-mode = "skip"
+# Fetch the reviewed bootstrap wrapper from the Phase 1 merge commit. The
+# checker requires a full SHA and matching bootstrap files.
+cargo-dist-url-override = "https://raw.githubusercontent.com/geeknonerd/stuntdouble/110f781eac1ca7d8534205d480881b40e60253bf/.github/dist-bootstrap"
 # The installers to generate for each app
 installers = []
 # Target platforms to build apps for (Rust target-triple syntax)
