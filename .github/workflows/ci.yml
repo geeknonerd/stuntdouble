@@ -55,6 +55,7 @@ jobs:
         run: |
           ./.github/scripts/check-release-assets.sh --self-test
           ./.github/scripts/ensure-draft-release.sh --self-test
+          ./.github/dist-bootstrap/cargo-dist-installer.sh --self-test
 
   test-macos:
     name: test-macos
@@ -67,6 +68,10 @@ jobs:
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - if: steps.cargo.outputs.exists == 'true'
         run: cargo test --workspace --all-features
+      - name: Check cargo-dist bootstrap
+        run: |
+          ./.github/dist-bootstrap/cargo-dist-installer.sh --self-test
+          ./.github/dist-bootstrap/cargo-dist-installer.sh --check
 
   test-windows:
     name: test-windows
@@ -80,6 +85,11 @@ jobs:
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - if: steps.cargo.outputs.exists == 'true'
         run: cargo test --workspace --all-features
+      - name: Check cargo-dist bootstrap
+        shell: pwsh
+        run: |
+          ./.github/dist-bootstrap/cargo-dist-installer.ps1 -SelfTest
+          ./.github/dist-bootstrap/cargo-dist-installer.ps1 -Check
 
   release-drift:
     name: release-drift
@@ -88,16 +98,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Install cargo-dist
         shell: bash
-        run: |
-          set -euo pipefail
-          version=$(awk -F'"' '/^cargo-dist-version/ { print $2; exit }' dist-workspace.toml)
-          if [ -z "$version" ]; then
-            echo "dist-workspace.toml is missing cargo-dist-version" >&2
-            exit 1
-          fi
-          curl --proto '=https' --tlsv1.2 -LsSf "https://github.com/axodotdev/cargo-dist/releases/download/v${version}/cargo-dist-installer.sh" | sh
+        run: ./.github/dist-bootstrap/cargo-dist-installer.sh
+      - name: Check cargo-dist bootstrap trust chain
+        shell: bash
+        run: ./.github/scripts/check-cargo-dist-bootstrap.sh
       - name: Check release.yml matches dist-workspace.toml
         run: dist generate --check
       - name: Check dist-managed action pins match dist-workspace.toml
