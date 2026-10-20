@@ -196,7 +196,7 @@ lychee --offline --no-progress --exclude-path target --exclude-path .git './**/*
 
 - `.github/workflows/ci.yml`：`fmt`、`clippy`、`test`、`test-macos`、`test-windows`、`release-drift`、`docs`、`docs-links`、`deny`、`audit`、`msrv` 十一个 job，全部 action 按 SHA 固定。`test-macos` 在 Apple Silicon runner 上、`test-windows` 在 x64 runner 上跑完整 workspace 测试；其余门禁在 Linux 上运行。`release-drift` 通过仓库内 wrapper 安装 cargo-dist，执行 bootstrap 信任链检查，校验 `release.yml` 与配置一致，并拒绝手写 workflow 里 dist 托管 action 的 pin 漂移（见「dist 托管 action 的升级与对账」）。`audit` job 不再经第三方审查 action：直接跑固定版本的 `cargo-audit`，有漏洞即以非 0 退出使 job 失败，也不创建 issue；版本升级需人工改 workflow。原因、实测耗时、运行时核查方法与仍属外部的注解见 [solutions/ci/node20-deprecation-annotations-only-cover-node20-actions.md](solutions/ci/node20-deprecation-annotations-only-cover-node20-actions.md)。
 - `.github/workflows/release-plz.yml`：release PR、tag 与 cargo-dist 触发。
-- `.github/workflows/release.yml`：由 `dist-workspace.toml` 生成；改配置后运行 `dist generate`，不要手工编辑该文件。`pr-run-mode = "skip"` 使它只保留 `workflow_dispatch`，PR 不再触发 Release；第二阶段启用 bootstrap override 后再切换 installer 入口。Dependabot 通过 `exclude-paths` 跳过该文件。
+- `.github/workflows/release.yml`：由 `dist-workspace.toml` 生成；改配置后运行 `dist generate`，不要手工编辑该文件。`pr-run-mode = "skip"` 使它只保留 `workflow_dispatch`，PR 不再触发 Release；`cargo-dist-url-override` 让 Release 通过 pinned bootstrap wrapper 安装 cargo-dist。Dependabot 通过 `exclude-paths` 跳过该文件。
 - `.github/workflows/release-extras.yml`：cargo-dist 的 publish job，负责创建 draft Release、SBOM、GHCR 镜像、digest，并在公告前验证二进制、容器与“将公开资产全集”。
 - `.github/release-build-setup.yml`：cargo-dist 注入到每个构建 job 的步骤，拒绝非 tag 或其他 ref 的发布构建。
 - `.github/workflows/codeql.yml`：Rust 高级代码扫描，在 `main`、pull request 与每周计划任务上运行；它不加入 required checks，改由 ruleset「CodeQL merge protection」参与合并判定（阈值与误报处置见「Pull request」）。
@@ -216,7 +216,7 @@ lychee --offline --no-progress --exclude-path target --exclude-path .git './**/*
 
 ### cargo-dist 自举校验
 
-`.github/dist-bootstrap/` 是仓库内 cargo-dist 的 bootstrap 入口。`release-drift` 已使用 shell wrapper；本阶段 `release.yml` 仍生成上游默认 installer，第二阶段通过 override 切到同一个 pinned wrapper：
+`.github/dist-bootstrap/` 是仓库内 cargo-dist 的 bootstrap 入口。`release-drift` 与 Release 都使用 wrapper；Release 通过 `cargo-dist-url-override` 指向已进入 `main` 的 full commit pin：
 
 - `cargo-dist-installer.sh` 与 `cargo-dist-installer.ps1` 内嵌目标版本和对应 installer 的 SHA-256，只从 `dist-workspace.toml` 读取 `cargo-dist-version` 做一致性断言；下载后按内嵌摘要校验，通过才执行。
 - `cargo-dist-installer.sha256` 是审计来源，格式为 `version shell_sha256 powershell_sha256`；每个版本恰好一行。它不在 wrapper 运行期读取，避免 tag checkout 改变实际校验值。
@@ -257,13 +257,13 @@ lychee --offline --no-progress --exclude-path target --exclude-path .git './**/*
 
    最后一条应只显示指向 `cargo-dist-url-override` 的 shell/PowerShell 命令。
 
-`cargo-dist-url-override` 是上游的快速迭代配置，不是安全 API。完整性来自 full commit pin 固定的 wrapper 内嵌摘要与 manifest 审计；不得改成可移动 branch 名或短 SHA。第一阶段未设置 override 时，checker 会明确警告 Release installer 仍在等待第二阶段。撤销条件见 [ADR 0018](../plans/adr/0018-cargo-dist-bootstrap-verification.md)。
+`cargo-dist-url-override` 是上游的快速迭代配置，不是安全 API。完整性来自 full commit pin 固定的 wrapper 内嵌摘要与 manifest 审计；不得改成可移动 branch 名或短 SHA。若 override 被误删，checker 会明确警告 Release installer 仍在等待第二阶段。撤销条件见 [ADR 0018](../plans/adr/0018-cargo-dist-bootstrap-verification.md)。
 
 ### 已评估的后续硬化项
 
 以下项目已评估，按记录的触发条件继续跟踪：
 
-- [#44](https://github.com/geeknonerd/stuntdouble/issues/44) cargo-dist 权限与 installer 摘要：按 [ADR 0018](../plans/adr/0018-cargo-dist-bootstrap-verification.md) 分两阶段落地。第一阶段接入自包含 wrapper、摘要清单、CI checker 与 `pr-run-mode = "skip"`；第二阶段在 wrapper 已进入 `main` 后启用 `cargo-dist-url-override`，再重新生成 `release.yml`。第二阶段完成前 #44 保持 open。上游提供原生 per-job permissions 与 checksum-pinned installer 后重新评估是否撤销 override。
+- [#44](https://github.com/geeknonerd/stuntdouble/issues/44) cargo-dist 权限与 installer 摘要：已按 [ADR 0018](../plans/adr/0018-cargo-dist-bootstrap-verification.md) 完成两阶段落地。第一阶段接入自包含 wrapper、摘要清单、CI checker 与 `pr-run-mode = "skip"`；第二阶段把 `cargo-dist-url-override` 指向 Phase 1 merge commit 并重新生成 `release.yml`。上游提供原生 per-job permissions 与 checksum-pinned installer 后重新评估是否撤销 override。
 
 ## 构建说明
 
