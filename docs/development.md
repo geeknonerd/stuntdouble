@@ -194,9 +194,9 @@ lychee --offline --no-progress --exclude-path target --exclude-path .git './**/*
 
 ## 发布自动化配置
 
-- `.github/workflows/ci.yml`：`fmt`、`clippy`、`test`、`test-macos`、`test-windows`、`release-drift`、`docs`、`docs-links`、`deny`、`audit`、`msrv` 十一个 job，全部 action 按 SHA 固定。`test-macos` 在 Apple Silicon runner 上、`test-windows` 在 x64 runner 上跑完整 workspace 测试；其余门禁在 Linux 上运行。`release-drift` 按 `dist-workspace.toml` 声明的版本安装 cargo-dist，校验 `release.yml` 与配置一致，并拒绝手写 workflow 里 dist 托管 action 的 pin 漂移（见「dist 托管 action 的升级与对账」）。`audit` job 不再经第三方审查 action：直接跑固定版本的 `cargo-audit`，有漏洞即以非 0 退出使 job 失败，也不创建 issue；版本升级需人工改 workflow。原因、实测耗时、运行时核查方法与仍属外部的注解见 [solutions/ci/node20-deprecation-annotations-only-cover-node20-actions.md](solutions/ci/node20-deprecation-annotations-only-cover-node20-actions.md)。
+- `.github/workflows/ci.yml`：`fmt`、`clippy`、`test`、`test-macos`、`test-windows`、`release-drift`、`docs`、`docs-links`、`deny`、`audit`、`msrv` 十一个 job，全部 action 按 SHA 固定。`test-macos` 在 Apple Silicon runner 上、`test-windows` 在 x64 runner 上跑完整 workspace 测试；其余门禁在 Linux 上运行。`release-drift` 通过仓库内 wrapper 安装 cargo-dist，执行 bootstrap 信任链检查，校验 `release.yml` 与配置一致，并拒绝手写 workflow 里 dist 托管 action 的 pin 漂移（见「dist 托管 action 的升级与对账」）。`audit` job 不再经第三方审查 action：直接跑固定版本的 `cargo-audit`，有漏洞即以非 0 退出使 job 失败，也不创建 issue；版本升级需人工改 workflow。原因、实测耗时、运行时核查方法与仍属外部的注解见 [solutions/ci/node20-deprecation-annotations-only-cover-node20-actions.md](solutions/ci/node20-deprecation-annotations-only-cover-node20-actions.md)。
 - `.github/workflows/release-plz.yml`：release PR、tag 与 cargo-dist 触发。
-- `.github/workflows/release.yml`：由 `dist-workspace.toml` 生成；改配置后运行 `dist generate`，不要手工编辑该文件。Dependabot 通过 `exclude-paths` 跳过该文件。
+- `.github/workflows/release.yml`：由 `dist-workspace.toml` 生成；改配置后运行 `dist generate`，不要手工编辑该文件。`pr-run-mode = "skip"` 使它只保留 `workflow_dispatch`，PR 不再触发 Release；第二阶段启用 bootstrap override 后再切换 installer 入口。Dependabot 通过 `exclude-paths` 跳过该文件。
 - `.github/workflows/release-extras.yml`：cargo-dist 的 publish job，负责创建 draft Release、SBOM、GHCR 镜像、digest，并在公告前验证二进制、容器与“将公开资产全集”。
 - `.github/release-build-setup.yml`：cargo-dist 注入到每个构建 job 的步骤，拒绝非 tag 或其他 ref 的发布构建。
 - `.github/workflows/codeql.yml`：Rust 高级代码扫描，在 `main`、pull request 与每周计划任务上运行；它不加入 required checks，改由 ruleset「CodeQL merge protection」参与合并判定（阈值与误报处置见「Pull request」）。
@@ -212,13 +212,58 @@ lychee --offline --no-progress --exclude-path target --exclude-path .git './**/*
 
 `release.yml` 由 cargo-dist 生成，其中 `actions/checkout`、`actions/upload-artifact`、`actions/download-artifact`、`actions/attest` 的 SHA 以 `dist-workspace.toml` 的 `[dist.github-action-commits]` 为唯一来源；`release-drift` 拒绝手写 workflow 与它之间的任何 pin 漂移。`dependabot.yml` 因此用 `exclude-paths` 跳过生成文件（`ignore` 会连这四个 action 的安全更新一起冻结），并把这四个 action 放进排在最前的 `dist-managed` group 单独开 PR——Dependabot 只把依赖归入第一个匹配的 group，所以它必须排在通配 group 之前。
 
-处理 `dist-managed` 升级 PR：把新 SHA 写进 `[dist.github-action-commits]`，运行 `dist generate`，与升级一起提交，`release-drift` 转绿后合并。升级 `cargo-dist-version` 走同一路径：只改 `dist-workspace.toml`，再运行 `dist generate` 并提交生成结果；CI 按该版本号安装 cargo-dist，版本号不设第二处来源。
+处理 `dist-managed` 升级 PR：把新 SHA 写进 `[dist.github-action-commits]`，运行 `dist generate`，与升级一起提交，`release-drift` 转绿后合并。升级 `cargo-dist-version` 时还必须同步更新两个 wrapper 内嵌的版本与 installer SHA-256，以及 `.github/dist-bootstrap/cargo-dist-installer.sha256` 中对应版本的审计记录；`dist-workspace.toml` 仍是运行配置的版本来源，wrapper 用断言保证 pinned 版本没有漂移。
+
+### cargo-dist 自举校验
+
+`.github/dist-bootstrap/` 是仓库内 cargo-dist 的 bootstrap 入口。`release-drift` 已使用 shell wrapper；本阶段 `release.yml` 仍生成上游默认 installer，第二阶段通过 override 切到同一个 pinned wrapper：
+
+- `cargo-dist-installer.sh` 与 `cargo-dist-installer.ps1` 内嵌目标版本和对应 installer 的 SHA-256，只从 `dist-workspace.toml` 读取 `cargo-dist-version` 做一致性断言；下载后按内嵌摘要校验，通过才执行。
+- `cargo-dist-installer.sha256` 是审计来源，格式为 `version shell_sha256 powershell_sha256`；每个版本恰好一行。它不在 wrapper 运行期读取，避免 tag checkout 改变实际校验值。
+- `--self-test`/`-SelfTest` 不联网，覆盖版本解析、重复版本、版本不匹配与摘要正反例；`--check`/`-Check` 实际下载并校验 installer，但不执行。`release-drift` 使用 shell wrapper 正常安装 cargo-dist。
+- `.github/scripts/check-cargo-dist-bootstrap.sh` 统一解析 manifest、两个 wrapper 和 `dist-workspace.toml`，并检查 `pr-run-mode`、Release trigger、override pin、pin 中的文件内容与 `dist plan` 的 installer 路由。
+
+首次启用或修改 bootstrap 内容必须分两阶段：
+
+1. 先合并 wrapper、内嵌摘要、manifest、自检、CI 接入与 `pr-run-mode = "skip"`。合并后在 `main` 上记录 full commit SHA：
+
+   ```bash
+   git rev-parse main
+   ```
+
+2. 在后续 PR 设置：
+
+   ```toml
+   pr-run-mode = "skip"
+   cargo-dist-url-override = "https://raw.githubusercontent.com/geeknonerd/stuntdouble/<40 位 full commit SHA>/.github/dist-bootstrap"
+   ```
+
+   然后运行 `dist generate`，提交生成结果。`cargo-dist-url-override` 不能指向当前 squash PR 自己的 commit；squash merge 后该 commit 不可依赖。第二阶段还必须让 checker 验证 pin 中的三个 bootstrap 文件与工作树一致；`dist generate --check` 仍负责生成文件漂移检查，不得启用 `allow-dirty = ["ci"]`。
+
+升级 cargo-dist 时：
+
+1. 从目标 tag 的 GitHub Release 获取 shell 与 PowerShell installer，独立核对 release 元数据并计算两个 SHA-256。
+2. 在任何版本号切换之前，先把新版本摘要写入两个 wrapper 的内嵌常量并加入 `.github/dist-bootstrap/cargo-dist-installer.sha256`，运行 checker 后合并到 `main`。
+3. 在后续 PR 更新 `cargo-dist-version`，把 override pin 更新到包含新 wrapper 的 `main` full commit，再运行 `dist generate`；checker 会拒绝版本、摘要或 pin 内容不一致。
+4. 本地至少验证：
+
+   ```bash
+   sh .github/dist-bootstrap/cargo-dist-installer.sh --self-test
+   sh .github/dist-bootstrap/cargo-dist-installer.sh --check
+   ./.github/scripts/check-cargo-dist-bootstrap.sh
+   dist generate --check
+   dist plan --output-format=json | jq -r '.ci.github.artifacts_matrix.include[].install_dist.run'
+   ```
+
+   最后一条应只显示指向 `cargo-dist-url-override` 的 shell/PowerShell 命令。
+
+`cargo-dist-url-override` 是上游的快速迭代配置，不是安全 API。完整性来自 full commit pin 固定的 wrapper 内嵌摘要与 manifest 审计；不得改成可移动 branch 名或短 SHA。第一阶段未设置 override 时，checker 会明确警告 Release installer 仍在等待第二阶段。撤销条件见 [ADR 0018](../plans/adr/0018-cargo-dist-bootstrap-verification.md)。
 
 ### 已评估的后续硬化项
 
-以下项目已评估，但不在 T9 当前切片处理，按触发条件跟踪：
+以下项目已评估，按记录的触发条件继续跟踪：
 
-- [#44](https://github.com/geeknonerd/stuntdouble/issues/44) cargo-dist 权限与 installer 摘要：上游提供按 job 权限或摘要校验能力，或项目决定承担 `allow-dirty = ["ci"]` 代价时处理。
+- [#44](https://github.com/geeknonerd/stuntdouble/issues/44) cargo-dist 权限与 installer 摘要：按 [ADR 0018](../plans/adr/0018-cargo-dist-bootstrap-verification.md) 分两阶段落地。第一阶段接入自包含 wrapper、摘要清单、CI checker 与 `pr-run-mode = "skip"`；第二阶段在 wrapper 已进入 `main` 后启用 `cargo-dist-url-override`，再重新生成 `release.yml`。第二阶段完成前 #44 保持 open。上游提供原生 per-job permissions 与 checksum-pinned installer 后重新评估是否撤销 override。
 
 ## 构建说明
 

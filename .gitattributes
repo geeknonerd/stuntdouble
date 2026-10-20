@@ -1,7 +1,7 @@
 * text=auto eol=lf
 *.sh text eol=lf
 *.bat binary
-*.ps1 binary
+*.ps1 text eol=lf
 *.png binary
 *.pdf binary
 /docs/** linguist-documentation

@@ -11,6 +11,8 @@
 | [开源仓库基线](open-source-repo-baseline.md) | 同类项目的许可证、资金来源与社区文件约定。 |
 | [进程隔离外部事实](process-isolation-external-facts.md) | 核查 rlimit、Windows Job Object、macOS RLIMIT_AS、cargo-dist 多 binary 与父进程退出联动事实。 |
 | [进程隔离方案评估](process-isolation-assessment.md) | 整理已定决策与改造量级评估，记录轻量替代方案检索结论（引擎路线、进程库、Wasm/VM、最佳实践）。 |
+| [cargo-dist CI 硬化](44-dist-ci-hardening.md) | 评估 #44 的权限与 installer 信任链，记录上游状态、行业实践、方案矩阵与下一步建议。 |
+| [cargo-dist bootstrap 后续评估](44-bootstrap-followup-evaluation.md) | 复核 #44 第一阶段改动的 pin 边界、跨平台解析与分阶段落地条件。 |
 
 ## 调研规则
 

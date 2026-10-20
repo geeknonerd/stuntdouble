@@ -208,7 +208,7 @@ cargo install --path .
 
 - [产品功能定义](plans/product-definition.md)（中文）——v1 范围、宿主 API 与不做清单。
 - [开发与发布流程](docs/development.md)（中文）——分支、提交、CI、版本与发布规则。
-- [架构决策](plans/adr/)（中文）——ADR 0001–0017。
+- [架构决策](plans/adr/README.md)（中文）——ADR 索引。
 - [领域词汇表](CONTEXT.md)（中文）——项目词汇。
 - [调研](research/)（中文）——Mock 选型、运行时、架构与开源基线。
 - [仓库文档索引](docs/README.md)（中文）——维护者入口。

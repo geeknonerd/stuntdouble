@@ -42,7 +42,7 @@ When a decision is hard to reverse (e.g., runtime choice, security boundaries, f
 ...
 ```
 
-We maintain 17 ADRs so far. Add additional ones when needed.
+Record each new ADR in the index at [plans/adr/README.md](plans/adr/README.md).
 
 ## Development workflow
 
