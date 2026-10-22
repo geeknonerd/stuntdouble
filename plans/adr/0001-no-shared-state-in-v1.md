@@ -36,3 +36,7 @@ Mock 产品普遍把请求间状态当核心能力：WireMock Scenarios、Mounte
 
 - 最小共享键值存储加过期（覆盖凭证与写后读，成本是一个内存 map 加隔离设计）：因无需求证据而推迟。
 - 完整资源生命周期（可编程版 json-server）：因 json-server 已占据该位置、且在已验证场景中未被使用而否决。
+
+## 修订（2026-10-22）
+
+OAuth authorization mock 提供了跨请求状态的首个硬需求。v2 在保持进程隔离、禁止脚本闭包持有状态的前提下增加宿主管理的进程内 Shared state；生命周期、API、容量与并发语义见 [ADR 0021](0021-v2-shared-state.md)。本 ADR 对 v1 的约束及上方历史决策不变。

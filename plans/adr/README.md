@@ -22,6 +22,9 @@
 | [0016](0016-v1-ctx-pending-capabilities-deferred.md) | v1 未实现 `ctx` 能力移出 1.0 | 已接受 |
 | [0017](0017-v1-release-readiness.md) | v1 发布就绪：三项待定推迟与 1.0 门禁 | 已接受 |
 | [0018](0018-cargo-dist-bootstrap-verification.md) | cargo-dist 自举安装：不可变 wrapper 与摘要校验 | 已接受 |
+| [0019](0019-host-crypto-api.md) | Host crypto API：最小、可审计的加密原语 | 已接受 |
+| [0020](0020-fallback-route-and-method-mismatch.md) | Fallback Route：可脚本化的 404 与 405 错误响应 | 已接受 |
+| [0021](0021-v2-shared-state.md) | v2 Shared state：进程内、TTL 与原子操作 | 已接受 |
 
 ## 如何新增 ADR
 

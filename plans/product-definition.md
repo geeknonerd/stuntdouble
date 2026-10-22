@@ -1,12 +1,12 @@
 # Mock Server 产品功能定义
 
 - 状态：`功能已收敛`（配置文件主格式已确认，公开契约已在 T8 冻结）
-- 更新：2026-09-30（Python 推迟到 v2，见 ADR 0015；未实现 `ctx` 能力移出 1.0，见 ADR 0016；发布就绪三项推迟与 1.0 门禁见 ADR 0017；v1.0.0 已发布，门禁已兑现）
-- 关联：[Mock 服务选型调研](../research/mock-server-landscape.md)、[示例文档清单与二进制下载场景](demo-document-catalog.md)、[配置契约](../docs/contracts/config.md)、[ctx API 契约](../docs/contracts/ctx-api.md)、[CLI 契约](../docs/contracts/cli.md)
+- 更新：2026-10-22（Post-v1 路线与 OAuth authorization mock 场景已收编；crypto、Fallback Route 与 v2 Shared state 的边界见 ADR 0019–0021。此前：Python 推迟见 ADR 0015，未实现 `ctx` 能力移出 1.0 见 ADR 0016，发布就绪见 ADR 0017）
+- 关联：[Mock 服务选型调研](../research/mock-server-landscape.md)、[示例文档清单与二进制下载场景](demo-document-catalog.md)、[Post-v1 开发路线](post-v1-roadmap.md)、[配置契约](../docs/contracts/config.md)、[ctx API 契约](../docs/contracts/ctx-api.md)、[CLI 契约](../docs/contracts/cli.md)
 
 ## 1. 产品命题与定位
 
-一款用 Rust 实现的 Mock Server 产品 **Stunt Double (`stuntdouble`)**：以声明式路由配置描述接口，用 JavaScript 脚本（Boa 运行时内置）完成从数据源取数、调外部上游、读写文件的响应构造；把"读数据源（本地 JSON/外部 HTTP）、调用外部网络、返回二进制/文件"当作一等能力，替代 json-server + 自写 middleware 的组合。请求间共享状态类能力不在第一版（v2/v3 考虑 SQLite）。
+一款用 Rust 实现的 Mock Server 产品 **Stunt Double (`stuntdouble`)**：以声明式路由配置描述接口，用 JavaScript 脚本（Boa 运行时内置）完成从数据源取数、调外部上游、读写文件的响应构造；把"读数据源（本地 JSON/外部 HTTP）、调用外部网络、返回二进制/文件"当作一等能力，替代 json-server + 自写 middleware 的组合。请求间共享状态类能力不在第一版；v2 按 [ADR 0021](adr/0021-v2-shared-state.md) 提供进程内、重启即清空的状态，SQLite 持久化不再作为既定 v2 承诺。
 
 **定位（主）**：面向需要对接真实外部依赖的后端与集成开发者的联调假服务，用于本地与 CI。
 **顺风加成**：AI 编码代理的测试后端（零运行时依赖、确定性、二进制文件能力天然契合）。
@@ -25,7 +25,7 @@
 | 配置生效方式 | 静态配置：改配置文件 + 重启（模式 1）；预留热重载（模式 2）与管理 API（模式 3）的扩展入口 | [架构设计最佳实践调研](../research/architecture-best-practices.md) |
 | 配置模型 | 路由模型：接口逐条声明（匹配 + 数据源 + 变换 + 响应四段流水线） | [ADR 0002](adr/0002-route-model-only-in-v1.md) |
 | 数据源 | 本地静态数据文件、外部上游接口 | [ADR 0001](adr/0001-no-shared-state-in-v1.md) |
-| 共享状态 | 不支持；v2/v3 考虑基于 SQLite 的持久化 | [ADR 0001](adr/0001-no-shared-state-in-v1.md) |
+| 共享状态 | v1 不支持；v2 提供进程内、重启即清空、固定容量的 Shared state，不做持久化或跨实例协调 | [ADR 0001](adr/0001-no-shared-state-in-v1.md)、[ADR 0021](adr/0021-v2-shared-state.md) |
 | 资源派生模型 | 不实装；未来可作为"OpenAPI 预设生成器"实现，但不作为独立引擎 | [ADR 0002](adr/0002-route-model-only-in-v1.md) |
 | 变换表达力边界 | 完全脚本化，不做私有模板 DSL；脚本语言为 JS（第一版）；Python 为 v2 候选 | [ADR 0003](adr/0003-script-first-multi-runtime.md)、[ADR 0015](adr/0015-python-runtime-deferred-to-v2.md) |
 | 文件 I/O 语义 | 静态文件目录为唯一文件根：配置声明，脚本文件操作只能在该目录内，相对路径默认解析到此根；上传由宿主解析 multipart 并落到系统临时目录下的每请求独立随机子目录（Unix 0700，脚本不可见路径），请求结束清理；响应侧支持流式透传与本地文件流，Range 透传/支持；纯内存响应不支持 Range；上传上限默认 20MB（可配置） | 本轮讨论 |
@@ -87,8 +87,9 @@
 ## 6. 待定
 
 - 实际 MSRV：Rust 1.91（由 Boa 0.22 决定；clap 4.6 与 toml 1.x 要求 1.85）。策略是工具链跟随 stable、MSRV 取“安全门槛 + 依赖树”共同确定的实际最低值：不允许为压低 MSRV 保留未修复的 advisory 或未维护依赖。Python（RustPython）接入时需重新校准（见 [ADR 0015](adr/0015-python-runtime-deferred-to-v2.md)）。
-- v2 路线：Python 脚本运行时（[ADR 0015](adr/0015-python-runtime-deferred-to-v2.md)）、SQLite 共享状态（ADR 0001 预留）、声明式响应序列、资源模型预设生成器、Admin API（模式 3）、内置 TLS、`ctx.local`、脚本定时器（均见 [ADR 0016](adr/0016-v1-ctx-pending-capabilities-deferred.md)）。
-- v1.x 候选（`apiVersion` 1 内增量）：`ctx.request.bodyBytes`、`ctx.http.get` 的 `retries` / `backoff`、`ctx.http.request`（见 [ADR 0016](adr/0016-v1-ctx-pending-capabilities-deferred.md)）。
+- Post-v1 路线：以 [OAuth authorization mock 场景](oauth-authorization-mock.md) 驱动 [Post-v1 开发路线](post-v1-roadmap.md)；v2 Shared state 的边界见 [ADR 0021](adr/0021-v2-shared-state.md)。
+- v1.x 候选（`apiVersion` 1 内增量）：`ctx.request.bodyBytes`、原始查询串、Host crypto API、Fallback Route（见 [ADR 0019](adr/0019-host-crypto-api.md)、[ADR 0020](adr/0020-fallback-route-and-method-mismatch.md)）、`ctx.http.get` 的 `retries` / `backoff`、`ctx.http.request`（见 [ADR 0016](adr/0016-v1-ctx-pending-capabilities-deferred.md)）。
+- v2 其他候选：Python 脚本运行时（[ADR 0015](adr/0015-python-runtime-deferred-to-v2.md)）、声明式响应序列、资源模型预设生成器、Admin API（模式 3）、内置 TLS、`ctx.local`、脚本定时器（均见 [ADR 0016](adr/0016-v1-ctx-pending-capabilities-deferred.md)）。
 - crates.io：v1.0.0 已按此落地——只做包名占位，未开自动化发布（保持 `publish = false` + `git_only = true`）；转正触发条件见 [ADR 0017](adr/0017-v1-release-readiness.md)。
 - 独立治理邮箱：v1.0.0 未设，继续用 GitHub 私密报告；转正触发条件见 [ADR 0017](adr/0017-v1-release-readiness.md)。
 - 自定义域名：v1.0.0 未配，继续用 GitHub Pages 默认域名；转正触发条件见 [ADR 0017](adr/0017-v1-release-readiness.md)。

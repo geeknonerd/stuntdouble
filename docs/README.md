@@ -16,6 +16,8 @@
 - [README](../README.md) — 项目概览与当前状态。
 - [中文 README](../README.zh-CN.md) — 中文项目说明。
 - [产品功能定义](../plans/product-definition.md) — v1 范围与不做清单。
+- [Post-v1 开发路线](../plans/post-v1-roadmap.md) — 以 OAuth authorization mock 驱动的 v1.x/v2 里程碑。
+- [OAuth authorization mock 场景契约](../plans/oauth-authorization-mock.md) — 授权码、token、userinfo 与签名校验的场景验收契约。
 - [演示夹具](../demo/README.md) — 可运行的清单场景、上游覆盖、离线文件路由（本地清单、本地下载与上传）、契约与错误映射。
 - [架构决策](../plans/adr/README.md) — ADR 索引。
 - [调研](../research/) — mock server 生态、运行时选型与开源基线。
