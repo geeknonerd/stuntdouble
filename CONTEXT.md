@@ -66,8 +66,12 @@ _Avoid_: delivered signal（投递不等于已观测）
 _Avoid_: session, cache, shared state
 
 **Shared state**：
-跨请求持久存在或可见的数据。Stunt Double v1 不提供。
+由宿主持有、跨请求可见的数据。Stunt Double v1 不提供；v2 只提供进程内、重启即清空的 Shared state。
 _Avoid_: global state, cross-request state
+
+**Host crypto API**：
+由 Rust 宿主实现并注入脚本的密码学原语，包括安全随机、SHA-256、HMAC-SHA256 与常量时间比较。
+_Avoid_: JavaScript crypto, crypto sidecar
 
 **Route model**：
 每个接口都显式声明的配置模型。
@@ -80,3 +84,11 @@ _Avoid_: route model, json-server mode
 **Preset generator**：
 把 OpenAPI 文档等上层输入编译为普通 Route 的工具。
 _Avoid_: resource engine, second engine
+
+**OAuth authorization mock**：
+验证 OAuth 授权、令牌与用户信息链路的 Mock 场景。
+_Avoid_: OAuth adapter, adapter layer
+
+**Fallback Route**：
+所有普通 Route 都未完全命中时，用于生成可脚本化 404 或 405 错误响应的可选 Route。
+_Avoid_: wildcard route, catch-all route
