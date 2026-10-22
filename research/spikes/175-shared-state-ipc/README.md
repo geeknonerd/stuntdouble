@@ -24,6 +24,8 @@
 
 worker 是针对本 spike 的聚焦实现，不是对 `src/script.rs` 的直接 patch。因此本原型证明的是现有协议与进程模型足以承载状态桥；正式接入仍需在真实 worker / `HostState` 路径补集成测试，覆盖异步 exchange、现有超时分支与 worker 回收。
 
+worker 在显式 8 MiB 栈的专用线程上运行 Boa，与生产 worker 一致；Windows 主线程默认只有 1 MiB，直接在主线程初始化 Boa 会栈溢出。
+
 运行：
 
 ```bash

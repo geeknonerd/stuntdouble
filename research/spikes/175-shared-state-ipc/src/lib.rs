@@ -20,6 +20,9 @@ pub const MAX_ENTRIES: usize = 1024;
 pub const MAX_TTL_MS: u64 = 604_800_000;
 
 const MAX_PROTOCOL_LINE_BYTES: u64 = 64 * 1024;
+// Windows gives the process main thread a 1 MiB stack; Boa needs more even
+// for simple scripts. Match the production worker's explicit evaluation stack.
+const SCRIPT_THREAD_STACK_SIZE: usize = 8 * 1024 * 1024;
 
 pub trait Clock: Send + Sync {
     fn now(&self) -> Instant;
@@ -916,7 +919,22 @@ pub fn run_worker_process() -> std::io::Result<()> {
             "expected a job line",
         ));
     };
-    let final_message = match evaluate(&script) {
+    std::thread::Builder::new()
+        .name("state-spike-eval".into())
+        .stack_size(SCRIPT_THREAD_STACK_SIZE)
+        .spawn(move || write_final_result(&script))
+        .map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("cannot start evaluation thread: {error}"),
+            )
+        })?
+        .join()
+        .map_err(|_| std::io::Error::other("evaluation thread panicked"))?
+}
+
+fn write_final_result(script: &str) -> std::io::Result<()> {
+    let final_message = match evaluate(script) {
         Ok(result) => WorkerMessage::FinalResult {
             ok: true,
             body: FinalBody {
