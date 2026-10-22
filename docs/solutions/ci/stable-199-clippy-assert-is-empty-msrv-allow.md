@@ -1,7 +1,7 @@
 ---
 title: "Keep assert!(x.is_empty()) under new pedantic clippy::assert_is_empty with an MSRV-compatible function-level allow"
 date: 2026-10-04
-last_updated: 2026-10-19
+last_updated: 2026-10-22
 category: ci
 module: clippy pedantic lint compatibility
 problem_type: tooling_decision
@@ -37,7 +37,7 @@ PR #125 把上游与文件的每请求调用链统一进 `src/request_log.rs`（
    ```
 
    同一两行模式逐个落到四个站点：`src/config.rs`、`src/request_log.rs`、`src/script.rs`、`tests/cli.rs`，每函数一行 allow，不动其他代码。
-3. **`unknown_lints` 必须写在前面。** 老工具链（本地 1.98、MSRV 1.91）还不认识这个 lint 名，没有 `unknown_lints` 会先报 unknown-lint 警告，又被 CI 的 `cargo clippy --all-targets --all-features -- -D warnings`（`.github/workflows/ci.yml:41`）抬成失败。先裸写 `#[allow(clippy::assert_is_empty)]` 只修了 CI、弄坏了老 clippy，就是这么来的（session history）。
+3. **`unknown_lints` 必须写在前面。** 老工具链（本地 1.98、MSRV 1.91）还不认识这个 lint 名，没有 `unknown_lints` 会先报 unknown-lint 警告，又被 CI 的 `clippy` job 中 `cargo clippy --all-targets --all-features -- -D warnings` 步骤（`.github/workflows/ci.yml`）抬成失败。先裸写 `#[allow(clippy::assert_is_empty)]` 只修了 CI、弄坏了老 clippy，就是这么来的（session history）。
 
 ## 为什么重要（Why This Matters）
 

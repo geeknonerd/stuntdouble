@@ -126,7 +126,7 @@ interface SdState {
 
 ## Spike 验证（#175，2026-10-22）
 
-一次性原型位于 [research/spikes/175-shared-state-ipc](../../research/spikes/175-shared-state-ipc/README.md)，不修改生产代码，也不接入公开 CLI。结论为**架构层 GO**：现有每请求 worker + stdio JSON Lines 模型足以承载本 ADR 的进程内状态，不需要第二套执行路径。原型是 wire-compatible harness，不是对生产 worker 的直接 patch；正式接入仍需在真实 `src/script.rs` / `HostState` 路径补集成测试。
+一次性原型位于 [research/spikes/175-shared-state-ipc](../../research/spikes/175-shared-state-ipc/README.md)，不修改生产代码，也不接入公开 CLI。结论为**有条件架构层 GO**：现有每请求 worker + stdio JSON Lines 模型足以承载本 ADR 的进程内状态，不需要第二套执行路径。原型是 wire-compatible harness，不是对生产 worker 的直接 patch；真实 `src/script.rs` / `HostState` / `exchange` 路径的集成验证与正式实现由 [#176](https://github.com/geeknonerd/stuntdouble/issues/176) 跟踪。
 
 验证已覆盖：
 

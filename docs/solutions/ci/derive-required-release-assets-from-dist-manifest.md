@@ -1,7 +1,7 @@
 ---
 title: "Derive required release assets from the cargo-dist manifest"
 date: 2026-09-29
-last_updated: 2026-09-29
+last_updated: 2026-10-22
 category: ci
 module: release-extras asset verification
 problem_type: workflow_issue
@@ -53,7 +53,7 @@ tags: [release-assets, cargo-dist, dist-manifest, single-source-of-truth, releas
 
 4. **把断言作为公开前的发布闸门。** release-extras 读取 draft 的实际资产名与本次 run 的本地 artifacts 后调用脚本（`.github/workflows/release-extras.yml:281-299`）；脚本逐项用 `grep -Fxq` 检查并汇总全部 `missing`（`.github/scripts/check-release-assets.sh:41-48`）。该 job 是 cargo-dist publish job（`dist-workspace.toml:35`），在 announce 公开 Release 之前运行；失败或取消时 Release 保持 draft；draft 生命周期由 `ensure-draft-release.sh` 守门，不再有 Withdraw 步骤（`docs/development.md:67-68`）。断言失败不能让流程带着不完整 Release 正常结束。注意这只是名称集合断言，不比较内容代际；失败/取消后重跑必须先删除残留 draft，见 [delete-draft-before-rerunning-release-workflow.md](delete-draft-before-rerunning-release-workflow.md)。
 
-5. **用 `--self-test` 覆盖“新增声明应通过”和“缺声明必须失败”，并放进必需的 `test` job。** self-test 构造包含虚构 `ctx-api-v2.d.ts` 的 plan（`.github/scripts/check-release-assets.sh:57-65`），完整 actual 应通过（`.github/scripts/check-release-assets.sh:67-80`）；随后从 actual 删除该文件，检查必须失败（`.github/scripts/check-release-assets.sh:82-95`），全部通过时输出 `self-test passed`（`.github/scripts/check-release-assets.sh:98`）。CI 的 `test` job 运行它（`.github/workflows/ci.yml:54-57`）。`ctx-api-v2.d.ts` 只是测试夹具，不代表仓库已经支持 apiVersion 2。
+5. **用 `--self-test` 覆盖“新增声明应通过”和“缺声明必须失败”，并放进必需的 `test` job。** self-test 构造包含虚构 `ctx-api-v2.d.ts` 的 plan（`.github/scripts/check-release-assets.sh:57-65`），完整 actual 应通过（`.github/scripts/check-release-assets.sh:67-80`）；随后从 actual 删除该文件，检查必须失败（`.github/scripts/check-release-assets.sh:82-95`），全部通过时输出 `self-test passed`（`.github/scripts/check-release-assets.sh:98`）。CI 的 `test` job 通过 `Test the release scripts` step 运行它（`.github/workflows/ci.yml`）。`ctx-api-v2.d.ts` 只是测试夹具，不代表仓库已经支持 apiVersion 2。
 
 6. **文档只描述来源与例外，不复制派生清单。** `docs/development.md:91` 指定脚本为权威来源，并单独列出 release-extras 自产资产；ADR 0012 的 #43 修订记录同一决策（`plans/adr/0012-release-artifacts-and-supply-chain.md:79-85`）。新增类型定义时应先进入 `dist.extra-artifacts`（`dist-workspace.toml:46-48`），由 manifest 派生覆盖，而不是再次编辑发布工作流内的数组。
 

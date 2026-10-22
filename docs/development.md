@@ -122,7 +122,7 @@ Release 页面必须列出 dist manifest 声明的全部产物（三个平台归
 
 - `rust-toolchain.toml` 选择 `stable` channel 与所需组件，因此本地构建与 CI 始终使用最新 stable Rust（写作时为 1.98），不固定到某个较旧的版本。
 - `Cargo.toml` 声明 `rust-version`，它是 MSRV 下限而不是构建所用工具链；任何不低于该下限的 stable 版本都受支持。
-- CI 在 Linux 上用 stable 跑全部主门禁；`test-macos`（Apple Silicon）与 `test-windows`（x64）在各自平台上跑 `cargo test --workspace --all-features`，覆盖发布二进制的目标平台。另有一个 MSRV job 用精确的 `rust-version` 构建，用来捕捉误用新语言特性的情况。
+- CI 在 Linux 上用 stable 跑全部主门禁；`test-macos`（Apple Silicon）与 `test-windows`（x64）在各自平台上跑 `cargo test --workspace --all-features`，覆盖发布二进制的目标平台。`fmt`、`clippy` 与三个平台的 `test` job 还会对独立 crate `research/spikes/175-shared-state-ipc` 运行对应的格式、lint 或测试检查；该 crate 不加入 workspace，避免影响 release-plz 与 cargo-dist。另有一个 MSRV job 用精确的 `rust-version` 构建，用来捕捉误用新语言特性的情况。
 - MSRV 是同时满足依赖树与安全门禁的最低版本，当前为 Rust 1.91（由 Boa 0.22 决定；clap 4.6 与 toml 1.x 要求 1.85）。
 - 不得为了保留存在未修复公告的依赖、或依赖无人维护的 crate 而调低 MSRV。Boa 0.20 / 0.21 仍会引入已归档的 `paste` crate，并需要受 RUSTSEC-2026-0009 影响的 `time` 版本，因此这两条线的 `cargo deny check advisories` 会失败；即使 MSRV 更高，无公告的 Boa 版本仍然胜出。
 - 提升 MSRV 的依赖升级必须在 PR 中说明代价，并同时更新 `Cargo.toml`、本文件与 `plans/product-definition.md`。
@@ -149,7 +149,7 @@ cargo audit
 - 新增依赖需要理由、维护状况检查与许可证检查。
 - 不允许 GPL 与 AGPL 依赖。
 - `cargo-deny` 检查许可证、来源、重复版本与公告。依赖图通过 `deny.toml` 的 `[graph] targets` 限定在发布目标（Linux x86_64、macOS arm64、Windows x86_64），因此不受支持平台的平台专属依赖不会导致许可证门禁失败。
-- Dependabot 每周检查 Cargo、Docker 基础镜像与 GitHub Actions。
+- Dependabot 每周检查根 Cargo workspace、独立 spike crate 的 Cargo 清单、Docker 基础镜像与 GitHub Actions。
 - 安全修复不得保留给付费层。
 
 ## 文档语言与双语结构
@@ -194,7 +194,7 @@ lychee --offline --no-progress --exclude-path target --exclude-path .git './**/*
 
 ## 发布自动化配置
 
-- `.github/workflows/ci.yml`：`fmt`、`clippy`、`test`、`test-macos`、`test-windows`、`release-drift`、`docs`、`docs-links`、`deny`、`audit`、`msrv` 十一个 job，全部 action 按 SHA 固定。`test-macos` 在 Apple Silicon runner 上、`test-windows` 在 x64 runner 上跑完整 workspace 测试；其余门禁在 Linux 上运行。`release-drift` 通过仓库内 wrapper 安装 cargo-dist，执行 bootstrap 信任链检查，校验 `release.yml` 与配置一致，并拒绝手写 workflow 里 dist 托管 action 的 pin 漂移（见「dist 托管 action 的升级与对账」）。`audit` job 不再经第三方审查 action：直接跑固定版本的 `cargo-audit`，有漏洞即以非 0 退出使 job 失败，也不创建 issue；版本升级需人工改 workflow。原因、实测耗时、运行时核查方法与仍属外部的注解见 [solutions/ci/node20-deprecation-annotations-only-cover-node20-actions.md](solutions/ci/node20-deprecation-annotations-only-cover-node20-actions.md)。
+- `.github/workflows/ci.yml`：`fmt`、`clippy`、`test`、`test-macos`、`test-windows`、`release-drift`、`docs`、`docs-links`、`deny`、`audit`、`msrv` 十一个 job，全部 action 按 SHA 固定。`test-macos` 在 Apple Silicon runner 上、`test-windows` 在 x64 runner 上跑完整 workspace 测试与 shared-state spike 测试；其余门禁在 Linux 上运行。`release-drift` 通过仓库内 wrapper 安装 cargo-dist，执行 bootstrap 信任链检查，校验 `release.yml` 与配置一致，并拒绝手写 workflow 里 dist 托管 action 的 pin 漂移（见「dist 托管 action 的升级与对账」）。`audit` job 不再经第三方审查 action：直接跑固定版本的 `cargo-audit`，有漏洞即以非 0 退出使 job 失败，也不创建 issue；版本升级需人工改 workflow。原因、实测耗时、运行时核查方法与仍属外部的注解见 [solutions/ci/node20-deprecation-annotations-only-cover-node20-actions.md](solutions/ci/node20-deprecation-annotations-only-cover-node20-actions.md)。
 - `.github/workflows/release-plz.yml`：release PR、tag 与 cargo-dist 触发。
 - `.github/workflows/release.yml`：由 `dist-workspace.toml` 生成；改配置后运行 `dist generate`，不要手工编辑该文件。`pr-run-mode = "skip"` 使它只保留 `workflow_dispatch`，PR 不再触发 Release；`cargo-dist-url-override` 让 Release 通过 pinned bootstrap wrapper 安装 cargo-dist。Dependabot 通过 `exclude-paths` 跳过该文件。
 - `.github/workflows/release-extras.yml`：cargo-dist 的 publish job，负责创建 draft Release、SBOM、GHCR 镜像、digest，并在公告前验证二进制、容器与“将公开资产全集”。
