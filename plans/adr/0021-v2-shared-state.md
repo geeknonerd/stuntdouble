@@ -124,6 +124,24 @@ interface SdState {
 - 脚本在 state 写入后抛错或客户端断开，已提交写入仍可见。
 - 日志不含 key 或 value，worker 崩溃不影响宿主状态存储的一致性。
 
+## Spike 验证（#175，2026-10-22）
+
+一次性原型位于 [research/spikes/175-shared-state-ipc](../../research/spikes/175-shared-state-ipc/README.md)，不修改生产代码，也不接入公开 CLI。结论为**架构层 GO**：现有每请求 worker + stdio JSON Lines 模型足以承载本 ADR 的进程内状态，不需要第二套执行路径。原型是 wire-compatible harness，不是对生产 worker 的直接 patch；正式接入仍需在真实 `src/script.rs` / `HostState` 路径补集成测试。
+
+验证已覆盖：
+
+- 四种操作都经 `host_call` / `host_result` 往返；两个并发 worker 对同一 key 执行 `take` 或 `setIfAbsent` 时恰好一个成功，各重复 20 轮。
+- 可控单调时钟下，TTL 到期前可见、精确边界不可见，`get` 不续期；`set` 重置 TTL，过期 key 对 `setIfAbsent` 视为 absent。
+- 默认 1024 项与 8 MiB 字节上限 fail closed；第 1025 项或超限写入不淘汰已有项，替换失败保留旧值与旧 TTL。
+- 新宿主实例状态为空；新 worker 看不到前一个 worker 的 JavaScript globals/closures；脚本抛错或 worker 超时后已提交写入仍可见。
+
+实现前明确的桥接决定：
+
+- 复用现有 `host_call`，新增单一 `__sd_state` bridge；payload 为 `{op, key, value?, ttl_ms?}`，结果用 `found` 区分缺失与合法 falsy 值，`setIfAbsent` 用 `stored` 返回布尔结果。
+- 宿主只收到 JSON，无法识别已被 `JSON.stringify` 丢失的 `undefined`、function、`NaN`、稀疏数组等值。正式实现必须在 worker 侧预检无损 JSON，并在宿主侧重复执行 key/value/TTL/容量校验。
+- 两侧协议读取必须有界，避免异常 worker 让单行无限增长；状态互斥区不得包含 stdout 写入或其他 I/O。
+- 写入一旦由宿主提交，worker 超时、脚本抛错或 `host_result` 写失败都不回滚；日志与错误消息不得包含 key、value 或请求内容。
+
 ## 替代方案
 
 - **继续禁止共享状态**：无法满足 OAuth 一次性 code、token 与防重放，拒绝。

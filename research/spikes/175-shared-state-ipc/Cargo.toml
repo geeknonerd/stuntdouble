@@ -1,0 +1,31 @@
+[package]
+name = "stuntdouble-shared-state-spike"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.91"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "shared_state_spike"
+path = "src/lib.rs"
+
+[[bin]]
+name = "state-spike"
+path = "src/main.rs"
+
+[dependencies]
+boa_engine = { version = "0.22", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+panic = "allow"
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
