@@ -131,8 +131,9 @@ interface SdState {
 验证已覆盖：
 
 - 四种操作都经 `host_call` / `host_result` 往返；两个并发 worker 对同一 key 执行 `take` 或 `setIfAbsent` 时恰好一个成功，各重复 20 轮。
-- 可控单调时钟下，TTL 到期前可见、精确边界不可见，`get` 不续期；`set` 重置 TTL，过期 key 对 `setIfAbsent` 视为 absent。
+- 可控单调时钟下，TTL 到期前可见、精确边界不可见，`get` 不续期；每个 state 操作只取一次时间快照，`set` 重置 TTL，过期 key 对 `setIfAbsent` 视为 absent。
 - 默认 1024 项与 8 MiB 字节上限 fail closed；第 1025 项或超限写入不淘汰已有项，替换失败保留旧值与旧 TTL。
+- 容量账本使用 checked 加减；删除时发现下溢返回 `state_internal_error`，不会静默截断或伪装成 key 不存在。
 - 新宿主实例状态为空；新 worker 看不到前一个 worker 的 JavaScript globals/closures；脚本抛错或 worker 超时后已提交写入仍可见。
 
 实现前明确的桥接决定：

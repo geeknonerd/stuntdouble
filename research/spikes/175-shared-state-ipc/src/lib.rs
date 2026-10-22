@@ -133,7 +133,7 @@ impl Store {
     pub fn get(&mut self, key: &str) -> Result<Option<Json>, StateError> {
         self.validate_key(key)?;
         let now = self.clock.now();
-        if self.remove_if_expired(key, now) {
+        if self.remove_if_expired(key, now)? {
             return Ok(None);
         }
         Ok(self.entries.get(key).map(|entry| entry.value.clone()))
@@ -143,62 +143,18 @@ impl Store {
         self.validate_key(key)?;
         let value_bytes = self.validate_value(&value)?;
         self.validate_ttl(ttl)?;
-        self.remove_all_expired();
-
-        let key_bytes = key.len();
-        let new_cost = key_bytes
-            .checked_add(value_bytes)
-            .ok_or(StateError::CapacityExceeded)?;
-        if let Some(existing) = self.entries.get(key) {
-            let old_cost = key_bytes
-                .checked_add(existing.value_bytes)
-                .ok_or(StateError::Internal)?;
-            let new_used = self
-                .used_bytes
-                .checked_sub(old_cost)
-                .and_then(|used| used.checked_add(new_cost))
-                .ok_or(StateError::Internal)?;
-            if new_used > self.config.max_total_bytes {
-                return Err(StateError::CapacityExceeded);
-            }
-            self.used_bytes = new_used;
-            self.entries.insert(
-                key.to_string(),
-                Entry {
-                    value,
-                    value_bytes,
-                    expires_at: self.expiry(ttl),
-                },
-            );
-            return Ok(());
-        }
-
-        if self.entries.len() >= self.config.max_entries
-            || self
-                .used_bytes
-                .checked_add(new_cost)
-                .is_none_or(|used| used > self.config.max_total_bytes)
-        {
-            return Err(StateError::CapacityExceeded);
-        }
-        self.insert_new_entry(key, value, value_bytes, ttl, new_cost);
-        Ok(())
+        let now = self.clock.now();
+        self.remove_all_expired(now)?;
+        self.commit_write(key, value, value_bytes, ttl, now)
     }
 
     pub fn take(&mut self, key: &str) -> Result<Option<Json>, StateError> {
         self.validate_key(key)?;
         let now = self.clock.now();
-        if self.remove_if_expired(key, now) {
+        if self.remove_if_expired(key, now)? {
             return Ok(None);
         }
-        let Some(entry) = self.entries.remove(key) else {
-            return Ok(None);
-        };
-        self.used_bytes = self
-            .used_bytes
-            .checked_sub(key.len() + entry.value_bytes)
-            .ok_or(StateError::Internal)?;
-        Ok(Some(entry.value))
+        Ok(self.remove_entry(key)?.map(|entry| entry.value))
     }
 
     pub fn set_if_absent(
@@ -210,29 +166,12 @@ impl Store {
         self.validate_key(key)?;
         let value_bytes = self.validate_value(&value)?;
         self.validate_ttl(ttl)?;
-        self.remove_all_expired();
         let now = self.clock.now();
-        if self
-            .entries
-            .get(key)
-            .is_some_and(|entry| !entry.is_expired(now))
-        {
+        self.remove_all_expired(now)?;
+        if self.entries.contains_key(key) {
             return Ok(false);
         }
-
-        let key_bytes = key.len();
-        let new_cost = key_bytes
-            .checked_add(value_bytes)
-            .ok_or(StateError::CapacityExceeded)?;
-        if self.entries.len() >= self.config.max_entries
-            || self
-                .used_bytes
-                .checked_add(new_cost)
-                .is_none_or(|used| used > self.config.max_total_bytes)
-        {
-            return Err(StateError::CapacityExceeded);
-        }
-        self.insert_new_entry(key, value, value_bytes, ttl, new_cost);
+        self.commit_write(key, value, value_bytes, ttl, now)?;
         Ok(true)
     }
 
@@ -258,42 +197,64 @@ impl Store {
         Ok(())
     }
 
-    fn expiry(&self, ttl: Option<Duration>) -> Option<Instant> {
-        ttl.and_then(|ttl| self.clock.now().checked_add(ttl))
-    }
-
-    fn insert_new_entry(
+    fn commit_write(
         &mut self,
         key: &str,
         value: Json,
         value_bytes: usize,
         ttl: Option<Duration>,
-        new_cost: usize,
-    ) {
-        self.used_bytes += new_cost;
+        now: Instant,
+    ) -> Result<(), StateError> {
+        let key_bytes = key.len();
+        let new_cost = key_bytes
+            .checked_add(value_bytes)
+            .ok_or(StateError::CapacityExceeded)?;
+        let replacing = self.entries.contains_key(key);
+        if !replacing && self.entries.len() >= self.config.max_entries {
+            return Err(StateError::CapacityExceeded);
+        }
+        let old_cost = self.entries.get(key).map_or(Ok(0), |existing| {
+            key_bytes
+                .checked_add(existing.value_bytes)
+                .ok_or(StateError::Internal)
+        })?;
+        let used_after_replacement = self
+            .used_bytes
+            .checked_sub(old_cost)
+            .ok_or(StateError::Internal)?;
+        let new_used = used_after_replacement
+            .checked_add(new_cost)
+            .ok_or(StateError::CapacityExceeded)?;
+        if new_used > self.config.max_total_bytes {
+            return Err(StateError::CapacityExceeded);
+        }
+        let expires_at = ttl
+            .map(|ttl| now.checked_add(ttl).ok_or(StateError::Internal))
+            .transpose()?;
+        self.used_bytes = new_used;
         self.entries.insert(
             key.to_string(),
             Entry {
                 value,
                 value_bytes,
-                expires_at: self.expiry(ttl),
+                expires_at,
             },
         );
+        Ok(())
     }
 
-    fn remove_if_expired(&mut self, key: &str, now: Instant) -> bool {
+    fn remove_if_expired(&mut self, key: &str, now: Instant) -> Result<bool, StateError> {
         let expired = self
             .entries
             .get(key)
             .is_some_and(|entry| entry.is_expired(now));
         if expired {
-            self.remove_entry(key);
+            self.remove_entry(key)?.ok_or(StateError::Internal)?;
         }
-        expired
+        Ok(expired)
     }
 
-    fn remove_all_expired(&mut self) {
-        let now = self.clock.now();
+    fn remove_all_expired(&mut self, now: Instant) -> Result<(), StateError> {
         let expired = self
             .entries
             .iter()
@@ -301,16 +262,26 @@ impl Store {
             .map(|(key, _)| key.clone())
             .collect::<Vec<_>>();
         for key in expired {
-            self.remove_entry(&key);
+            self.remove_entry(&key)?.ok_or(StateError::Internal)?;
         }
+        Ok(())
     }
 
-    fn remove_entry(&mut self, key: &str) {
-        if let Some(entry) = self.entries.remove(key) {
-            self.used_bytes = self
-                .used_bytes
-                .saturating_sub(key.len() + entry.value_bytes);
-        }
+    fn remove_entry(&mut self, key: &str) -> Result<Option<Entry>, StateError> {
+        let Some(entry) = self.entries.get(key) else {
+            return Ok(None);
+        };
+        let cost = key
+            .len()
+            .checked_add(entry.value_bytes)
+            .ok_or(StateError::Internal)?;
+        let new_used = self
+            .used_bytes
+            .checked_sub(cost)
+            .ok_or(StateError::Internal)?;
+        let entry = self.entries.remove(key).ok_or(StateError::Internal)?;
+        self.used_bytes = new_used;
+        Ok(Some(entry))
     }
 }
 
@@ -966,9 +937,76 @@ pub fn run_worker_process() -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::io::Cursor;
 
     use super::*;
+
+    struct ScriptedClock {
+        times: Mutex<VecDeque<Instant>>,
+        fallback: Instant,
+    }
+
+    impl ScriptedClock {
+        fn set_times(&self, times: impl IntoIterator<Item = Instant>) {
+            *self.times.lock().expect("scripted clock lock") = times.into_iter().collect();
+        }
+    }
+
+    impl Clock for ScriptedClock {
+        fn now(&self) -> Instant {
+            self.times
+                .lock()
+                .expect("scripted clock lock")
+                .pop_front()
+                .unwrap_or(self.fallback)
+        }
+    }
+
+    #[test]
+    fn set_if_absent_uses_one_clock_snapshot_at_the_expiry_boundary() {
+        let start = Instant::now();
+        let clock = Arc::new(ScriptedClock {
+            times: Mutex::new(VecDeque::new()),
+            fallback: start,
+        });
+        let mut store = Store::new(
+            StoreConfig {
+                max_entries: 1,
+                max_total_bytes: 8,
+                ..StoreConfig::default()
+            },
+            Arc::clone(&clock) as Arc<dyn Clock>,
+        );
+
+        store
+            .set("k", json!("x"), Some(Duration::from_millis(100)))
+            .expect("seed expiring value");
+        clock.set_times([
+            start + Duration::from_millis(99),
+            start + Duration::from_millis(100),
+        ]);
+
+        assert!(!store
+            .set_if_absent("k", json!("y"), None)
+            .expect("setIfAbsent must use the first clock snapshot"));
+        assert_eq!(store.used_bytes, 4);
+        assert_eq!(store.entries["k"].value, json!("x"));
+    }
+
+    #[test]
+    fn removal_underflow_returns_an_internal_error_without_deleting_the_entry() {
+        let clock = Arc::new(ManualClock::new(Instant::now()));
+        let mut store = Store::new(StoreConfig::default(), Arc::clone(&clock) as Arc<dyn Clock>);
+        store
+            .set("k", json!("x"), Some(Duration::from_millis(1)))
+            .expect("seed expiring value");
+        clock.advance(Duration::from_millis(1));
+        store.used_bytes = 0;
+
+        assert_eq!(store.get("k"), Err(StateError::Internal));
+        assert!(store.entries.contains_key("k"));
+    }
 
     #[test]
     fn protocol_reader_rejects_an_oversized_line() {

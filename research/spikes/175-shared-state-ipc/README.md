@@ -9,6 +9,8 @@
 
 **架构层 GO，生产接入仍需一次真实 worker 集成验证。** 现有“每请求一个 worker + stdio JSON Lines + 宿主能力代调用”的模型可以承载进程内 Shared state，不需要第二套执行路径。
 
+因此本 spike 只把 `host_call` / `host_result` 视为 wire-compatible 证据，不把“真实生产 worker 路径”标为已完成；正式实现前必须在 `src/script.rs` 的 `HostState` / `exchange` 路径补集成测试。
+
 - `get`、`set`、`take`、`setIfAbsent` 都经 `host_call` / `host_result` 往返。
 - 宿主用一个 `Mutex<Store>` 包住“检查 + 修改”，两个并发 worker 对同一 key 执行 `take` 或 `setIfAbsent` 时都恰好只有一个赢家。
 - `Instant` 满足单调时钟要求；TTL 在 `now >= expires_at` 时过期，读不续期。
@@ -26,8 +28,9 @@ worker 是针对本 spike 的聚焦实现，不是对 `src/script.rs` 的直接 
 
 ```bash
 cd research/spikes/175-shared-state-ipc
-cargo test --all-targets
-cargo clippy --all-targets -- -D warnings
+cargo test --all-targets --locked
+cargo fmt -- --check
+cargo clippy --all-targets --locked -- -D warnings
 cargo deny check
 ```
 
@@ -69,14 +72,15 @@ worker 到宿主：
 | 四种操作经 worker IPC | 单脚本依次调用 `set`、`get`、`setIfAbsent`、`take`，并验证返回值的深拷贝语义。 |
 | 并发 `take` 恰好一个赢家 | 2 个独立 worker 进程在宿主收到 `host_call` 后经 barrier 会合再执行，重复 20 轮，每轮赢家数为 1。 |
 | 并发 `setIfAbsent` 恰好一个赢家 | 2 个独立 worker 进程在 `host_call` 会合后同时写入同一 absent key，重复 20 轮，每轮恰好一个 `stored: true`，最终值等于赢家写入值。 |
-| TTL 单调且读不续期 | 注入 `ManualClock`：99 ms 可见、100 ms 边界不可见；60 ms 读一次后仍按原始起点过期。真实 worker 路径验证 TTL 写入可被另一 worker 读取。 |
+| TTL 单调且读不续期 | 注入 `ManualClock`：99 ms 可见、100 ms 边界不可见；60 ms 读一次后仍按原始起点过期。`ScriptedClock` 回归测试确认每个 state 操作只使用一次时间快照，不会在清理、判断与写入之间跨过 TTL 边界。真实 worker 路径验证 TTL 写入可被另一 worker 读取。 |
 | 容量 fail closed | 默认 1024 项时第 1025 项返回 `state_capacity_exceeded`，前 1024 项仍可读；默认 8 MiB 字节上限和替换失败保留旧值/TTL 另有测试。 |
+| 账本一致性 | 所有容量加减使用 checked 运算；删除时发现账本下溢返回 `state_internal_error`，且在报错前不删除 entry。 |
 | 重启清空、worker 不保留 JS 状态 | 同一宿主的新 worker 可见宿主状态但看不到前一个 worker 的 global；新宿主实例看不到旧状态。 |
 | 提交后失败不回滚 | `set` 后脚本抛错、`set` 后 worker 超时被强杀，后续 worker 都能读到已提交值。 |
 
-完整结果为 `21 passed`：协议/失败映射单元测试 3 项、`state_ipc` 10 项、`store_clock` 8 项。完整套件连续运行 3 次均通过。
+完整结果为 `23 passed`：协议/失败映射与账本单元测试 5 项、`state_ipc` 10 项、`store_clock` 8 项。完整套件连续运行 3 次均通过。
 
-当前只在 Linux x86_64 上实测。实现只依赖标准库的进程、管道和 `Instant`，但 Windows/macOS 的 spawn 与管道行为仍需由正式实现的 CI 矩阵覆盖。
+本地只在 Linux x86_64 上实测。CI 现在通过独立 `--manifest-path` 在 Linux、macOS 与 Windows 上运行该 crate 的 fmt、clippy 和测试；不把它加入 workspace，以免影响 release-plz 与 cargo-dist。
 
 ## 序列化与校验
 

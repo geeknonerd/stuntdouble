@@ -97,9 +97,9 @@ fn expired_entries_release_capacity() {
 }
 
 #[test]
-fn set_if_absent_treats_an_expired_key_as_absent() {
+fn set_if_absent_replaces_an_expired_key_at_entry_capacity() {
     let clock = Arc::new(ManualClock::new(Instant::now()));
-    let mut store = store_with(&clock, 8, 1024);
+    let mut store = store_with(&clock, 1, 1024);
     store
         .set("key", json!("old"), Some(Duration::from_millis(10)))
         .expect("set expiring");

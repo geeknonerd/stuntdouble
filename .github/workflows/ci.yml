@@ -25,6 +25,8 @@ jobs:
           components: rustfmt
       - if: steps.cargo.outputs.exists == 'true'
         run: cargo fmt --all --check
+      - name: Check shared-state spike formatting
+        run: cargo fmt --manifest-path research/spikes/175-shared-state-ipc/Cargo.toml -- --check
 
   clippy:
     name: clippy
@@ -39,6 +41,8 @@ jobs:
           components: clippy
       - if: steps.cargo.outputs.exists == 'true'
         run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Lint shared-state spike
+        run: cargo clippy --manifest-path research/spikes/175-shared-state-ipc/Cargo.toml --all-targets --locked -- -D warnings
 
   test:
     name: test
@@ -51,6 +55,8 @@ jobs:
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - if: steps.cargo.outputs.exists == 'true'
         run: cargo test --workspace --all-features
+      - name: Test shared-state spike
+        run: cargo test --manifest-path research/spikes/175-shared-state-ipc/Cargo.toml --all-targets --locked
       - name: Test the release scripts
         run: |
           ./.github/scripts/check-release-assets.sh --self-test
@@ -68,6 +74,8 @@ jobs:
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - if: steps.cargo.outputs.exists == 'true'
         run: cargo test --workspace --all-features
+      - name: Test shared-state spike
+        run: cargo test --manifest-path research/spikes/175-shared-state-ipc/Cargo.toml --all-targets --locked
       - name: Check cargo-dist bootstrap
         run: |
           ./.github/dist-bootstrap/cargo-dist-installer.sh --self-test
@@ -85,6 +93,8 @@ jobs:
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - if: steps.cargo.outputs.exists == 'true'
         run: cargo test --workspace --all-features
+      - name: Test shared-state spike
+        run: cargo test --manifest-path research/spikes/175-shared-state-ipc/Cargo.toml --all-targets --locked
       - name: Check cargo-dist bootstrap
         shell: pwsh
         run: |
