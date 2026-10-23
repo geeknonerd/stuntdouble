@@ -62,8 +62,8 @@ interface SdState {
 
 - key 必须是非空 UTF-8 字符串，最多 256 字节；按精确字节比较，不做大小写、Unicode 或前缀规范化。建议脚本使用稳定前缀，例如 `oauth:code:`。
 - value 只能包含 JSON 数据：`null`、boolean、有限 number、string、数组和普通对象。`undefined`、function、symbol、bigint、非有限 number、循环引用、稀疏数组或无法无损 JSON 化的值抛 `state_invalid_input`。
-- 单个 value 的紧凑 JSON 表示最多 16 KiB。
-- 嵌套深度最多 32 层；超出抛 `state_invalid_input`，避免递归预检或 Boa 序列化耗尽 worker 栈。
+- 单个 value 的宿主 compact JSON 表示最多 16 KiB。宿主持有计量权威：对解析后的值重新编码并以宿主编码长度判定，不采用脚本引擎 `JSON.stringify` 的字节数；ECMAScript 与 Rust JSON 编码器对同一 number 的词法可能不同。
+- 嵌套深度最多 32 层；超出抛 `state_invalid_input`，避免递归预检或 Boa 序列化耗尽 worker 栈。worker 侧检查用于快速返回友好错误，宿主仍在提交前校验深度与容量。
 - 每个状态项按 `UTF-8(key).len() + compact_json(value).len()` 计入容量。
 - `ttl_ms` 必须是正整数安全整数，范围为 `1..=604_800_000`（7 天）。
 - TTL 使用宿主单调时钟，从操作成功提交时开始计算；不受系统时间回拨影响，也不滑动续期。
@@ -90,6 +90,8 @@ interface SdState {
 - 状态存储只在主进程。worker 通过现有 host-call IPC 发送 key、value、`ttl_ms` 与操作名，主进程校验并返回结果或错误。
 - worker 不获得状态存储引用，也不能把状态保存在脚本闭包、模块变量或 worker 全局中；新 worker 天然看不到旧 worker 的 JavaScript 堆。
 - IPC 消息受 value/key 上限约束。宿主不得因 IPC、worker 崩溃或脚本超时而把已提交的状态写入回滚。
+- 宿主是参数、结构与容量校验的最终权威；worker 预检不作为安全边界。请求、环境与内部标记通过 Boa JSON 值直接注入新 realm，不拼接进脚本文本，且 prelude 在用户脚本运行前删除这些临时全局。
+- prelude 捕获状态校验所需的 JSON、Object、Array、Number、RegExp 与 Reflect 内建引用（Node.js primordials 模式），使脚本改写这些全局后仍不能关闭内部检查。这里不做完整 SES `lockdown()`；脚本仍按半可信输入处理。
 
 ### 错误与日志
 

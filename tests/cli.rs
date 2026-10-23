@@ -1827,6 +1827,74 @@ fn script_env_reflects_process_environment() {
 }
 
 #[test]
+fn script_request_and_env_preserve_prelude_placeholders_as_data() {
+    let script = r#"
+ctx.respond(200, {}, JSON.stringify({
+  query: ctx.request.query,
+  header: ctx.request.headers["x-probe"],
+  body: ctx.request.bodyText,
+  env: ctx.env.SD_PROBE_ENV,
+  globals: [
+    typeof __sd_request,
+    typeof __sd_env,
+    typeof __sd_upstream_marker
+  ]
+}));
+"#;
+    let query = concat!(
+        "?api=__SD_API_VERSION__",
+        "&ttl=__SD_STATE_MAX_TTL_MS__",
+        "&key=__SD_STATE_MAX_KEY_BYTES__",
+        "&value=__SD_STATE_MAX_VALUE_BYTES__",
+        "&depth=__SD_STATE_MAX_DEPTH__",
+        "&upstream=__SD_UPSTREAM_MARKER__",
+        "&request=__SD_REQUEST__",
+        "&env=__SD_ENV__"
+    );
+    let path = format!("/demo/documents/manifest/group-a{query}");
+    let (response, stderr) = with_server_full(
+        good_config(),
+        script,
+        &[("SD_PROBE_ENV", "__SD_STATE_MAX_VALUE_BYTES__")],
+        |port| {
+            request_with_body(
+                port,
+                "GET",
+                &path,
+                &[("x-probe", "__SD_STATE_MAX_KEY_BYTES__")],
+                "__SD_UPSTREAM_MARKER__",
+            )
+        },
+    );
+
+    assert_eq!(
+        response.status, 200,
+        "body: {} stderr: {stderr}",
+        response.body
+    );
+    let body: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "query": {
+                "api": "__SD_API_VERSION__",
+                "ttl": "__SD_STATE_MAX_TTL_MS__",
+                "key": "__SD_STATE_MAX_KEY_BYTES__",
+                "value": "__SD_STATE_MAX_VALUE_BYTES__",
+                "depth": "__SD_STATE_MAX_DEPTH__",
+                "upstream": "__SD_UPSTREAM_MARKER__",
+                "request": "__SD_REQUEST__",
+                "env": "__SD_ENV__"
+            },
+            "header": "__SD_STATE_MAX_KEY_BYTES__",
+            "body": "__SD_UPSTREAM_MARKER__",
+            "env": "__SD_STATE_MAX_VALUE_BYTES__",
+            "globals": ["undefined", "undefined", "undefined"]
+        })
+    );
+}
+
+#[test]
 fn ctx_state_supports_all_operations_and_deep_copies() {
     let script = r#"
 var source = { nested: [1, true, "x"] };
@@ -1866,6 +1934,27 @@ ctx.respond(200, {}, JSON.stringify({
     );
 }
 
+fn concurrent_get_outcomes(port: u16, paths: [String; 2]) -> Vec<(u16, String)> {
+    let barrier = Arc::new(Barrier::new(2));
+    let attempts = paths
+        .into_iter()
+        .map(|path| {
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                let response = request(port, "GET", &path, &[]);
+                (response.status, response.body)
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut outcomes = attempts
+        .into_iter()
+        .map(|attempt| attempt.join().expect("concurrent request"))
+        .collect::<Vec<_>>();
+    outcomes.sort();
+    outcomes
+}
+
 #[test]
 fn ctx_state_take_and_set_if_absent_have_one_concurrent_winner() {
     let script = r#"
@@ -1875,12 +1964,14 @@ if (query.seed === "1") {
   ctx.respond(200, {}, "seeded");
 } else if (query.op === "take") {
   ctx.respond(200, {}, ctx.state.take(query.key) !== undefined ? "won" : "lost");
+} else if (query.op === "read") {
+  ctx.respond(200, {}, ctx.state.get(query.key) || "missing");
 } else {
-  ctx.respond(200, {}, ctx.state.setIfAbsent(query.key, query.value) ? "won" : "lost");
+  var stored = ctx.state.setIfAbsent(query.key, query.value);
+  ctx.respond(200, {}, (stored ? "won:" : "lost:") + query.value);
 }
 "#;
-    let (results, stderr) = with_server_full(good_config(), script, &[], |port| {
-        let mut results = Vec::new();
+    let ((), _stderr) = with_server_full(good_config(), script, &[], |port| {
         for iteration in 0..4 {
             let take_key = format!("take-{iteration}");
             let seed = request(
@@ -1891,56 +1982,66 @@ if (query.seed === "1") {
             );
             assert_eq!(seed.status, 200, "body: {}", seed.body);
 
-            let barrier = Arc::new(Barrier::new(2));
-            let attempts = (0..2)
-                .map(|_| {
-                    let barrier = Arc::clone(&barrier);
-                    let path = format!("/demo/documents/manifest/group-a?op=take&key={take_key}");
-                    std::thread::spawn(move || {
-                        barrier.wait();
-                        request(port, "GET", &path, &[]).body
-                    })
-                })
-                .collect::<Vec<_>>();
-            let bodies = attempts
-                .into_iter()
-                .map(|attempt| attempt.join().expect("take request"))
-                .collect::<Vec<_>>();
+            let take_path = format!("/demo/documents/manifest/group-a?op=take&key={take_key}");
+            let outcomes = concurrent_get_outcomes(port, [take_path.clone(), take_path]);
             assert_eq!(
-                bodies.iter().filter(|body| body.as_str() == "won").count(),
-                1,
-                "take iteration {iteration}: {bodies:?}"
+                outcomes,
+                vec![(200, "lost".to_string()), (200, "won".to_string())],
+                "take iteration {iteration}"
+            );
+            let read = request(
+                port,
+                "GET",
+                &format!("/demo/documents/manifest/group-a?op=read&key={take_key}"),
+                &[],
+            );
+            assert_eq!(
+                (read.status, read.body),
+                (200, "missing".to_string()),
+                "take readback iteration {iteration}"
             );
 
             let absent_key = format!("request-{iteration}");
-            let barrier = Arc::new(Barrier::new(2));
-            let attempts = ["left", "right"]
-                .into_iter()
-                .map(|value| {
-                    let barrier = Arc::clone(&barrier);
-                    let path = format!(
+            let paths = ["left", "right"].map(|value| {
+                format!(
                         "/demo/documents/manifest/group-a?op=setIfAbsent&key={absent_key}&value={value}"
-                    );
-                    std::thread::spawn(move || {
-                        barrier.wait();
-                        request(port, "GET", &path, &[]).body
-                    })
-                })
-                .collect::<Vec<_>>();
-            let bodies = attempts
-                .into_iter()
-                .map(|attempt| attempt.join().expect("setIfAbsent request"))
+                    )
+            });
+            let outcomes = concurrent_get_outcomes(port, paths);
+            let winners = outcomes
+                .iter()
+                .filter(|(_, body)| body.starts_with("won:"))
                 .collect::<Vec<_>>();
             assert_eq!(
-                bodies.iter().filter(|body| body.as_str() == "won").count(),
+                winners.len(),
                 1,
-                "setIfAbsent iteration {iteration}: {bodies:?}"
+                "setIfAbsent iteration {iteration}: {outcomes:?}"
             );
-            results.push((take_key, absent_key));
+            let winner_body = winners[0].1.clone();
+            let winner = winner_body
+                .strip_prefix("won:")
+                .expect("winning value")
+                .to_string();
+            let loser = if winner == "left" { "right" } else { "left" };
+            let mut expected = vec![(200, winner_body), (200, format!("lost:{loser}"))];
+            expected.sort();
+            assert_eq!(
+                outcomes, expected,
+                "setIfAbsent response iteration {iteration}"
+            );
+            let read = request(
+                port,
+                "GET",
+                &format!("/demo/documents/manifest/group-a?op=read&key={absent_key}"),
+                &[],
+            );
+            assert_eq!(
+                (read.status, read.body),
+                (200, winner),
+                "setIfAbsent readback iteration {iteration}"
+            );
         }
-        results
     });
-    assert!(!results.is_empty(), "stderr: {stderr}");
 }
 
 #[test]
@@ -2032,6 +2133,140 @@ ctx.respond(200, {}, JSON.stringify({
 }
 
 #[test]
+fn ctx_state_validation_ignores_replaced_object_intrinsics() {
+    let script = r#"
+ctx.state.set("keep", "old");
+Object.getOwnPropertyNames = function () { return []; };
+Object.getOwnPropertySymbols = function () { return []; };
+var code;
+try {
+  ctx.state.set("invalid:undefined-property", { keep: 1, drop: undefined });
+  code = "accepted";
+} catch (error) {
+  code = error.code;
+}
+ctx.respond(200, {}, JSON.stringify({
+  code: code,
+  kept: ctx.state.get("keep"),
+  leaked: ctx.state.get("invalid:undefined-property") !== undefined
+}));
+"#;
+    let (response, stderr) = with_server_full(good_config(), script, &[], |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(
+        response.status, 200,
+        "body: {} stderr: {stderr}",
+        response.body
+    );
+    let body: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "code": "state_invalid_input",
+            "kept": "old",
+            "leaked": false
+        })
+    );
+}
+
+#[test]
+fn ctx_state_bridge_ignores_replaced_json_intrinsics() {
+    let script = r#"
+var nativeStringify = JSON.stringify;
+var nativeParse = JSON.parse;
+JSON.stringify = function () { return "replaced"; };
+JSON.parse = function () { return { ok: true, stored: true, found: false }; };
+var validCode;
+try {
+  ctx.state.set("valid", "value");
+  validCode = "stored";
+} catch (error) {
+  validCode = error.code;
+}
+var invalidCode;
+try {
+  ctx.state.set("invalid", { keep: 1, drop: undefined });
+  invalidCode = "accepted";
+} catch (error) {
+  invalidCode = error.code;
+}
+JSON.stringify = nativeStringify;
+JSON.parse = nativeParse;
+ctx.respond(200, {}, JSON.stringify({
+  validCode: validCode,
+  invalidCode: invalidCode,
+  value: ctx.state.get("valid")
+}));
+"#;
+    let (response, stderr) = with_server_full(good_config(), script, &[], |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(
+        response.status, 200,
+        "body: {} stderr: {stderr}",
+        response.body
+    );
+    let body: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "validCode": "stored",
+            "invalidCode": "state_invalid_input",
+            "value": "value"
+        })
+    );
+}
+
+#[test]
+fn ctx_state_validation_ignores_replaced_member_and_number_intrinsics() {
+    let script = r#"
+Object.prototype.hasOwnProperty = function () { return true; };
+Object.is = function () { return false; };
+RegExp.prototype.test = function () { return true; };
+Number = function () { return 0; };
+Number.isFinite = function () { return true; };
+Number.isInteger = function () { return true; };
+function codeFor(run) {
+  try {
+    run();
+    return "accepted";
+  } catch (error) {
+    return error.code;
+  }
+}
+var withExtraProperty = [1];
+withExtraProperty.extra = 2;
+ctx.respond(200, {}, JSON.stringify({
+  sparse: codeFor(function () { ctx.state.set("invalid:sparse", [1, , 3]); }),
+  nan: codeFor(function () { ctx.state.set("invalid:nan", NaN); }),
+  negativeZero: codeFor(function () { ctx.state.set("invalid:-0", -0); }),
+  extraArrayProperty: codeFor(function () {
+    ctx.state.set("invalid:extra-array-property", withExtraProperty);
+  })
+}));
+"#;
+    let (response, stderr) = with_server_full(good_config(), script, &[], |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(
+        response.status, 200,
+        "body: {} stderr: {stderr}",
+        response.body
+    );
+    let body: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "sparse": "state_invalid_input",
+            "nan": "state_invalid_input",
+            "negativeZero": "state_invalid_input",
+            "extraArrayProperty": "state_invalid_input"
+        })
+    );
+}
+
+#[test]
 fn ctx_state_key_value_and_ttl_limits_preserve_prior_state() {
     let script = r#"
 var maxKey = "k".repeat(256);
@@ -2087,6 +2322,51 @@ ctx.respond(200, {}, JSON.stringify({
             "valueCodes": ["state_invalid_input"],
             "ttlCodes": ["state_invalid_input", "state_invalid_input"],
             "badKeyStored": false
+        })
+    );
+}
+
+#[test]
+fn ctx_state_uses_host_compact_json_for_the_value_limit() {
+    let script = r#"
+var acceptedCode;
+try {
+  ctx.state.set("host-compact", new Array(800).fill(1e20));
+  acceptedCode = "stored";
+} catch (error) {
+  acceptedCode = error.code;
+}
+var rejectedCode;
+try {
+  ctx.state.set("js-compact", new Array(744).fill(123456789012345670000));
+  rejectedCode = "accepted";
+} catch (error) {
+  rejectedCode = error.code;
+}
+var accepted = ctx.state.get("host-compact");
+ctx.respond(200, {}, JSON.stringify({
+  acceptedCode: acceptedCode,
+  acceptedCount: accepted === undefined ? 0 : accepted.length,
+  rejectedCode: rejectedCode,
+  rejectedStored: ctx.state.get("js-compact") !== undefined
+}));
+"#;
+    let (response, stderr) = with_server_full(good_config(), script, &[], |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(
+        response.status, 200,
+        "body: {} stderr: {stderr}",
+        response.body
+    );
+    let body: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "acceptedCode": "stored",
+            "acceptedCount": 800,
+            "rejectedCode": "state_invalid_input",
+            "rejectedStored": false
         })
     );
 }

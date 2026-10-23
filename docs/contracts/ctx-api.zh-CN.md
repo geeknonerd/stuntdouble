@@ -82,7 +82,7 @@
   - `set(key, value, opts)` 原子插入或替换值，并重置 TTL。没有 `ttl_ms` 时永不过期。
   - `take(key)` 原子返回独立拷贝并删除 key；key 不存在或已过期时返回 `undefined`。
   - `setIfAbsent(key, value, opts)` 是单次原子“检查 + 写入”。写入成功返回 `true`；已有有效值时原值不变并返回 `false`。
-  - key 必须是非空 UTF-8 字符串，最多 256 字节，按精确字节比较。value 只能是无损 JSON 数据：`null`、boolean、有限 number、string、稠密数组或普通对象。`undefined`、function、symbol、bigint、非有限 number、`-0`、循环引用、稀疏数组、accessor、隐藏属性或 symbol 属性、非普通对象，以及超过 32 层的嵌套都抛出 `state_invalid_input`。单个 value 的紧凑 JSON 表示最多 16 KiB。
+  - key 必须是非空 UTF-8 字符串，最多 256 字节，按精确字节比较。value 只能是无损 JSON 数据：`null`、boolean、有限 number、string、稠密数组或普通对象。`undefined`、function、symbol、bigint、非有限 number、`-0`、循环引用、稀疏数组、accessor、隐藏属性或 symbol 属性、非普通对象，以及超过 32 层的嵌套都抛出 `state_invalid_input`。单个 value 的紧凑 JSON 表示最多 16 KiB。该字节数由宿主对解析后的值重新编码得出，不以脚本引擎 `JSON.stringify` 的输出或 number 词法为准。宿主在提交前独立校验 key、TTL、深度、value 与容量；worker 侧检查只用于更早返回可捕获错误。
   - `opts` 必须是普通对象，且只接受 `ttl_ms`。若提供，`ttl_ms` 必须是 `[1, 604800000]`（7 天）范围内的正整数安全整数。TTL 使用宿主单调时钟，从变更提交时开始计算；下一次成功的 `set` 或 `setIfAbsent` 会替换 TTL，读取不续期。
   - 存储最多保留 1024 个有效 key，计费总量最多 8 MiB，按 `UTF-8(key).len() + compact_json(value).len()` 计算。过期项在访问时惰性移除，并在写入可能需要其容量前清理。任一上限耗尽都抛出 `state_capacity_exceeded`；没有 LRU 或静默淘汰，失败的替换保留旧值与旧 TTL。
   - 状态错误可捕获：参数、序列化或 TTL 校验失败抛出 `state_invalid_input`；容量不足抛出 `state_capacity_exceeded`；互斥锁中毒或宿主一致性失败抛出 `state_internal_error`。未捕获的状态错误是普通 500 `script_error`。失败操作不得修改 key 的原值与 TTL。

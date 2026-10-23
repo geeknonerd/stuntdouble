@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - bound parent/worker JSON Lines protocol messages to 64 MiB so a corrupt worker cannot grow one IPC allocation without limit
+- harden the `ctx.state` bridge with structured request and environment injection, host-authoritative depth and capacity checks, protected prelude intrinsics, and host compact JSON value accounting ([#176](https://github.com/geeknonerd/stuntdouble/issues/176))
 
 ## [1.1.1](https://github.com/geeknonerd/stuntdouble/compare/v1.1.0...v1.1.1) - 2026-10-19
 

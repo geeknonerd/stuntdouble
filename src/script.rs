@@ -19,6 +19,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use boa_engine::native_function::NativeFunction;
+use boa_engine::property::Attribute;
 use boa_engine::{
     js_string, Context, JsError, JsNativeError, JsNativeErrorKind, JsString, JsValue, Source,
 };
@@ -277,10 +278,29 @@ impl Outcome {
 // The prelude is the only writer of `__sd`; `ctx` is a frozen view over it.
 const PRELUDE: &str = r#"
 var __sd = { response: null, logs: [] };
-var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_upstream_marker, __sd_file, __sd_upload, __sd_state) {
+var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_upstream_marker, __sd_file, __sd_upload, __sd_state, __sd_intrinsics) {
   "use strict";
   var envelope = __sd;
+  var __sd_json_stringify = __sd_intrinsics.json_stringify;
+  var __sd_json_parse = __sd_intrinsics.json_parse;
+  var __sd_get_own_property_names = __sd_intrinsics.get_own_property_names;
+  var __sd_get_own_property_symbols = __sd_intrinsics.get_own_property_symbols;
+  var __sd_get_own_property_descriptor = __sd_intrinsics.get_own_property_descriptor;
+  var __sd_get_prototype_of = __sd_intrinsics.get_prototype_of;
+  var __sd_object_prototype = __sd_intrinsics.object_prototype;
+  var __sd_has_own = __sd_intrinsics.object_has_own;
+  var __sd_reflect_apply = __sd_intrinsics.reflect_apply;
+  var __sd_array_is_array = __sd_intrinsics.array_is_array;
+  var __sd_number_is_integer = __sd_intrinsics.number_is_integer;
+  var __sd_number_is_finite = __sd_intrinsics.number_is_finite;
+  var __sd_number_is_safe_integer = __sd_intrinsics.number_is_safe_integer;
+  var __sd_number = __sd_intrinsics.number;
+  var __sd_object_is = __sd_intrinsics.object_is;
+  var __sd_regexp_test = __sd_intrinsics.regexp_test;
   var FILE_HANDLES = new WeakMap();
+  function hasOwn(object, key) {
+    return __sd_reflect_apply(__sd_has_own, object, [key]);
+  }
   function format(value) {
     if (typeof value === "string") { return value; }
     if (value === undefined) { return "undefined"; }
@@ -403,18 +423,18 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
   }
   function checkPlainOpts(opts, label, allowedKeys) {
     if (opts === undefined) { return {}; }
-    if (opts === null || typeof opts !== "object" || Array.isArray(opts)) {
+    if (opts === null || typeof opts !== "object" || __sd_array_is_array(opts)) {
       throw new TypeError(label + ": opts must be an object");
     }
-    var proto = Object.getPrototypeOf(opts);
-    if (proto !== Object.prototype && proto !== null) {
+    var proto = __sd_get_prototype_of(opts);
+    if (proto !== __sd_object_prototype && proto !== null) {
       throw new TypeError(label + ": opts must be a plain object");
     }
-    var symbols = Object.getOwnPropertySymbols(opts);
+    var symbols = __sd_get_own_property_symbols(opts);
     if (symbols.length > 0) {
       throw new TypeError(label + ": unknown opts key " + String(symbols[0]));
     }
-    var keys = Object.getOwnPropertyNames(opts);
+    var keys = __sd_get_own_property_names(opts);
     for (var i = 0; i < keys.length; i++) {
       if (allowedKeys.indexOf(keys[i]) === -1) {
         throw new TypeError(label + ": unknown opts key " + JSON.stringify(keys[i]));
@@ -484,7 +504,7 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
       return;
     }
     if (kind === "number") {
-      if (!Number.isFinite(value) || Object.is(value, -0)) {
+      if (!__sd_number_is_finite(value) || __sd_object_is(value, -0)) {
         invalidState("ctx.state: value contains a non-JSON number");
       }
       return;
@@ -496,39 +516,39 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
       invalidState("ctx.state: value contains a cycle");
     }
     seen.push(value);
-    if (Array.isArray(value)) {
-      if (Object.getOwnPropertySymbols(value).length !== 0) {
+    if (__sd_array_is_array(value)) {
+      if (__sd_get_own_property_symbols(value).length !== 0) {
         invalidState("ctx.state: symbol keys are not supported");
       }
-      var names = Object.getOwnPropertyNames(value);
+      var names = __sd_get_own_property_names(value);
       for (var n = 0; n < names.length; n++) {
         if (names[n] === "length") { continue; }
-        var index = Number(names[n]);
-        var descriptor = Object.getOwnPropertyDescriptor(value, names[n]);
-        if (!/^(0|[1-9][0-9]*)$/.test(names[n]) ||
-            !Number.isInteger(index) || index < 0 || index >= value.length ||
+        var index = __sd_number(names[n]);
+        var descriptor = __sd_get_own_property_descriptor(value, names[n]);
+        if (!__sd_reflect_apply(__sd_regexp_test, /^(0|[1-9][0-9]*)$/, [names[n]]) ||
+            !__sd_number_is_integer(index) || index < 0 || index >= value.length ||
             !descriptor || !("value" in descriptor) || !descriptor.enumerable) {
           invalidState("ctx.state: arrays can only contain dense data elements");
         }
         checkStateValue(descriptor.value, seen, depth + 1);
       }
       for (var arrayIndex = 0; arrayIndex < value.length; arrayIndex++) {
-        if (!Object.prototype.hasOwnProperty.call(value, arrayIndex)) {
+        if (!hasOwn(value, arrayIndex)) {
           invalidState("ctx.state: sparse arrays are not supported");
         }
       }
     } else {
-      var proto = Object.getPrototypeOf(value);
-      if (proto !== Object.prototype && proto !== null) {
+      var proto = __sd_get_prototype_of(value);
+      if (proto !== __sd_object_prototype && proto !== null) {
         invalidState("ctx.state: value must contain only plain objects");
       }
-      if (Object.getOwnPropertySymbols(value).length !== 0) {
+      if (__sd_get_own_property_symbols(value).length !== 0) {
         invalidState("ctx.state: symbol keys are not supported");
       }
-      var keys = Object.getOwnPropertyNames(value);
+      var keys = __sd_get_own_property_names(value);
       for (var k = 0; k < keys.length; k++) {
         checkStateString(keys[k]);
-        var property = Object.getOwnPropertyDescriptor(value, keys[k]);
+        var property = __sd_get_own_property_descriptor(value, keys[k]);
         if (!property || !("value" in property) || !property.enumerable) {
           invalidState("ctx.state: accessors and hidden properties are not supported");
         }
@@ -552,25 +572,25 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
   }
   function checkStateTtl(opts) {
     if (opts === undefined) { return null; }
-    if (opts === null || typeof opts !== "object" || Array.isArray(opts)) {
+    if (opts === null || typeof opts !== "object" || __sd_array_is_array(opts)) {
       throw makeError("ctx.state: opts must be a plain object", "state_invalid_input");
     }
-    var proto = Object.getPrototypeOf(opts);
-    if (proto !== Object.prototype && proto !== null) {
+    var proto = __sd_get_prototype_of(opts);
+    if (proto !== __sd_object_prototype && proto !== null) {
       throw makeError("ctx.state: opts must be a plain object", "state_invalid_input");
     }
-    if (Object.getOwnPropertySymbols(opts).length !== 0) {
+    if (__sd_get_own_property_symbols(opts).length !== 0) {
       throw makeError("ctx.state: unknown opts key", "state_invalid_input");
     }
-    var keys = Object.getOwnPropertyNames(opts);
+    var keys = __sd_get_own_property_names(opts);
     for (var i = 0; i < keys.length; i++) {
       if (keys[i] !== "ttl_ms") {
         throw makeError("ctx.state: unknown opts key", "state_invalid_input");
       }
     }
-    if (!Object.prototype.hasOwnProperty.call(opts, "ttl_ms")) { return null; }
+    if (!hasOwn(opts, "ttl_ms")) { return null; }
     var ttl = opts.ttl_ms;
-    if (typeof ttl !== "number" || !Number.isSafeInteger(ttl) || ttl <= 0 ||
+    if (typeof ttl !== "number" || !__sd_number_is_safe_integer(ttl) || ttl <= 0 ||
         ttl > __SD_STATE_MAX_TTL_MS__) {
       throw makeError(
         "ctx.state: opts.ttl_ms must be an integer in [1, __SD_STATE_MAX_TTL_MS__]",
@@ -582,13 +602,13 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
   function stateCall(payload) {
     var raw;
     try {
-      raw = __sd_state(JSON.stringify(payload));
+      raw = __sd_state(__sd_json_stringify(payload));
     } catch (error) {
       throw makeError("ctx.state: host bridge failed", "state_internal_error");
     }
     var result;
     try {
-      result = JSON.parse(raw);
+      result = __sd_json_parse(raw);
     } catch (error) {
       throw makeError("ctx.state: invalid host response", "state_internal_error");
     }
@@ -602,12 +622,6 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
   }
   function writeState(operation, key, value, opts) {
     checkStateValue(value, [], 0);
-    if (stateUtf8Length(JSON.stringify(value)) > __SD_STATE_MAX_VALUE_BYTES__) {
-      throw makeError(
-        "ctx.state: value exceeds __SD_STATE_MAX_VALUE_BYTES__ compact JSON bytes",
-        "state_invalid_input"
-      );
-    }
     var payload = {
       op: operation,
       key: checkStateKey(key),
@@ -752,8 +766,8 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
   }
   return Object.freeze({
     apiVersion: "__SD_API_VERSION__",
-    request: requestSnapshot(__SD_REQUEST__),
-    env: Object.freeze(__SD_ENV__),
+    request: requestSnapshot(__sd_request),
+    env: Object.freeze(__sd_env),
     http: Object.freeze({ get: httpGet, pipe: httpPipe }),
     state: sharedState,
     file: Object.freeze({
@@ -787,7 +801,27 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
       return true;
     }
   });
-})(__sd_http_get, __sd_http_pipe, __sd_validate_headers, __SD_UPSTREAM_MARKER__, __sd_file, __sd_upload, __sd_state);
+})(__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_upstream_marker, __sd_file, __sd_upload, __sd_state, {
+  json_stringify: JSON.stringify,
+  json_parse: JSON.parse,
+  get_own_property_names: Object.getOwnPropertyNames,
+  get_own_property_symbols: Object.getOwnPropertySymbols,
+  get_own_property_descriptor: Object.getOwnPropertyDescriptor,
+  get_prototype_of: Object.getPrototypeOf,
+  object_prototype: Object.prototype,
+  object_has_own: Object.prototype.hasOwnProperty,
+  reflect_apply: Reflect.apply,
+  array_is_array: Array.isArray,
+  number_is_integer: Number.isInteger,
+  number_is_finite: Number.isFinite,
+  number_is_safe_integer: Number.isSafeInteger,
+  number: Number,
+  object_is: Object.is,
+  regexp_test: RegExp.prototype.test
+});
+delete globalThis.__sd_request;
+delete globalThis.__sd_env;
+delete globalThis.__sd_upstream_marker;
 delete globalThis.__sd_http_get;
 delete globalThis.__sd_http_pipe;
 delete globalThis.__sd_validate_headers;
@@ -798,14 +832,6 @@ delete globalThis.__sd_state;
 
 /// Read the recorded response and log lines back out of the realm.
 const EXTRACT: &str = "JSON.stringify({ response: __sd.response, logs: __sd.logs })";
-
-/// Serialize a value as a JS literal, keeping the injected source line-safe.
-fn js_literal(value: &Json) -> String {
-    value
-        .to_string()
-        .replace('\u{2028}', "\\u2028")
-        .replace('\u{2029}', "\\u2029")
-}
 
 /// One host bridge callable from the worker. Unknown names are protocol errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1179,28 +1205,18 @@ fn guard_engine<T>(run: impl FnOnce() -> T) -> Result<T, Error> {
         .map_err(|_| Error::Failed("script panicked in the engine".into()))
 }
 
-/// Serialize one request and environment snapshot into the script prelude.
-fn prelude_for_request(request: &Json, upstream_marker: &str) -> String {
+/// Fill the prelude's trusted, compile-time placeholders.
+fn prelude() -> String {
     PRELUDE
         .replace("__SD_API_VERSION__", API_VERSION)
-        .replace("__SD_REQUEST__", &js_literal(request))
-        .replace("__SD_ENV__", &js_literal(&env_json()))
         .replace("__SD_STATE_MAX_TTL_MS__", &state::MAX_TTL_MS.to_string())
         .replace(
             "__SD_STATE_MAX_KEY_BYTES__",
             &state::MAX_KEY_BYTES.to_string(),
         )
         .replace(
-            "__SD_STATE_MAX_VALUE_BYTES__",
-            &state::MAX_VALUE_BYTES.to_string(),
-        )
-        .replace(
             "__SD_STATE_MAX_DEPTH__",
             &state::MAX_VALUE_DEPTH.to_string(),
-        )
-        .replace(
-            "__SD_UPSTREAM_MARKER__",
-            &js_literal(&Json::String(upstream_marker.to_string())),
         )
 }
 
@@ -1208,7 +1224,7 @@ fn prelude_for_request(request: &Json, upstream_marker: &str) -> String {
 /// forwarded to the parent; upstream, file, and upload policy stay there.
 fn evaluate_in_worker(source: &str, request: &Json) -> Result<Json, Error> {
     let upstream_marker = upstream_marker();
-    let prelude = prelude_for_request(request, &upstream_marker);
+    let prelude = prelude();
     let mut context = Context::default();
     let limits = context.runtime_limits_mut();
     limits.set_loop_iteration_limit(LOOP_ITERATION_LIMIT);
@@ -1217,6 +1233,21 @@ fn evaluate_in_worker(source: &str, request: &Json) -> Result<Json, Error> {
     // A Rust-side panic in the engine must not take the worker down without a
     // protocol result; it is mapped to the same script failure as before.
     let staged = guard_engine(|| -> Result<String, Error> {
+        let request = JsValue::from_json(request, &mut context)
+            .map_err(|error| Error::Failed(error.to_string()))?;
+        context
+            .register_global_property(js_string!("__sd_request"), request, Attribute::all())
+            .map_err(|error| Error::Failed(error.to_string()))?;
+        let env = JsValue::from_json(&env_json(), &mut context)
+            .map_err(|error| Error::Failed(error.to_string()))?;
+        context
+            .register_global_property(js_string!("__sd_env"), env, Attribute::all())
+            .map_err(|error| Error::Failed(error.to_string()))?;
+        let marker = JsValue::from_json(&Json::String(upstream_marker.clone()), &mut context)
+            .map_err(|error| Error::Failed(error.to_string()))?;
+        context
+            .register_global_property(js_string!("__sd_upstream_marker"), marker, Attribute::all())
+            .map_err(|error| Error::Failed(error.to_string()))?;
         context
             .register_global_builtin_callable(
                 js_string!("__sd_http_get"),

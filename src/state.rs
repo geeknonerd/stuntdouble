@@ -178,6 +178,7 @@ impl Store {
     }
 
     fn validate_value(&self, value: &Json) -> Result<usize, StateError> {
+        validate_json_value(value, 0)?;
         let compact = serde_json::to_vec(value).map_err(|_| StateError::InvalidInput)?;
         if compact.len() > MAX_VALUE_BYTES {
             return Err(StateError::InvalidInput);
@@ -233,6 +234,26 @@ impl Store {
 
 fn entry_cost(key: &str, value_bytes: usize) -> Option<usize> {
     key.len().checked_add(value_bytes)
+}
+
+fn validate_json_value(value: &Json, depth: usize) -> Result<(), StateError> {
+    if depth > MAX_VALUE_DEPTH {
+        return Err(StateError::InvalidInput);
+    }
+    match value {
+        Json::Array(items) => {
+            for item in items {
+                validate_json_value(item, depth + 1)?;
+            }
+        }
+        Json::Object(entries) => {
+            for value in entries.values() {
+                validate_json_value(value, depth + 1)?;
+            }
+        }
+        Json::Null | Json::Bool(_) | Json::Number(_) | Json::String(_) => {}
+    }
+    Ok(())
 }
 
 impl Entry {
@@ -416,5 +437,38 @@ mod tests {
             store.get("key").expect("new value"),
             Some(serde_json::json!("new"))
         );
+    }
+
+    #[test]
+    fn host_enforces_the_depth_limit_and_preserves_the_previous_value() {
+        fn nested_object(depth: usize) -> Json {
+            let mut value = serde_json::json!({});
+            for _ in 0..depth {
+                value = serde_json::json!({ "next": value });
+            }
+            value
+        }
+
+        let clock = Arc::new(ManualClock::new(Instant::now()));
+        let mut store = Store::new(Arc::clone(&clock) as Arc<dyn Clock>);
+        store
+            .set("key", serde_json::json!("old"), None)
+            .expect("seed value");
+
+        for depth in [33, 40] {
+            assert_eq!(
+                store.set("key", nested_object(depth), None),
+                Err(StateError::InvalidInput),
+                "depth {depth} must fail"
+            );
+            assert_eq!(
+                store.get("key").expect("read preserved value"),
+                Some(serde_json::json!("old"))
+            );
+        }
+
+        store
+            .set("key", nested_object(MAX_VALUE_DEPTH), None)
+            .expect("maximum supported depth");
     }
 }
