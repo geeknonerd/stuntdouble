@@ -178,6 +178,7 @@ See [docs/development.md](docs/development.md) for the full release asset list a
 - Route model with one pipeline: `match → source → transform → response`.
 - Built-in JavaScript runtime (Boa) with a host-injected `ctx`; no raw `fetch`, `fs`, `os`, `subprocess`, or `socket`.
 - Upstream HTTP (`ctx.http.get`, streaming `ctx.http.pipe` with Range passthrough) plus `ctx.file` reads, file streaming, and request-scoped multipart uploads.
+- v2 (unreleased): process-local `ctx.state` shared across requests in one server instance, with deep-copy reads, atomic `take` / `setIfAbsent`, per-key TTL, and fixed capacity; restart clears it.
 - One static file root with path traversal protection; static configuration with restart.
 - Linux x86_64, macOS arm64, and Windows x86_64 binaries plus `linux/amd64` and `linux/arm64` container images.
 - Structured per-request logs with `request_id`, the upstream call chain, and stable error classes.

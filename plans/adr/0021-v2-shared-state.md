@@ -63,6 +63,7 @@ interface SdState {
 - key 必须是非空 UTF-8 字符串，最多 256 字节；按精确字节比较，不做大小写、Unicode 或前缀规范化。建议脚本使用稳定前缀，例如 `oauth:code:`。
 - value 只能包含 JSON 数据：`null`、boolean、有限 number、string、数组和普通对象。`undefined`、function、symbol、bigint、非有限 number、循环引用、稀疏数组或无法无损 JSON 化的值抛 `state_invalid_input`。
 - 单个 value 的紧凑 JSON 表示最多 16 KiB。
+- 嵌套深度最多 32 层；超出抛 `state_invalid_input`，避免递归预检或 Boa 序列化耗尽 worker 栈。
 - 每个状态项按 `UTF-8(key).len() + compact_json(value).len()` 计入容量。
 - `ttl_ms` 必须是正整数安全整数，范围为 `1..=604_800_000`（7 天）。
 - TTL 使用宿主单调时钟，从操作成功提交时开始计算；不受系统时间回拨影响，也不滑动续期。
@@ -126,7 +127,7 @@ interface SdState {
 
 ## Spike 验证（#175，2026-10-22）
 
-一次性原型位于 [research/spikes/175-shared-state-ipc](../../research/spikes/175-shared-state-ipc/README.md)，不修改生产代码，也不接入公开 CLI。结论为**有条件架构层 GO**：现有每请求 worker + stdio JSON Lines 模型足以承载本 ADR 的进程内状态，不需要第二套执行路径。原型是 wire-compatible harness，不是对生产 worker 的直接 patch；真实 `src/script.rs` / `HostState` / `exchange` 路径的集成验证与正式实现由 [#176](https://github.com/geeknonerd/stuntdouble/issues/176) 跟踪。
+一次性原型位于 [research/spikes/175-shared-state-ipc](../../research/spikes/175-shared-state-ipc/README.md)，不修改生产代码，也不接入公开 CLI。结论为**有条件架构层 GO**：现有每请求 worker + stdio JSON Lines 模型足以承载本 ADR 的进程内状态，不需要第二套执行路径。原型是 wire-compatible harness，不是对生产 worker 的直接 patch；真实 `src/script.rs` / `HostState` / `exchange` 路径的集成验证与正式实现已在 [#176](https://github.com/geeknonerd/stuntdouble/issues/176) 完成。
 
 验证已覆盖：
 

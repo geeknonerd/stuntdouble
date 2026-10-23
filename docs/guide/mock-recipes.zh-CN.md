@@ -54,7 +54,7 @@ curl -i 'http://127.0.0.1:3000/users/42?include=email'
 
 ## 校验并 Mock POST
 
-对合法 JSON 返回 201，对缺少数据返回 400。v1 没有请求间共享状态，因此响应只能从当前请求推导。
+对合法 JSON 返回 201，对缺少数据返回 400。本示例只从当前请求推导响应；需要跨请求的工作流使用进程内 [`ctx.state`](../contracts/ctx-api.zh-CN.md)。
 
 ```toml
 [[routes]]

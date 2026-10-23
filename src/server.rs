@@ -5,6 +5,7 @@ use crate::config::Config;
 use crate::files;
 use crate::matcher::match_route;
 use crate::script::{self, RequestSnapshot, ResponseBody, ScriptResponse};
+use crate::state::{self, SharedState};
 use crate::{request_log::elapsed_ms, upstream};
 use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Request, State};
@@ -55,6 +56,7 @@ pub struct AppState {
     verbose: bool,
     sequence: AtomicU64,
     script_workers: Arc<tokio::sync::Semaphore>,
+    shared_state: SharedState,
 }
 
 /// Default number of script workers allowed to run at the same time. The floor
@@ -73,6 +75,7 @@ impl AppState {
             verbose,
             sequence: AtomicU64::new(0),
             script_workers: Arc::new(tokio::sync::Semaphore::new(script_worker_limit())),
+            shared_state: state::new_shared_state(),
         }
     }
 
@@ -264,14 +267,17 @@ impl AppState {
                 // their own deadline behind the workers already holding a slot.
                 match Arc::clone(&self.script_workers).try_acquire_owned() {
                     Ok(slot) => {
-                        script::execute(
+                        script::execute_with_state(
                             source,
                             snapshot,
-                            self.config.sandbox.clone(),
-                            self.config.upstream.clone(),
-                            self.config.files.clone(),
-                            uploads,
-                            slot,
+                            script::ExecutionContext {
+                                sandbox: self.config.sandbox.clone(),
+                                upstream: self.config.upstream.clone(),
+                                files_config: self.config.files.clone(),
+                                uploads,
+                                shared_state: Arc::clone(&self.shared_state),
+                                worker_slot: slot,
+                            },
                         )
                         .await
                     }
