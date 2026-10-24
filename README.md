@@ -178,6 +178,7 @@ See [docs/development.md](docs/development.md) for the full release asset list a
 - Route model with one pipeline: `match → source → transform → response`.
 - Built-in JavaScript runtime (Boa) with a host-injected `ctx`; no raw `fetch`, `fs`, `os`, `subprocess`, or `socket`.
 - Upstream HTTP (`ctx.http.get`, streaming `ctx.http.pipe` with Range passthrough) plus `ctx.file` reads, file streaming, and request-scoped multipart uploads.
+- Host cryptography (`ctx.crypto.randomBytes`, `sha256`, `hmacSha256`, `timingSafeEqual`) with secure random, SHA-256, HMAC-SHA256, and constant-time comparison.
 - v2 (unreleased): process-local `ctx.state` shared across requests in one server instance, with deep-copy reads, atomic `take` / `setIfAbsent`, per-key TTL, and fixed capacity; restart clears it.
 - One static file root with path traversal protection; static configuration with restart.
 - Linux x86_64, macOS arm64, and Windows x86_64 binaries plus `linux/amd64` and `linux/arm64` container images.
@@ -223,3 +224,4 @@ Do not report vulnerabilities in a public issue. Use GitHub private vulnerabilit
 ## License
 
 Dual-licensed under either of [Apache-2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT); you may choose either. Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in this project is dual-licensed as above, without additional terms or conditions.
+ Host cryptography (`ctx.crypto.randomBytes`, `sha256`, `hmacSha256`, `timingSafeEqual`) with secure random, SHA-256, HMAC-SHA256, and constant-time comparison.
