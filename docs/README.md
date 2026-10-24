@@ -22,7 +22,7 @@
 - [架构决策](../plans/adr/README.md) — ADR 索引。
 - [调研](../research/) — mock server 生态、运行时选型与开源基线。
 - [解决方案](solutions/) — 经 ce-compound 沉淀的经验与已解决问题。
-- [`ctx` API 类型定义](../types/ctx-api-v1.d.ts) — v1 切片冻结的 `apiVersion` 1 源码类型；发布产物契约要求每个版本包含，T9 接入发布流水线。
+- [`ctx` API 类型定义](../types/ctx-api-v1.d.ts) — 含进程内 Shared state 的 `apiVersion` 1 源码类型；发布产物契约要求每个版本包含，T9 接入发布流水线。
 - [治理](../GOVERNANCE.md) — 维护者模型与响应预期。
 - [安全政策](../SECURITY.md) — 漏洞报告与安全预期。
 - [变更日志](../CHANGELOG.md) — 发布历史。

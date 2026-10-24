@@ -7,7 +7,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Barrier, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -1827,6 +1827,883 @@ fn script_env_reflects_process_environment() {
 }
 
 #[test]
+fn script_request_and_env_preserve_prelude_placeholders_as_data() {
+    let script = r#"
+ctx.respond(200, {}, JSON.stringify({
+  query: ctx.request.query,
+  header: ctx.request.headers["x-probe"],
+  body: ctx.request.bodyText,
+  env: ctx.env.SD_PROBE_ENV,
+  globals: [
+    typeof __sd_request,
+    typeof __sd_env,
+    typeof __sd_upstream_marker
+  ]
+}));
+"#;
+    let query = concat!(
+        "?api=__SD_API_VERSION__",
+        "&ttl=__SD_STATE_MAX_TTL_MS__",
+        "&key=__SD_STATE_MAX_KEY_BYTES__",
+        "&value=__SD_STATE_MAX_VALUE_BYTES__",
+        "&depth=__SD_STATE_MAX_DEPTH__",
+        "&upstream=__SD_UPSTREAM_MARKER__",
+        "&request=__SD_REQUEST__",
+        "&env=__SD_ENV__"
+    );
+    let path = format!("/demo/documents/manifest/group-a{query}");
+    let (response, stderr) = with_server_full(
+        good_config(),
+        script,
+        &[("SD_PROBE_ENV", "__SD_STATE_MAX_VALUE_BYTES__")],
+        |port| {
+            request_with_body(
+                port,
+                "GET",
+                &path,
+                &[("x-probe", "__SD_STATE_MAX_KEY_BYTES__")],
+                "__SD_UPSTREAM_MARKER__",
+            )
+        },
+    );
+
+    assert_eq!(
+        response.status, 200,
+        "body: {} stderr: {stderr}",
+        response.body
+    );
+    let body: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "query": {
+                "api": "__SD_API_VERSION__",
+                "ttl": "__SD_STATE_MAX_TTL_MS__",
+                "key": "__SD_STATE_MAX_KEY_BYTES__",
+                "value": "__SD_STATE_MAX_VALUE_BYTES__",
+                "depth": "__SD_STATE_MAX_DEPTH__",
+                "upstream": "__SD_UPSTREAM_MARKER__",
+                "request": "__SD_REQUEST__",
+                "env": "__SD_ENV__"
+            },
+            "header": "__SD_STATE_MAX_KEY_BYTES__",
+            "body": "__SD_UPSTREAM_MARKER__",
+            "env": "__SD_STATE_MAX_VALUE_BYTES__",
+            "globals": ["undefined", "undefined", "undefined"]
+        })
+    );
+}
+
+#[test]
+fn ctx_state_supports_all_operations_and_deep_copies() {
+    let script = r#"
+var source = { nested: [1, true, "x"] };
+ctx.state.set("demo:key", source);
+source.nested.push(77);
+var first = ctx.state.get("demo:key");
+first.nested.push(99);
+var second = ctx.state.get("demo:key");
+var existing = ctx.state.setIfAbsent("demo:key", "other");
+var absent = ctx.state.setIfAbsent("demo:new", "value");
+var taken = ctx.state.take("demo:key");
+var missing = ctx.state.get("demo:key") === undefined;
+ctx.respond(200, {}, JSON.stringify({
+  first: first,
+  second: second,
+  existing: existing,
+  absent: absent,
+  taken: taken,
+  missing: missing
+}));
+"#;
+    let (response, _) = with_server_full(good_config(), script, &[], |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    let body: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "first": { "nested": [1, true, "x", 99] },
+            "second": { "nested": [1, true, "x"] },
+            "existing": false,
+            "absent": true,
+            "taken": { "nested": [1, true, "x"] },
+            "missing": true
+        })
+    );
+}
+
+fn concurrent_get_outcomes(port: u16, paths: [String; 2]) -> Vec<(u16, String)> {
+    let barrier = Arc::new(Barrier::new(2));
+    let attempts = paths
+        .into_iter()
+        .map(|path| {
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                let response = request(port, "GET", &path, &[]);
+                (response.status, response.body)
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut outcomes = attempts
+        .into_iter()
+        .map(|attempt| attempt.join().expect("concurrent request"))
+        .collect::<Vec<_>>();
+    outcomes.sort();
+    outcomes
+}
+
+#[test]
+fn ctx_state_take_and_set_if_absent_have_one_concurrent_winner() {
+    let script = r#"
+var query = ctx.request.query;
+if (query.seed === "1") {
+  ctx.state.set(query.key, "grant");
+  ctx.respond(200, {}, "seeded");
+} else if (query.op === "take") {
+  ctx.respond(200, {}, ctx.state.take(query.key) !== undefined ? "won" : "lost");
+} else if (query.op === "read") {
+  ctx.respond(200, {}, ctx.state.get(query.key) || "missing");
+} else {
+  var stored = ctx.state.setIfAbsent(query.key, query.value);
+  ctx.respond(200, {}, (stored ? "won:" : "lost:") + query.value);
+}
+"#;
+    let ((), _stderr) = with_server_full(good_config(), script, &[], |port| {
+        for iteration in 0..4 {
+            let take_key = format!("take-{iteration}");
+            let seed = request(
+                port,
+                "GET",
+                &format!("/demo/documents/manifest/group-a?seed=1&key={take_key}"),
+                &[],
+            );
+            assert_eq!(seed.status, 200, "body: {}", seed.body);
+
+            let take_path = format!("/demo/documents/manifest/group-a?op=take&key={take_key}");
+            let outcomes = concurrent_get_outcomes(port, [take_path.clone(), take_path]);
+            assert_eq!(
+                outcomes,
+                vec![(200, "lost".to_string()), (200, "won".to_string())],
+                "take iteration {iteration}"
+            );
+            let read = request(
+                port,
+                "GET",
+                &format!("/demo/documents/manifest/group-a?op=read&key={take_key}"),
+                &[],
+            );
+            assert_eq!(
+                (read.status, read.body),
+                (200, "missing".to_string()),
+                "take readback iteration {iteration}"
+            );
+
+            let absent_key = format!("request-{iteration}");
+            let paths = ["left", "right"].map(|value| {
+                format!(
+                        "/demo/documents/manifest/group-a?op=setIfAbsent&key={absent_key}&value={value}"
+                    )
+            });
+            let outcomes = concurrent_get_outcomes(port, paths);
+            let winners = outcomes
+                .iter()
+                .filter(|(_, body)| body.starts_with("won:"))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                winners.len(),
+                1,
+                "setIfAbsent iteration {iteration}: {outcomes:?}"
+            );
+            let winner_body = winners[0].1.clone();
+            let winner = winner_body
+                .strip_prefix("won:")
+                .expect("winning value")
+                .to_string();
+            let loser = if winner == "left" { "right" } else { "left" };
+            let mut expected = vec![(200, winner_body), (200, format!("lost:{loser}"))];
+            expected.sort();
+            assert_eq!(
+                outcomes, expected,
+                "setIfAbsent response iteration {iteration}"
+            );
+            let read = request(
+                port,
+                "GET",
+                &format!("/demo/documents/manifest/group-a?op=read&key={absent_key}"),
+                &[],
+            );
+            assert_eq!(
+                (read.status, read.body),
+                (200, winner),
+                "setIfAbsent readback iteration {iteration}"
+            );
+        }
+    });
+}
+
+#[test]
+fn ctx_state_ttl_is_visible_to_a_fresh_worker() {
+    let script = r#"
+var query = ctx.request.query;
+if (query.mode === "set") {
+  ctx.state.set(query.key, "value", { ttl_ms: 60000 });
+  ctx.respond(200, {}, "set");
+} else {
+  ctx.respond(200, {}, ctx.state.get(query.key) === undefined ? "missing" : "present");
+}
+"#;
+    let (bodies, stderr) = with_server_full(good_config(), script, &[], |port| {
+        let path = "/demo/documents/manifest/group-a?key=ttl-key";
+        let set = request(port, "GET", &format!("{path}&mode=set"), &[]);
+        let immediate = request(port, "GET", &format!("{path}&mode=get"), &[]);
+        (set, immediate)
+    });
+    assert_eq!(bodies.0.status, 200, "body: {}", bodies.0.body);
+    assert_eq!(bodies.0.body, "set");
+    assert_eq!(bodies.1.body, "present", "stderr: {stderr}");
+}
+
+#[test]
+fn ctx_state_rejects_lossy_json_values_and_preserves_prior_state() {
+    let script = r#"
+ctx.state.set("keep", "old");
+var codes = [];
+function record(run) {
+  try { run(); codes.push("accepted"); }
+  catch (error) { codes.push(error.code); }
+}
+record(function () { ctx.state.set("invalid:undefined", undefined); });
+record(function () { ctx.state.set("invalid:function", function () {}); });
+record(function () { ctx.state.set("invalid:nan", NaN); });
+record(function () { ctx.state.set("invalid:sparse", [1, , 3]); });
+record(function () { ctx.state.set("invalid:date", new Date(0)); });
+record(function () {
+  var cycle = {};
+  cycle.self = cycle;
+  ctx.state.set("invalid:cycle", cycle);
+});
+record(function () { ctx.state.set("invalid:undefined-property", { value: undefined }); });
+record(function () { ctx.state.set("invalid:surrogate", "\uD800"); });
+var deep = {};
+var cursor = deep;
+for (var i = 0; i < 33; i++) { cursor.next = {}; cursor = cursor.next; }
+record(function () { ctx.state.set("invalid:deep", deep); });
+var maxDepth = {};
+cursor = maxDepth;
+for (var j = 0; j < 32; j++) { cursor.next = {}; cursor = cursor.next; }
+ctx.state.set("valid:deep", maxDepth);
+ctx.respond(200, {}, JSON.stringify({
+  codes: codes,
+  kept: ctx.state.get("keep"),
+  leaked: ctx.state.get("invalid:undefined-property") !== undefined,
+  deepAccepted: ctx.state.get("valid:deep") !== undefined
+}));
+"#;
+    let (response, stderr) = with_server_full(good_config(), script, &[], |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(
+        response.status, 200,
+        "body: {} stderr: {stderr}",
+        response.body
+    );
+    let body: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "codes": [
+                "state_invalid_input",
+                "state_invalid_input",
+                "state_invalid_input",
+                "state_invalid_input",
+                "state_invalid_input",
+                "state_invalid_input",
+                "state_invalid_input",
+                "state_invalid_input",
+                "state_invalid_input"
+            ],
+            "kept": "old",
+            "leaked": false,
+            "deepAccepted": true
+        })
+    );
+}
+
+#[test]
+fn ctx_state_validation_ignores_replaced_object_intrinsics() {
+    let script = r#"
+ctx.state.set("keep", "old");
+Object.getOwnPropertyNames = function () { return []; };
+Object.getOwnPropertySymbols = function () { return []; };
+var code;
+try {
+  ctx.state.set("invalid:undefined-property", { keep: 1, drop: undefined });
+  code = "accepted";
+} catch (error) {
+  code = error.code;
+}
+ctx.respond(200, {}, JSON.stringify({
+  code: code,
+  kept: ctx.state.get("keep"),
+  leaked: ctx.state.get("invalid:undefined-property") !== undefined
+}));
+"#;
+    let (response, stderr) = with_server_full(good_config(), script, &[], |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(
+        response.status, 200,
+        "body: {} stderr: {stderr}",
+        response.body
+    );
+    let body: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "code": "state_invalid_input",
+            "kept": "old",
+            "leaked": false
+        })
+    );
+}
+
+#[test]
+fn ctx_state_bridge_ignores_replaced_json_intrinsics() {
+    let script = r#"
+var nativeStringify = JSON.stringify;
+var nativeParse = JSON.parse;
+JSON.stringify = function () { return "replaced"; };
+JSON.parse = function () { return { ok: true, stored: true, found: false }; };
+var validCode;
+try {
+  ctx.state.set("valid", "value");
+  validCode = "stored";
+} catch (error) {
+  validCode = error.code;
+}
+var invalidCode;
+try {
+  ctx.state.set("invalid", { keep: 1, drop: undefined });
+  invalidCode = "accepted";
+} catch (error) {
+  invalidCode = error.code;
+}
+JSON.stringify = nativeStringify;
+JSON.parse = nativeParse;
+ctx.respond(200, {}, JSON.stringify({
+  validCode: validCode,
+  invalidCode: invalidCode,
+  value: ctx.state.get("valid")
+}));
+"#;
+    let (response, stderr) = with_server_full(good_config(), script, &[], |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(
+        response.status, 200,
+        "body: {} stderr: {stderr}",
+        response.body
+    );
+    let body: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "validCode": "stored",
+            "invalidCode": "state_invalid_input",
+            "value": "value"
+        })
+    );
+}
+
+#[test]
+fn ctx_state_validation_ignores_replaced_member_and_number_intrinsics() {
+    let script = r#"
+Object.prototype.hasOwnProperty = function () { return true; };
+Object.is = function () { return false; };
+RegExp.prototype.test = function () { return true; };
+Number = function () { return 0; };
+Number.isFinite = function () { return true; };
+Number.isInteger = function () { return true; };
+function codeFor(run) {
+  try {
+    run();
+    return "accepted";
+  } catch (error) {
+    return error.code;
+  }
+}
+var withExtraProperty = [1];
+withExtraProperty.extra = 2;
+ctx.respond(200, {}, JSON.stringify({
+  sparse: codeFor(function () { ctx.state.set("invalid:sparse", [1, , 3]); }),
+  nan: codeFor(function () { ctx.state.set("invalid:nan", NaN); }),
+  negativeZero: codeFor(function () { ctx.state.set("invalid:-0", -0); }),
+  extraArrayProperty: codeFor(function () {
+    ctx.state.set("invalid:extra-array-property", withExtraProperty);
+  })
+}));
+"#;
+    let (response, stderr) = with_server_full(good_config(), script, &[], |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(
+        response.status, 200,
+        "body: {} stderr: {stderr}",
+        response.body
+    );
+    let body: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "sparse": "state_invalid_input",
+            "nan": "state_invalid_input",
+            "negativeZero": "state_invalid_input",
+            "extraArrayProperty": "state_invalid_input"
+        })
+    );
+}
+
+#[test]
+fn ctx_state_key_value_and_ttl_limits_preserve_prior_state() {
+    let script = r#"
+var maxKey = "k".repeat(256);
+ctx.state.set(maxKey, "ok");
+var keyCodes = [];
+var badKey = "k".repeat(257);
+var badKeyStored = false;
+try {
+  ctx.state.set(badKey, "no");
+  if (ctx.state.get(badKey) !== undefined) { badKeyStored = true; }
+} catch (error) { keyCodes.push(error.code); }
+try { ctx.state.set("界".repeat(86), "no"); }
+catch (error) { keyCodes.push(error.code); }
+
+var maxValue = "x".repeat(16382);
+ctx.state.set("bounded", "old");
+ctx.state.set("max-value", maxValue);
+var valueCodes = [];
+try { ctx.state.set("bounded", "x".repeat(16383)); }
+catch (error) { valueCodes.push(error.code); }
+var ttlCodes = [];
+try { ctx.state.set("bad-ttl-zero", "no", { ttl_ms: 0 }); }
+catch (error) { ttlCodes.push(error.code); }
+try { ctx.state.set("bad-ttl-large", "no", { ttl_ms: 604800001 }); }
+catch (error) { ttlCodes.push(error.code); }
+
+ctx.respond(200, {}, JSON.stringify({
+  maxKey: ctx.state.get(maxKey),
+  keyCodes: keyCodes,
+  maxValueLength: ctx.state.get("max-value").length,
+  bounded: ctx.state.get("bounded"),
+  valueCodes: valueCodes,
+  ttlCodes: ttlCodes,
+  badKeyStored: badKeyStored
+}));
+"#;
+    let (response, stderr) = with_server_full(good_config(), script, &[], |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(
+        response.status, 200,
+        "body: {} stderr: {stderr}",
+        response.body
+    );
+    let body: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "maxKey": "ok",
+            "keyCodes": ["state_invalid_input", "state_invalid_input"],
+            "maxValueLength": 16382,
+            "bounded": "old",
+            "valueCodes": ["state_invalid_input"],
+            "ttlCodes": ["state_invalid_input", "state_invalid_input"],
+            "badKeyStored": false
+        })
+    );
+}
+
+#[test]
+fn ctx_state_uses_host_compact_json_for_the_value_limit() {
+    let script = r#"
+var acceptedCode;
+try {
+  ctx.state.set("host-compact", new Array(800).fill(1e20));
+  acceptedCode = "stored";
+} catch (error) {
+  acceptedCode = error.code;
+}
+var rejectedCode;
+try {
+  ctx.state.set("js-compact", new Array(744).fill(123456789012345670000));
+  rejectedCode = "accepted";
+} catch (error) {
+  rejectedCode = error.code;
+}
+var accepted = ctx.state.get("host-compact");
+ctx.respond(200, {}, JSON.stringify({
+  acceptedCode: acceptedCode,
+  acceptedCount: accepted === undefined ? 0 : accepted.length,
+  rejectedCode: rejectedCode,
+  rejectedStored: ctx.state.get("js-compact") !== undefined
+}));
+"#;
+    let (response, stderr) = with_server_full(good_config(), script, &[], |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(
+        response.status, 200,
+        "body: {} stderr: {stderr}",
+        response.body
+    );
+    let body: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "acceptedCode": "stored",
+            "acceptedCount": 800,
+            "rejectedCode": "state_invalid_input",
+            "rejectedStored": false
+        })
+    );
+}
+
+#[test]
+fn ctx_state_entry_capacity_fails_closed_without_eviction() {
+    let script = r#"
+var stored = 0;
+var code = null;
+try {
+  for (var i = 0; i < 1025; i++) {
+    ctx.state.set("capacity:" + i, i);
+    stored += 1;
+  }
+} catch (error) {
+  code = error.code;
+}
+ctx.respond(200, {}, JSON.stringify({
+  stored: stored,
+  code: code,
+  first: ctx.state.get("capacity:0"),
+  last: ctx.state.get("capacity:1023"),
+  extra: ctx.state.get("capacity:1024") === undefined
+}));
+"#;
+    let (response, stderr) = with_server_full(good_config(), script, &[], |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(
+        response.status, 200,
+        "body: {} stderr: {stderr}",
+        response.body
+    );
+    let body: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "stored": 1024,
+            "code": "state_capacity_exceeded",
+            "first": 0,
+            "last": 1023,
+            "extra": true
+        })
+    );
+}
+
+#[test]
+fn ctx_state_writes_survive_script_errors_and_worker_timeouts() {
+    let script = r#"
+var query = ctx.request.query;
+if (query.mode === "error") {
+  ctx.state.set("commit:error", "kept");
+  throw new Error("after state commit");
+}
+if (query.mode === "timeout") {
+  ctx.state.set("commit:timeout", "kept");
+  while (true) {}
+}
+ctx.respond(200, {}, JSON.stringify({
+  error: ctx.state.get("commit:error"),
+  timeout: ctx.state.get("commit:timeout")
+}));
+"#;
+    let config = with_sandbox(good_config(), 300);
+    let (responses, stderr) = with_server_full(&config, script, &[], |port| {
+        let path = "/demo/documents/manifest/group-a";
+        let error = request(port, "GET", &format!("{path}?mode=error"), &[]);
+        let after_error = request(port, "GET", &format!("{path}?mode=read"), &[]);
+        let timeout = request(port, "GET", &format!("{path}?mode=timeout"), &[]);
+        let after_timeout = request(port, "GET", &format!("{path}?mode=read"), &[]);
+        (error, after_error, timeout, after_timeout)
+    });
+    assert_eq!(responses.0.status, 500, "body: {}", responses.0.body);
+    assert_eq!(responses.1.body, r#"{"error":"kept"}"#, "stderr: {stderr}");
+    assert_eq!(responses.2.status, 500, "body: {}", responses.2.body);
+    assert_eq!(
+        responses.3.body, r#"{"error":"kept","timeout":"kept"}"#,
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn ctx_state_is_shared_across_workers_but_cleared_by_restart() {
+    let script = r#"
+var query = ctx.request.query;
+if (query.mode === "set") {
+  globalThis.__sd_state_leak = "worker-global";
+  ctx.state.set("restart:key", "host-state");
+  ctx.respond(200, {}, "set");
+} else {
+  ctx.respond(200, {}, JSON.stringify({
+    globalLeaked: typeof globalThis.__sd_state_leak !== "undefined",
+    state: ctx.state.get("restart:key")
+  }));
+}
+"#;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = "/demo/documents/manifest/group-a";
+    let (first, _) = serve_and_run(
+        |port| fixture_with_script(dir.path(), port, good_config(), script),
+        &[],
+        &[],
+        |port| {
+            let set = request(port, "GET", &format!("{path}?mode=set"), &[]);
+            let shared = request(port, "GET", &format!("{path}?mode=read"), &[]);
+            (set, shared)
+        },
+    );
+    assert_eq!(first.0.status, 200, "body: {}", first.0.body);
+    let shared: serde_json::Value = serde_json::from_str(&first.1.body).expect("json body");
+    assert_eq!(
+        shared,
+        serde_json::json!({ "globalLeaked": false, "state": "host-state" })
+    );
+
+    let (restarted, stderr) = serve_and_run(
+        |port| fixture_with_script(dir.path(), port, good_config(), script),
+        &[],
+        &[],
+        |port| request(port, "GET", &format!("{path}?mode=read"), &[]),
+    );
+    let restarted: serde_json::Value = serde_json::from_str(&restarted.body).expect("json body");
+    assert_eq!(
+        restarted,
+        serde_json::json!({ "globalLeaked": false }),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn ctx_state_is_not_shared_between_serve_instances() {
+    let script = r#"
+if (ctx.request.query.mode === "set") {
+  ctx.state.set("instance:key", "present");
+  ctx.respond(200, {}, "set");
+} else {
+  ctx.respond(200, {}, ctx.state.get("instance:key") || "missing");
+}
+"#;
+    let first_dir = tempfile::tempdir().expect("first tempdir");
+    let second_dir = tempfile::tempdir().expect("second tempdir");
+    let (mut first, first_log, first_port) = start_serve(
+        |port| fixture_with_script(first_dir.path(), port, good_config(), script),
+        &[],
+        &[],
+    );
+    let (mut second, second_log, second_port) = start_serve(
+        |port| fixture_with_script(second_dir.path(), port, good_config(), script),
+        &[],
+        &[],
+    );
+    let path = "/demo/documents/manifest/group-a";
+
+    let set = request(first_port, "GET", &format!("{path}?mode=set"), &[]);
+    assert_eq!(set.status, 200, "body: {}", set.body);
+    assert_eq!(
+        request(first_port, "GET", path, &[]).body,
+        "present",
+        "state did not persist in its own serve instance"
+    );
+    assert_eq!(
+        request(second_port, "GET", path, &[]).body,
+        "missing",
+        "state leaked into another serve instance"
+    );
+
+    wait_for_request_log(&first_log);
+    wait_for_request_log(&second_log);
+    stop(&mut first);
+    stop(&mut second);
+}
+
+#[cfg(unix)]
+#[test]
+fn ctx_state_write_survives_a_killed_worker() {
+    let script = r#"
+if (ctx.request.path === "/write") {
+  ctx.state.set("crash:key", "kept");
+  while (true) {}
+}
+ctx.respond(200, {}, ctx.state.get("crash:key") || "missing");
+"#;
+    let config_body = r#"config_version = "1"
+
+[server]
+bind = "127.0.0.1"
+port = {port}
+
+[files]
+root = "./files"
+
+[[routes]]
+name = "write"
+method = "GET"
+path = "/write"
+script = "scripts/manifest.js"
+
+[[routes]]
+name = "read"
+method = "GET"
+path = "/read"
+script = "scripts/manifest.js"
+"#;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (mut child, _log, port) = start_serve(
+        |port| fixture_with_script(dir.path(), port, config_body, script),
+        &[],
+        &[],
+    );
+    let parent_pid = child.id();
+    let pending = std::thread::spawn(move || request(port, "GET", "/write", &[]));
+    let workers = wait_for_child_count(parent_pid, true);
+    assert_eq!(workers.len(), 1, "unexpected workers: {workers:?}");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let read = request(port, "GET", "/read", &[]);
+        if read.body == "kept" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "state write was not visible before the worker kill: {}",
+            read.body
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let status = Command::new("kill")
+        .args(["-9", &workers[0].to_string()])
+        .status()
+        .expect("kill worker");
+    assert!(status.success(), "kill failed: {status}");
+    let write = pending.join().expect("write request");
+    assert_eq!(write.status, 500, "body: {}", write.body);
+    let after = request(port, "GET", "/read", &[]);
+    assert_eq!(after.body, "kept");
+    wait_for_child_count(parent_pid, false);
+    stop(&mut child);
+}
+
+#[test]
+fn ctx_state_write_survives_a_client_disconnect() {
+    let script = r#"
+if (ctx.request.path === "/stream") {
+  ctx.state.set("disconnect:key", "kept");
+  ctx.respond(200, {}, ctx.file.stream("large.bin"));
+} else {
+  ctx.respond(200, {}, ctx.state.get("disconnect:key") || "missing");
+}
+"#;
+    let config_body = r#"config_version = "1"
+
+[server]
+bind = "127.0.0.1"
+port = {port}
+
+[files]
+root = "./files"
+
+[[routes]]
+name = "stream"
+method = "GET"
+path = "/stream"
+script = "scripts/manifest.js"
+
+[[routes]]
+name = "read"
+method = "GET"
+path = "/read"
+script = "scripts/manifest.js"
+"#;
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("files")).expect("files dir");
+    std::fs::write(dir.path().join("files/large.bin"), vec![0_u8; 1024 * 1024])
+        .expect("large file");
+    let (mut child, _log, port) = start_serve(
+        |port| fixture_with_script(dir.path(), port, config_body, script),
+        &[],
+        &[],
+    );
+
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("read timeout");
+    stream
+        .write_all(b"GET /stream HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .expect("write request");
+    stream.flush().expect("flush");
+    let mut buffer = [0_u8; 1024];
+    let _ = stream.read(&mut buffer).expect("read partial response");
+    drop(stream);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let read = request(port, "GET", "/read", &[]);
+        if read.body == "kept" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "state write was rolled back after client disconnect: {}",
+            read.body
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    stop(&mut child);
+}
+
+#[test]
+fn ctx_state_keys_and_values_never_reach_logs() {
+    let script = r#"
+var key = "oauth:code:secret-key-fixture";
+var value = "secret-state-value-fixture";
+ctx.state.set(key, value);
+ctx.state.get(key);
+ctx.state.setIfAbsent("request:secret-key-fixture", value);
+ctx.state.take(key);
+try { ctx.state.set("k".repeat(257), value); } catch (error) {}
+ctx.respond(200, {}, "ok");
+"#;
+    let (response, stderr) = with_server_full(good_config(), script, &[], |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert!(
+        !stderr.contains("secret-key-fixture"),
+        "state key leaked into logs: {stderr}"
+    );
+    assert!(
+        !stderr.contains("secret-state-value-fixture"),
+        "state value leaked into logs: {stderr}"
+    );
+}
+
+#[test]
 fn ctx_respond_rejects_invalid_header_name_as_script_error() {
     let script = r#"ctx.respond(200, { "Bad Header": "x" }, "no");"#;
     let (response, _) = with_server_full(good_config(), script, &[], |port| {
@@ -2195,7 +3072,7 @@ fn piped_body_is_dropped_when_the_worker_exceeds_the_deadline() {
 #[test]
 fn scripts_cannot_reach_raw_host_capabilities() {
     let script = r#"
-var names = ["fetch", "fs", "process", "require", "socket", "__sd_http_get", "__sd_http_pipe", "__sd_validate_headers"];
+var names = ["fetch", "fs", "process", "require", "socket", "__sd_http_get", "__sd_http_pipe", "__sd_validate_headers", "__sd_state"];
 var leaked = [];
 for (var i = 0; i < names.length; i++) {
   if (typeof globalThis[names[i]] !== "undefined") { leaked.push(names[i]); }
@@ -3163,7 +4040,10 @@ fn upload_temp_directories_are_removed_on_every_exit_path() {
     let dir = tempfile::tempdir().expect("tempdir");
     let temp_root = upload_temp_root(dir.path());
     let temp_env = temp_root.to_string_lossy().into_owned();
-    let config = with_sandbox(&upload_config(1024 * 1024), 150);
+    // Parallel integration tests can delay worker startup beyond the old
+    // 150 ms budget; keep the timeout branch exercise without turning normal
+    // script startup into a flaky failure.
+    let config = with_sandbox(&upload_config(1024 * 1024), 1000);
     let script = r#"
 var mode = ctx.request.query.mode;
 if (mode === "error") { throw new Error("boom"); }

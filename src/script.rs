@@ -10,7 +10,7 @@
 // `ctx`: the realm has no `fetch`, `fs`, `process`, or `require`, and the raw
 // bridge global is deleted before the route script runs.
 use std::collections::{BTreeMap, HashMap};
-use std::io::Write as _;
+use std::io::{BufRead, Write as _};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,6 +19,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use boa_engine::native_function::NativeFunction;
+use boa_engine::property::Attribute;
 use boa_engine::{
     js_string, Context, JsError, JsNativeError, JsNativeErrorKind, JsString, JsValue, Source,
 };
@@ -32,6 +33,7 @@ use tokio::process::{Child, Command};
 use crate::config::{FilesConfig, SandboxConfig, UpstreamConfig, SCRIPT_MEMORY_LIMIT_FLOOR_MB};
 use crate::files;
 use crate::matcher::percent_decode;
+use crate::state::{self, SharedState};
 use crate::upstream;
 
 /// Value of `ctx.apiVersion`; see docs/contracts/ctx-api.md.
@@ -54,6 +56,11 @@ const VM_STACK_SIZE_LIMIT: usize = 10_240;
 /// disposable and already bounded by its deadline, so use one explicit size on
 /// every platform instead of relying on the host default.
 const SCRIPT_THREAD_STACK_SIZE: usize = 8 * 1024 * 1024;
+
+// Bridge payloads can carry an 8 MiB buffered value after base64 expansion or
+// a script response body. Keep a finite ceiling well above those documented
+// limits so a corrupt worker cannot grow one protocol allocation indefinitely.
+const MAX_PROTOCOL_LINE_BYTES: usize = 64 * 1024 * 1024;
 
 #[cfg(unix)]
 const SENTINEL_STACK_SIZE: usize = 256 * 1024;
@@ -271,10 +278,29 @@ impl Outcome {
 // The prelude is the only writer of `__sd`; `ctx` is a frozen view over it.
 const PRELUDE: &str = r#"
 var __sd = { response: null, logs: [] };
-var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_upstream_marker, __sd_file, __sd_upload) {
+var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_upstream_marker, __sd_file, __sd_upload, __sd_state, __sd_intrinsics) {
   "use strict";
-  var state = __sd;
+  var envelope = __sd;
+  var __sd_json_stringify = __sd_intrinsics.json_stringify;
+  var __sd_json_parse = __sd_intrinsics.json_parse;
+  var __sd_get_own_property_names = __sd_intrinsics.get_own_property_names;
+  var __sd_get_own_property_symbols = __sd_intrinsics.get_own_property_symbols;
+  var __sd_get_own_property_descriptor = __sd_intrinsics.get_own_property_descriptor;
+  var __sd_get_prototype_of = __sd_intrinsics.get_prototype_of;
+  var __sd_object_prototype = __sd_intrinsics.object_prototype;
+  var __sd_has_own = __sd_intrinsics.object_has_own;
+  var __sd_reflect_apply = __sd_intrinsics.reflect_apply;
+  var __sd_array_is_array = __sd_intrinsics.array_is_array;
+  var __sd_number_is_integer = __sd_intrinsics.number_is_integer;
+  var __sd_number_is_finite = __sd_intrinsics.number_is_finite;
+  var __sd_number_is_safe_integer = __sd_intrinsics.number_is_safe_integer;
+  var __sd_number = __sd_intrinsics.number;
+  var __sd_object_is = __sd_intrinsics.object_is;
+  var __sd_regexp_test = __sd_intrinsics.regexp_test;
   var FILE_HANDLES = new WeakMap();
+  function hasOwn(object, key) {
+    return __sd_reflect_apply(__sd_has_own, object, [key]);
+  }
   function format(value) {
     if (typeof value === "string") { return value; }
     if (value === undefined) { return "undefined"; }
@@ -284,7 +310,7 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
   function record(level, args) {
     var parts = [];
     for (var i = 0; i < args.length; i++) { parts.push(format(args[i])); }
-    state.logs.push({ level: level, message: parts.join(" ") });
+    envelope.logs.push({ level: level, message: parts.join(" ") });
   }
   function checkStatus(status, label) {
     if (typeof status !== "number" || !Number.isInteger(status) || status < 100 || status > 599) {
@@ -397,18 +423,18 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
   }
   function checkPlainOpts(opts, label, allowedKeys) {
     if (opts === undefined) { return {}; }
-    if (opts === null || typeof opts !== "object" || Array.isArray(opts)) {
+    if (opts === null || typeof opts !== "object" || __sd_array_is_array(opts)) {
       throw new TypeError(label + ": opts must be an object");
     }
-    var proto = Object.getPrototypeOf(opts);
-    if (proto !== Object.prototype && proto !== null) {
+    var proto = __sd_get_prototype_of(opts);
+    if (proto !== __sd_object_prototype && proto !== null) {
       throw new TypeError(label + ": opts must be a plain object");
     }
-    var symbols = Object.getOwnPropertySymbols(opts);
+    var symbols = __sd_get_own_property_symbols(opts);
     if (symbols.length > 0) {
       throw new TypeError(label + ": unknown opts key " + String(symbols[0]));
     }
-    var keys = Object.getOwnPropertyNames(opts);
+    var keys = __sd_get_own_property_names(opts);
     for (var i = 0; i < keys.length; i++) {
       if (allowedKeys.indexOf(keys[i]) === -1) {
         throw new TypeError(label + ": unknown opts key " + JSON.stringify(keys[i]));
@@ -432,6 +458,196 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
     }
     return result;
   }
+  function invalidState(message) {
+    throw makeError(message, "state_invalid_input");
+  }
+  function checkStateString(value) {
+    for (var i = 0; i < value.length; i++) {
+      var unit = value.charCodeAt(i);
+      if (unit >= 0xD800 && unit <= 0xDBFF) {
+        var next = i + 1 < value.length ? value.charCodeAt(i + 1) : -1;
+        if (next < 0xDC00 || next > 0xDFFF) {
+          invalidState("ctx.state: strings must be well-formed UTF-16");
+        }
+        i += 1;
+      } else if (unit >= 0xDC00 && unit <= 0xDFFF) {
+        invalidState("ctx.state: strings must be well-formed UTF-16");
+      }
+    }
+  }
+  function stateUtf8Length(value) {
+    var bytes = 0;
+    for (var i = 0; i < value.length; i++) {
+      var unit = value.charCodeAt(i);
+      if (unit <= 0x7F) {
+        bytes += 1;
+      } else if (unit <= 0x7FF) {
+        bytes += 2;
+      } else if (unit >= 0xD800 && unit <= 0xDBFF) {
+        bytes += 4;
+        i += 1;
+      } else {
+        bytes += 3;
+      }
+    }
+    return bytes;
+  }
+  function checkStateValue(value, seen, depth) {
+    if (depth > __SD_STATE_MAX_DEPTH__) {
+      invalidState("ctx.state: value nesting is too deep");
+    }
+    if (value === null) { return; }
+    var kind = typeof value;
+    if (kind === "boolean") { return; }
+    if (kind === "string") {
+      checkStateString(value);
+      return;
+    }
+    if (kind === "number") {
+      if (!__sd_number_is_finite(value) || __sd_object_is(value, -0)) {
+        invalidState("ctx.state: value contains a non-JSON number");
+      }
+      return;
+    }
+    if (kind !== "object") {
+      invalidState("ctx.state: value contains " + kind);
+    }
+    if (seen.indexOf(value) !== -1) {
+      invalidState("ctx.state: value contains a cycle");
+    }
+    seen.push(value);
+    if (__sd_array_is_array(value)) {
+      if (__sd_get_own_property_symbols(value).length !== 0) {
+        invalidState("ctx.state: symbol keys are not supported");
+      }
+      var names = __sd_get_own_property_names(value);
+      for (var n = 0; n < names.length; n++) {
+        if (names[n] === "length") { continue; }
+        var index = __sd_number(names[n]);
+        var descriptor = __sd_get_own_property_descriptor(value, names[n]);
+        if (!__sd_reflect_apply(__sd_regexp_test, /^(0|[1-9][0-9]*)$/, [names[n]]) ||
+            !__sd_number_is_integer(index) || index < 0 || index >= value.length ||
+            !descriptor || !("value" in descriptor) || !descriptor.enumerable) {
+          invalidState("ctx.state: arrays can only contain dense data elements");
+        }
+        checkStateValue(descriptor.value, seen, depth + 1);
+      }
+      for (var arrayIndex = 0; arrayIndex < value.length; arrayIndex++) {
+        if (!hasOwn(value, arrayIndex)) {
+          invalidState("ctx.state: sparse arrays are not supported");
+        }
+      }
+    } else {
+      var proto = __sd_get_prototype_of(value);
+      if (proto !== __sd_object_prototype && proto !== null) {
+        invalidState("ctx.state: value must contain only plain objects");
+      }
+      if (__sd_get_own_property_symbols(value).length !== 0) {
+        invalidState("ctx.state: symbol keys are not supported");
+      }
+      var keys = __sd_get_own_property_names(value);
+      for (var k = 0; k < keys.length; k++) {
+        checkStateString(keys[k]);
+        var property = __sd_get_own_property_descriptor(value, keys[k]);
+        if (!property || !("value" in property) || !property.enumerable) {
+          invalidState("ctx.state: accessors and hidden properties are not supported");
+        }
+        checkStateValue(property.value, seen, depth + 1);
+      }
+    }
+    seen.pop();
+  }
+  function checkStateKey(key) {
+    if (typeof key !== "string" || key.length === 0) {
+      throw makeError("ctx.state: key must be a non-empty string", "state_invalid_input");
+    }
+    checkStateString(key);
+    if (stateUtf8Length(key) > __SD_STATE_MAX_KEY_BYTES__) {
+      throw makeError(
+        "ctx.state: key exceeds __SD_STATE_MAX_KEY_BYTES__ UTF-8 bytes",
+        "state_invalid_input"
+      );
+    }
+    return key;
+  }
+  function checkStateTtl(opts) {
+    if (opts === undefined) { return null; }
+    if (opts === null || typeof opts !== "object" || __sd_array_is_array(opts)) {
+      throw makeError("ctx.state: opts must be a plain object", "state_invalid_input");
+    }
+    var proto = __sd_get_prototype_of(opts);
+    if (proto !== __sd_object_prototype && proto !== null) {
+      throw makeError("ctx.state: opts must be a plain object", "state_invalid_input");
+    }
+    if (__sd_get_own_property_symbols(opts).length !== 0) {
+      throw makeError("ctx.state: unknown opts key", "state_invalid_input");
+    }
+    var keys = __sd_get_own_property_names(opts);
+    for (var i = 0; i < keys.length; i++) {
+      if (keys[i] !== "ttl_ms") {
+        throw makeError("ctx.state: unknown opts key", "state_invalid_input");
+      }
+    }
+    if (!hasOwn(opts, "ttl_ms")) { return null; }
+    var ttl = opts.ttl_ms;
+    if (typeof ttl !== "number" || !__sd_number_is_safe_integer(ttl) || ttl <= 0 ||
+        ttl > __SD_STATE_MAX_TTL_MS__) {
+      throw makeError(
+        "ctx.state: opts.ttl_ms must be an integer in [1, __SD_STATE_MAX_TTL_MS__]",
+        "state_invalid_input"
+      );
+    }
+    return ttl;
+  }
+  function stateCall(payload) {
+    var raw;
+    try {
+      raw = __sd_state(__sd_json_stringify(payload));
+    } catch (error) {
+      throw makeError("ctx.state: host bridge failed", "state_internal_error");
+    }
+    var result;
+    try {
+      result = __sd_json_parse(raw);
+    } catch (error) {
+      throw makeError("ctx.state: invalid host response", "state_internal_error");
+    }
+    if (!result.ok) {
+      throw makeError(
+        result.message || "ctx.state failed",
+        result.code || "state_internal_error"
+      );
+    }
+    return result;
+  }
+  function writeState(operation, key, value, opts) {
+    checkStateValue(value, [], 0);
+    var payload = {
+      op: operation,
+      key: checkStateKey(key),
+      value: value
+    };
+    var ttl = checkStateTtl(opts);
+    if (ttl !== null) { payload.ttl_ms = ttl; }
+    return stateCall(payload);
+  }
+  var sharedState = Object.freeze({
+    get: function (key) {
+      var result = stateCall({ op: "get", key: checkStateKey(key) });
+      return result.found ? result.value : undefined;
+    },
+    set: function (key, value, opts) {
+      writeState("set", key, value, opts);
+    },
+    take: function (key) {
+      var result = stateCall({ op: "take", key: checkStateKey(key) });
+      return result.found ? result.value : undefined;
+    },
+    setIfAbsent: function (key, value, opts) {
+      var result = writeState("setIfAbsent", key, value, opts);
+      return result.stored;
+    }
+  });
   function httpGet(url, opts) {
     if (typeof url !== "string") {
       throw new TypeError("ctx.http.get: url must be a string");
@@ -530,7 +746,7 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
     return out;
   }
   function httpPipe(url, opts) {
-    if (state.response !== null) {
+    if (envelope.response !== null) {
       record("warn", ["ctx.http.pipe ignored: a response was already produced"]);
       return false;
     }
@@ -541,7 +757,7 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
     var payload = { url: url, headers: checked.headers };
     if (checked.status !== null) { payload.status = checked.status; }
     var result = callBridge(__sd_http_pipe, payload, "ctx.http.pipe");
-    state.response = {
+    envelope.response = {
       stream: true,
       status: result.status,
       headers: result.headers
@@ -550,9 +766,10 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
   }
   return Object.freeze({
     apiVersion: "__SD_API_VERSION__",
-    request: requestSnapshot(__SD_REQUEST__),
-    env: Object.freeze(__SD_ENV__),
+    request: requestSnapshot(__sd_request),
+    env: Object.freeze(__sd_env),
     http: Object.freeze({ get: httpGet, pipe: httpPipe }),
+    state: sharedState,
     file: Object.freeze({
       readText: fileReadText,
       readBytes: fileReadBytes,
@@ -564,7 +781,7 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
       error: function () { record("error", arguments); }
     }),
     respond: function (status, headers, body) {
-      if (state.response !== null) {
+      if (envelope.response !== null) {
         record("warn", ["ctx.respond ignored: a response was already produced"]);
         return false;
       }
@@ -576,7 +793,7 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
         checkFileStreamResponse(checkedStatus, checkedHeaders);
         FILE_HANDLES.delete(body);
       }
-      state.response = {
+      envelope.response = {
         status: checkedStatus,
         headers: checkedHeaders,
         body: checkedBody
@@ -584,24 +801,37 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
       return true;
     }
   });
-})(__sd_http_get, __sd_http_pipe, __sd_validate_headers, __SD_UPSTREAM_MARKER__, __sd_file, __sd_upload);
+})(__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_upstream_marker, __sd_file, __sd_upload, __sd_state, {
+  json_stringify: JSON.stringify,
+  json_parse: JSON.parse,
+  get_own_property_names: Object.getOwnPropertyNames,
+  get_own_property_symbols: Object.getOwnPropertySymbols,
+  get_own_property_descriptor: Object.getOwnPropertyDescriptor,
+  get_prototype_of: Object.getPrototypeOf,
+  object_prototype: Object.prototype,
+  object_has_own: Object.prototype.hasOwnProperty,
+  reflect_apply: Reflect.apply,
+  array_is_array: Array.isArray,
+  number_is_integer: Number.isInteger,
+  number_is_finite: Number.isFinite,
+  number_is_safe_integer: Number.isSafeInteger,
+  number: Number,
+  object_is: Object.is,
+  regexp_test: RegExp.prototype.test
+});
+delete globalThis.__sd_request;
+delete globalThis.__sd_env;
+delete globalThis.__sd_upstream_marker;
 delete globalThis.__sd_http_get;
 delete globalThis.__sd_http_pipe;
 delete globalThis.__sd_validate_headers;
 delete globalThis.__sd_file;
 delete globalThis.__sd_upload;
+delete globalThis.__sd_state;
 "#;
 
 /// Read the recorded response and log lines back out of the realm.
 const EXTRACT: &str = "JSON.stringify({ response: __sd.response, logs: __sd.logs })";
-
-/// Serialize a value as a JS literal, keeping the injected source line-safe.
-fn js_literal(value: &Json) -> String {
-    value
-        .to_string()
-        .replace('\u{2028}', "\\u2028")
-        .replace('\u{2029}', "\\u2029")
-}
 
 /// One host bridge callable from the worker. Unknown names are protocol errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -614,6 +844,8 @@ enum BridgeName {
     File,
     #[serde(rename = "__sd_upload")]
     Upload,
+    #[serde(rename = "__sd_state")]
+    State,
     #[serde(rename = "__sd_validate_headers")]
     ValidateHeaders,
 }
@@ -625,6 +857,7 @@ impl BridgeName {
             Self::HttpPipe => "__sd_http_pipe",
             Self::File => "__sd_file",
             Self::Upload => "__sd_upload",
+            Self::State => "__sd_state",
             Self::ValidateHeaders => "__sd_validate_headers",
         }
     }
@@ -773,11 +1006,53 @@ fn write_protocol_line<T: Serialize>(value: &T) -> std::io::Result<()> {
     stdout.flush()
 }
 
+fn append_protocol_chunk(line: &mut Vec<u8>, chunk: &[u8], limit: usize) -> std::io::Result<()> {
+    if line.len().saturating_add(chunk.len()) > limit {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "protocol line exceeded the size limit",
+        ));
+    }
+    line.extend_from_slice(chunk);
+    Ok(())
+}
+
+/// Read one bounded protocol line. `None` is EOF before any line.
+fn read_limited_line_with_limit(
+    reader: &mut impl BufRead,
+    limit: usize,
+) -> std::io::Result<Option<String>> {
+    let mut line = Vec::new();
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            break;
+        }
+        let (take, complete) = match available.iter().position(|byte| *byte == b'\n') {
+            Some(index) => (index + 1, true),
+            None => (available.len(), false),
+        };
+        append_protocol_chunk(&mut line, &available[..take], limit)?;
+        reader.consume(take);
+        if complete {
+            break;
+        }
+    }
+    if line.is_empty() {
+        return Ok(None);
+    }
+    String::from_utf8(line)
+        .map(Some)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+fn read_limited_line(reader: &mut impl BufRead) -> std::io::Result<Option<String>> {
+    read_limited_line_with_limit(reader, MAX_PROTOCOL_LINE_BYTES)
+}
+
 /// Read one protocol line from the parent. `None` is EOF before any line.
 fn read_protocol_line() -> std::io::Result<Option<String>> {
-    let mut line = String::new();
-    let read = std::io::stdin().read_line(&mut line)?;
-    Ok((read > 0).then_some(line))
+    read_limited_line(&mut std::io::stdin().lock())
 }
 
 /// Send one host call and wait for the parent's exactly-one result.
@@ -861,6 +1136,14 @@ fn worker_upload(
     worker_bridge(BridgeName::Upload, args)
 }
 
+fn worker_state(
+    _this: &JsValue,
+    args: &[JsValue],
+    _context: &mut Context,
+) -> boa_engine::JsResult<JsValue> {
+    worker_bridge(BridgeName::State, args)
+}
+
 fn worker_validate_headers(
     _this: &JsValue,
     args: &[JsValue],
@@ -922,15 +1205,18 @@ fn guard_engine<T>(run: impl FnOnce() -> T) -> Result<T, Error> {
         .map_err(|_| Error::Failed("script panicked in the engine".into()))
 }
 
-/// Serialize one request and environment snapshot into the script prelude.
-fn prelude_for_request(request: &Json, upstream_marker: &str) -> String {
+/// Fill the prelude's trusted, compile-time placeholders.
+fn prelude() -> String {
     PRELUDE
         .replace("__SD_API_VERSION__", API_VERSION)
-        .replace("__SD_REQUEST__", &js_literal(request))
-        .replace("__SD_ENV__", &js_literal(&env_json()))
+        .replace("__SD_STATE_MAX_TTL_MS__", &state::MAX_TTL_MS.to_string())
         .replace(
-            "__SD_UPSTREAM_MARKER__",
-            &js_literal(&Json::String(upstream_marker.to_string())),
+            "__SD_STATE_MAX_KEY_BYTES__",
+            &state::MAX_KEY_BYTES.to_string(),
+        )
+        .replace(
+            "__SD_STATE_MAX_DEPTH__",
+            &state::MAX_VALUE_DEPTH.to_string(),
         )
 }
 
@@ -938,7 +1224,7 @@ fn prelude_for_request(request: &Json, upstream_marker: &str) -> String {
 /// forwarded to the parent; upstream, file, and upload policy stay there.
 fn evaluate_in_worker(source: &str, request: &Json) -> Result<Json, Error> {
     let upstream_marker = upstream_marker();
-    let prelude = prelude_for_request(request, &upstream_marker);
+    let prelude = prelude();
     let mut context = Context::default();
     let limits = context.runtime_limits_mut();
     limits.set_loop_iteration_limit(LOOP_ITERATION_LIMIT);
@@ -947,6 +1233,21 @@ fn evaluate_in_worker(source: &str, request: &Json) -> Result<Json, Error> {
     // A Rust-side panic in the engine must not take the worker down without a
     // protocol result; it is mapped to the same script failure as before.
     let staged = guard_engine(|| -> Result<String, Error> {
+        let request = JsValue::from_json(request, &mut context)
+            .map_err(|error| Error::Failed(error.to_string()))?;
+        context
+            .register_global_property(js_string!("__sd_request"), request, Attribute::all())
+            .map_err(|error| Error::Failed(error.to_string()))?;
+        let env = JsValue::from_json(&env_json(), &mut context)
+            .map_err(|error| Error::Failed(error.to_string()))?;
+        context
+            .register_global_property(js_string!("__sd_env"), env, Attribute::all())
+            .map_err(|error| Error::Failed(error.to_string()))?;
+        let marker = JsValue::from_json(&Json::String(upstream_marker.clone()), &mut context)
+            .map_err(|error| Error::Failed(error.to_string()))?;
+        context
+            .register_global_property(js_string!("__sd_upstream_marker"), marker, Attribute::all())
+            .map_err(|error| Error::Failed(error.to_string()))?;
         context
             .register_global_builtin_callable(
                 js_string!("__sd_http_get"),
@@ -980,6 +1281,13 @@ fn evaluate_in_worker(source: &str, request: &Json) -> Result<Json, Error> {
                 js_string!("__sd_upload"),
                 1,
                 NativeFunction::from_fn_ptr(worker_upload),
+            )
+            .map_err(|error| Error::Failed(error.to_string()))?;
+        context
+            .register_global_builtin_callable(
+                js_string!("__sd_state"),
+                1,
+                NativeFunction::from_fn_ptr(worker_state),
             )
             .map_err(|error| Error::Failed(error.to_string()))?;
         let evaluated = (|| -> Result<String, JsError> {
@@ -1236,18 +1544,32 @@ struct HostState {
     files: Option<files::FileAccess>,
     uploads: Option<files::UploadAccess>,
     pipe: Option<upstream::PipeBody>,
+    shared_state: SharedState,
+}
+
+struct HostStateInit<'a> {
+    upstream_config: &'a UpstreamConfig,
+    files_config: &'a FilesConfig,
+    uploads: Option<Arc<files::UploadStore>>,
+    script_deadline: Instant,
+    client_range: Option<String>,
+    calls: upstream::CallLog,
+    file_calls: files::CallLog,
+    shared_state: SharedState,
 }
 
 impl HostState {
-    fn new(
-        upstream_config: &UpstreamConfig,
-        files_config: &FilesConfig,
-        uploads: Option<Arc<files::UploadStore>>,
-        script_deadline: Instant,
-        client_range: Option<String>,
-        calls: upstream::CallLog,
-        file_calls: files::CallLog,
-    ) -> Self {
+    fn new(init: HostStateInit<'_>) -> Self {
+        let HostStateInit {
+            upstream_config,
+            files_config,
+            uploads,
+            script_deadline,
+            client_range,
+            calls,
+            file_calls,
+            shared_state,
+        } = init;
         let upstream = upstream::UpstreamAccess::new(
             upstream_config.allow_hosts.clone(),
             Duration::from_millis(upstream_config.timeout_ms),
@@ -1262,6 +1584,7 @@ impl HostState {
             files: Some(files),
             uploads,
             pipe: None,
+            shared_state,
         }
     }
 
@@ -1307,6 +1630,7 @@ impl HostState {
                 },
                 |host| host.call(payload),
             )),
+            BridgeName::State => Some(dispatch_state(&self.shared_state, payload)),
             BridgeName::ValidateHeaders => Some(validate_headers_json(payload)),
         }
     }
@@ -1332,6 +1656,73 @@ fn upstream_error_json(error: &upstream::Error) -> Json {
         "kind": error.transport_kind(),
         "message": error.message(),
     })
+}
+
+fn state_error_json(error: state::StateError) -> Json {
+    let code = error.code();
+    json!({
+        "ok": false,
+        "code": code,
+        "message": code,
+    })
+}
+
+fn parse_state_ttl(payload: &Json) -> Result<Option<Duration>, state::StateError> {
+    let Some(ttl_ms) = payload.get("ttl_ms") else {
+        return Ok(None);
+    };
+    let ttl_ms = ttl_ms
+        .as_u64()
+        .filter(|ttl_ms| *ttl_ms > 0 && *ttl_ms <= state::MAX_TTL_MS)
+        .ok_or(state::StateError::InvalidInput)?;
+    Ok(Some(Duration::from_millis(ttl_ms)))
+}
+
+fn dispatch_state(shared_state: &SharedState, payload: &Json) -> Json {
+    let Some(operation) = payload.get("op").and_then(Json::as_str) else {
+        return state_error_json(state::StateError::InvalidInput);
+    };
+    let Some(key) = payload.get("key").and_then(Json::as_str) else {
+        return state_error_json(state::StateError::InvalidInput);
+    };
+    let ttl = match parse_state_ttl(payload) {
+        Ok(ttl) => ttl,
+        Err(error) => return state_error_json(error),
+    };
+    let Ok(mut store) = shared_state.lock() else {
+        return state_error_json(state::StateError::Internal);
+    };
+    match operation {
+        "get" => match store.get(key) {
+            Ok(Some(value)) => json!({ "ok": true, "found": true, "value": value }),
+            Ok(None) => json!({ "ok": true, "found": false }),
+            Err(error) => state_error_json(error),
+        },
+        "set" => {
+            let Some(value) = payload.get("value").cloned() else {
+                return state_error_json(state::StateError::InvalidInput);
+            };
+            match store.set(key, value, ttl) {
+                Ok(()) => json!({ "ok": true }),
+                Err(error) => state_error_json(error),
+            }
+        }
+        "take" => match store.take(key) {
+            Ok(Some(value)) => json!({ "ok": true, "found": true, "value": value }),
+            Ok(None) => json!({ "ok": true, "found": false }),
+            Err(error) => state_error_json(error),
+        },
+        "setIfAbsent" => {
+            let Some(value) = payload.get("value").cloned() else {
+                return state_error_json(state::StateError::InvalidInput);
+            };
+            match store.set_if_absent(key, value, ttl) {
+                Ok(stored) => json!({ "ok": true, "stored": stored }),
+                Err(error) => state_error_json(error),
+            }
+        }
+        _ => state_error_json(state::StateError::InvalidInput),
+    }
 }
 
 /// Parent-side header validation bridge; the worker never owns this policy.
@@ -1383,6 +1774,44 @@ async fn write_json_line<T: Serialize>(
     writer.flush().await
 }
 
+async fn read_limited_line_async_with_limit<R>(
+    reader: &mut R,
+    limit: usize,
+) -> std::io::Result<Option<String>>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    let mut line = Vec::new();
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            break;
+        }
+        let (take, complete) = match available.iter().position(|byte| *byte == b'\n') {
+            Some(index) => (index + 1, true),
+            None => (available.len(), false),
+        };
+        append_protocol_chunk(&mut line, &available[..take], limit)?;
+        reader.consume(take);
+        if complete {
+            break;
+        }
+    }
+    if line.is_empty() {
+        return Ok(None);
+    }
+    String::from_utf8(line)
+        .map(Some)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+async fn read_limited_line_async<R>(reader: &mut R) -> std::io::Result<Option<String>>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    read_limited_line_async_with_limit(reader, MAX_PROTOCOL_LINE_BYTES).await
+}
+
 enum WorkerReply {
     /// The worker delivered its one complete final result.
     Final(FinalResult),
@@ -1403,14 +1832,15 @@ async fn exchange(
     if write_json_line(&mut stdin, job).await.is_err() {
         return WorkerReply::Unexpected;
     }
-    let mut lines = BufReader::new(stdout).lines();
+    let mut lines = BufReader::new(stdout);
     let mut final_result = None;
     loop {
-        let line = match tokio::time::timeout_at(deadline, lines.next_line()).await {
-            Err(_) => return WorkerReply::TimedOut,
-            Ok(Err(_)) => return WorkerReply::Unexpected,
-            Ok(Ok(line)) => line,
-        };
+        let line =
+            match tokio::time::timeout_at(deadline, read_limited_line_async(&mut lines)).await {
+                Err(_) => return WorkerReply::TimedOut,
+                Ok(Err(_)) => return WorkerReply::Unexpected,
+                Ok(Ok(line)) => line,
+            };
         let Some(line) = line else {
             return final_result.map_or(WorkerReply::Unexpected, WorkerReply::Final);
         };
@@ -1636,7 +2066,9 @@ fn finish_outcome(result: FinalResult, host: &Arc<Mutex<HostState>>) -> Outcome 
 /// Run one script for one request in a fresh worker process.
 ///
 /// Must use result: a dead or unreachable worker is reported, never a silent
-/// success. The semaphore permit is held for the whole worker lifetime.
+/// success. The semaphore permit is held for the whole worker lifetime. This
+/// standalone entry point starts a fresh process-local State store; `serve`
+/// uses one store shared across its requests.
 pub async fn execute(
     source: String,
     request: RequestSnapshot,
@@ -1646,6 +2078,43 @@ pub async fn execute(
     uploads: Option<Arc<files::UploadStore>>,
     worker_slot: tokio::sync::OwnedSemaphorePermit,
 ) -> Outcome {
+    execute_with_state(
+        source,
+        request,
+        ExecutionContext {
+            sandbox,
+            upstream,
+            files_config,
+            uploads,
+            shared_state: state::new_shared_state(),
+            worker_slot,
+        },
+    )
+    .await
+}
+
+pub(crate) struct ExecutionContext {
+    pub(crate) sandbox: SandboxConfig,
+    pub(crate) upstream: UpstreamConfig,
+    pub(crate) files_config: FilesConfig,
+    pub(crate) uploads: Option<Arc<files::UploadStore>>,
+    pub(crate) shared_state: SharedState,
+    pub(crate) worker_slot: tokio::sync::OwnedSemaphorePermit,
+}
+
+pub(crate) async fn execute_with_state(
+    source: String,
+    request: RequestSnapshot,
+    context: ExecutionContext,
+) -> Outcome {
+    let ExecutionContext {
+        sandbox,
+        upstream,
+        files_config,
+        uploads,
+        shared_state,
+        worker_slot,
+    } = context;
     let _slot = worker_slot;
     let timeout = Duration::from_millis(sandbox.script_timeout_ms);
     let script_deadline = Instant::now()
@@ -1659,15 +2128,16 @@ pub async fn execute(
         .iter()
         .find(|(name, _)| name == "range")
         .map(|(_, value)| value.clone());
-    let host = Arc::new(Mutex::new(HostState::new(
-        &upstream,
-        &files_config,
-        uploads.clone(),
+    let host = Arc::new(Mutex::new(HostState::new(HostStateInit {
+        upstream_config: &upstream,
+        files_config: &files_config,
+        uploads: uploads.clone(),
         script_deadline,
         client_range,
-        calls.clone(),
-        file_calls.clone(),
-    )));
+        calls: calls.clone(),
+        file_calls: file_calls.clone(),
+        shared_state,
+    })));
     let job = ParentMessage::Job {
         script: source,
         request: request.to_json(),
@@ -1876,11 +2346,45 @@ mod tests {
             (BridgeName::HttpPipe, "__sd_http_pipe"),
             (BridgeName::File, "__sd_file"),
             (BridgeName::Upload, "__sd_upload"),
+            (BridgeName::State, "__sd_state"),
             (BridgeName::ValidateHeaders, "__sd_validate_headers"),
         ] {
             assert_eq!(name.as_str(), label);
             assert_eq!(serde_json::to_value(name).expect("serialize bridge"), label);
         }
+    }
+
+    #[test]
+    fn protocol_line_reads_are_bounded() {
+        let mut oversized = std::io::Cursor::new(b"123456789".to_vec());
+        let error = read_limited_line_with_limit(&mut oversized, 8)
+            .expect_err("oversized protocol line was accepted");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+
+        let mut allowed = std::io::Cursor::new(b"12345678".to_vec());
+        assert_eq!(
+            read_limited_line_with_limit(&mut allowed, 8).expect("read bounded line"),
+            Some("12345678".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn async_protocol_line_reads_are_bounded() {
+        let oversized = b"123456789";
+        let mut oversized = tokio::io::BufReader::new(&oversized[..]);
+        let error = read_limited_line_async_with_limit(&mut oversized, 8)
+            .await
+            .expect_err("oversized protocol line was accepted");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+
+        let allowed = b"12345678";
+        let mut allowed = tokio::io::BufReader::new(&allowed[..]);
+        assert_eq!(
+            read_limited_line_async_with_limit(&mut allowed, 8)
+                .await
+                .expect("read bounded line"),
+            Some("12345678".to_string())
+        );
     }
 
     #[test]
@@ -1898,6 +2402,86 @@ mod tests {
             Some(FinalErrorKind::Transport)
         );
         assert_eq!(FinalErrorKind::from_upstream("quantum"), None);
+    }
+
+    #[test]
+    fn poisoned_state_store_returns_a_catchable_internal_error() {
+        let shared_state = state::new_shared_state();
+        let poisoned = Arc::clone(&shared_state);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned.lock().expect("poison state store");
+            panic!("poison state store");
+        })
+        .join();
+
+        let result = dispatch_state(&shared_state, &json!({ "op": "get", "key": "key" }));
+        assert_eq!(result["ok"], json!(false));
+        assert_eq!(result["code"], json!("state_internal_error"));
+        assert_eq!(result["message"], json!("state_internal_error"));
+    }
+
+    #[test]
+    fn concurrent_state_take_and_set_if_absent_have_exactly_one_winner() {
+        let shared_state = state::new_shared_state();
+        let seeded = dispatch_state(
+            &shared_state,
+            &json!({ "op": "set", "key": "take:key", "value": "grant" }),
+        );
+        assert_eq!(seeded["ok"], json!(true));
+
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let attempts = (0..2)
+            .map(|_| {
+                let shared_state = Arc::clone(&shared_state);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    dispatch_state(&shared_state, &json!({ "op": "take", "key": "take:key" }))
+                })
+            })
+            .collect::<Vec<_>>();
+        let results = attempts
+            .into_iter()
+            .map(|attempt| attempt.join().expect("take thread"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| result["found"] == json!(true))
+                .count(),
+            1
+        );
+
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let attempts = ["left", "right"]
+            .into_iter()
+            .map(|value| {
+                let shared_state = Arc::clone(&shared_state);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    dispatch_state(
+                        &shared_state,
+                        &json!({
+                            "op": "setIfAbsent",
+                            "key": "request:key",
+                            "value": value
+                        }),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let results = attempts
+            .into_iter()
+            .map(|attempt| attempt.join().expect("setIfAbsent thread"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| result["stored"] == json!(true))
+                .count(),
+            1
+        );
     }
 
     #[test]

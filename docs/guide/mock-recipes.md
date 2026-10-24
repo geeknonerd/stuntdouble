@@ -52,7 +52,7 @@ curl -i 'http://127.0.0.1:3000/users/42?include=email'
 
 ## Validate and mock a POST
 
-Return 201 for a valid JSON body and 400 for missing data. v1 keeps no cross-request state, so the response must be derived from the request.
+Return 201 for a valid JSON body and 400 for missing data. This example derives the response from the current request; cross-request workflows use the process-local [`ctx.state`](../contracts/ctx-api.md).
 
 ```toml
 [[routes]]

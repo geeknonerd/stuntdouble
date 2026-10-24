@@ -6,6 +6,7 @@ pub mod matcher;
 mod request_log;
 pub mod script;
 pub mod server;
+mod state;
 mod upstream;
 
 // ADR 0014 (revised in #102): the crate denies `unsafe_code`; this module is

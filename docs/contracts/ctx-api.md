@@ -2,7 +2,7 @@
 
 **English** \| [中文](./ctx-api.zh-CN.md)
 
-- **Status**: public and frozen for the v1 slice; this page documents the implemented subset (T1–T12)
+- **Status**: public and frozen for the v1 slice; this page documents the implemented subset through T13 plus the process-local Shared state slice
 - **Applies to**: `apiVersion` 1
 - **Stability**: additive within an `apiVersion`; removals require a new `apiVersion`
 
@@ -30,6 +30,7 @@ Within one `apiVersion`:
 | Binary passthrough | `ctx.http.pipe` | implemented (T6) |
 | Files | `ctx.file.readText` / `ctx.file.readBytes` / `ctx.file.stream` | implemented (T11) |
 | Response | `ctx.respond` | implemented (T2) |
+| Shared state | `ctx.state.get` / `set` / `take` / `setIfAbsent` | implemented (v2 process-local slice) |
 | Request-local state | `ctx.local` | deferred out of 1.0 (v2 candidate, see ADR 0016) |
 | Logging | `ctx.log.info` / `warn` / `error` | implemented (T2) |
 | Environment | `ctx.env` | implemented (T2) |
@@ -74,9 +75,20 @@ Within one `apiVersion`:
   - `text()` decodes strict UTF-8; `bytes()` returns a `Uint8Array`. Both are capped at 8 MiB and throw catchable `file_too_large` / `file_encoding_error` / `file_io_error` errors where applicable. `stream()` is uncapped, opaque, single-consumption, and valid only as the `body` argument of `ctx.respond` in the same request.
   - An upload stream used as a Response body follows the same host-owned framing and single-range 200/206/416 rules as `ctx.file.stream`.
 - `ctx.env` is the process environment snapshot. No `.env` file is loaded.
+- `ctx.state` is one host-managed, process-local namespace shared by every Route script in a running `serve` instance. It starts empty, is cleared by restart, and is never written to disk, environment variables, SQLite, the upload directory, or another instance.
+  - `get(key)` returns an independent deep copy of the value, or `undefined` when the key is absent or expired. Reading never refreshes the TTL.
+  - `set(key, value, opts)` atomically inserts or replaces the value and resets the TTL. Without `ttl_ms`, the value does not expire.
+  - `take(key)` atomically returns an independent copy and removes the key. It returns `undefined` when the key is absent or expired.
+  - `setIfAbsent(key, value, opts)` is one atomic check-and-set. It returns `true` when the value was stored, or `false` without changing a live existing value.
+  - Keys must be non-empty UTF-8 strings of at most 256 bytes and are compared exactly. Values must be lossless JSON data: `null`, boolean, finite number, string, dense arrays, or plain objects. `undefined`, functions, symbols, bigint, non-finite numbers, `-0`, cycles, sparse arrays, accessors, hidden or symbol properties, non-plain objects, and nesting deeper than 32 levels raise `state_invalid_input`. A value's compact JSON form is limited to 16 KiB. The host measures that form by re-encoding the parsed value with its own compact JSON encoder; the script engine's `JSON.stringify` output and number spelling are not authoritative. The parent independently enforces key, TTL, depth, value, and capacity limits before committing; worker checks only provide earlier catchable errors.
+  - `opts` must be a plain object and accepts only `ttl_ms`. When present, `ttl_ms` must be a positive safe integer in `[1, 604800000]` (7 days). TTL uses a monotonic host clock, starts when the mutation commits, and is replaced by the next successful `set` or `setIfAbsent`; reads do not slide it.
+  - The store holds at most 1024 live keys and 8 MiB counted as `UTF-8(key).len() + compact_json(value).len()`. Expired entries are removed lazily when accessed and before a write may need their capacity. Reaching either limit raises `state_capacity_exceeded`; there is no LRU or silent eviction, and a failed replacement preserves the old value and TTL.
+  - State errors are catchable. Parameter, serialization, or TTL validation raises `state_invalid_input`; capacity exhaustion raises `state_capacity_exceeded`; a poisoned lock or host consistency failure raises `state_internal_error`. An uncaught state error is an ordinary 500 `script_error`. A failed operation leaves the prior value and TTL unchanged.
+  - Host commits are immediate and request-independent. A later script throw, timeout, client disconnect, or worker crash does not roll back a completed state write. The host never logs state keys or values.
 - `ctx.log.info` / `warn` / `error` write to server logs only and never to the client Response. Messages are not redacted or filtered: the script author must keep request/Response bodies, tokens, cookies, and other secrets out of them. The host itself never logs bodies automatically.
 - A script that throws, exceeds `sandbox.script_timeout_ms` (default 10000), exceeds the configured memory bound, or fails to load returns 500 `script_error`; a script that finishes without producing a Response returns 500 `script_no_response`; an uncaught upstream transport failure returns 502 `upstream_unreachable`. All three carry a `request_id`.
 - Scripts run in fresh worker processes under a host-owned pool of 4–16 concurrent slots derived from available parallelism. A matched Route whose script cannot get a slot fails fast without running it: 500 `script_error`, and `--verbose` adds the stable detail `script worker capacity exhausted`. When `sandbox.script_timeout_ms` expires, the host kills the worker process immediately and releases its slot.
+- Each parent-to-worker and worker-to-parent JSON Lines protocol message is limited to 64 MiB. Exceeding the limit is a protocol failure: oversized worker output terminates that worker, while an oversized host result is rejected as a bridge error.
 - On Linux, each worker applies `sandbox.script_memory_limit_mb` (default 256 MiB, minimum 64) as `RLIMIT_AS` on itself before script code runs. The bound is virtual address space, not RSS; a worker stopped by it answers 500 `script_error`, and `--verbose` adds the stable detail `script exceeded the configured memory limit`. On Windows the parent assigns each worker to its own Job Object with `JOB_OBJECT_LIMIT_PROCESS_MEMORY` set to the same budget, which bounds committed memory instead of address space, and the exhausted worker answers the same 500 `script_error` and detail; a worker the host cannot place into its job is refused rather than run unbounded. macOS cannot enforce a useful `RLIMIT_AS` bound in this slice, so macOS keeps process isolation and the deadline but has no hard memory bound.
 
 ## Deferred capabilities
@@ -96,6 +108,7 @@ Scripts receive no raw `fetch`, `fs`, `os`, `subprocess`, or `socket`. All exter
 - a per-worker memory bound (`sandbox.script_memory_limit_mb`) applied before script code runs: virtual address space through `RLIMIT_AS` on Linux and committed memory through a Job Object on Windows; macOS does not claim a hard memory bound in this slice
 - script-worker process concurrency cap (4–16 slots derived from available parallelism) with fail-fast when saturated
 - network allowlist
+- host-managed process-local state with fixed key, value, entry, byte, and TTL bounds
 - static file root confinement for `ctx.file`
 - request-scoped multipart temporary storage with `files.upload_max_bytes`, streaming accounting, 8 MiB buffered upload reads, and guard-based cleanup
 - stack traces never returned to clients
@@ -106,7 +119,7 @@ Boa 0.22 exposes no heap metric, heap limit, or interrupt hook. The process-isol
 
 The product must publish the `.d.ts` file for each supported `apiVersion`; [ADR 0012](../../plans/adr/0012-release-artifacts-and-supply-chain.md) makes it part of the release artifact set. T9 (#12) wires that pipeline. The source definition is already part of this contract.
 
-The `apiVersion` 1 source definition for the implemented first-slice subset is [`types/ctx-api-v1.d.ts`](../../types/ctx-api-v1.d.ts). Additions within `apiVersion` 1 must update that file and the contract in the same change.
+The `apiVersion` 1 source definition for the implemented subset, including the process-local Shared state slice, is [`types/ctx-api-v1.d.ts`](../../types/ctx-api-v1.d.ts). Additions within `apiVersion` 1 must update that file and the contract in the same change.
 
 ## Deprecation
 

@@ -4,7 +4,7 @@
 
 > 本页是英文版 [ctx-api.md](./ctx-api.md) 的译本；如有出入，以英文版为准。
 
-- **状态**：v1 切片已公开并冻结；本页描述已实现子集（T1–T12）
+- **状态**：v1 切片已公开并冻结；本页描述至 T13 的已实现子集及进程内 Shared state 切片
 - **适用**：`apiVersion` 1
 - **稳定性**：同一 `apiVersion` 内只做增量；移除需要新的 `apiVersion`
 
@@ -32,6 +32,7 @@
 | 二进制透传 | `ctx.http.pipe` | 已实现（T6） |
 | 文件 | `ctx.file.readText` / `ctx.file.readBytes` / `ctx.file.stream` | 已实现（T11） |
 | 响应 | `ctx.respond` | 已实现（T2） |
+| 共享状态 | `ctx.state.get` / `set` / `take` / `setIfAbsent` | 已实现（v2 进程内切片） |
 | 请求内状态 | `ctx.local` | 已移出 1.0（v2 候选，见 ADR 0016） |
 | 日志 | `ctx.log.info` / `warn` / `error` | 已实现（T2） |
 | 环境变量 | `ctx.env` | 已实现（T2） |
@@ -76,9 +77,20 @@
   - `text()` 以严格 UTF-8 解码；`bytes()` 返回 `Uint8Array`。两者上限均为 8 MiB，并在适用时抛出可捕获的 `file_too_large` / `file_encoding_error` / `file_io_error` 错误。`stream()` 不限大小、不透明、只能消费一次，且仅可作为同一请求内 `ctx.respond` 的 `body` 参数。
   - 上传 stream 用作 Response body 时，遵循与 `ctx.file.stream` 相同的宿主 framing 与单 range 200/206/416 规则。
 - `ctx.env` 是进程环境变量快照。不加载 `.env` 文件。
+- `ctx.state` 是宿主持有的进程内命名空间，由一个运行中的 `serve` 实例内所有 Route 脚本共享。启动时为空，重启即清空；绝不写入磁盘、环境变量、SQLite、上传目录，也不与其他实例共享。
+  - `get(key)` 返回值的独立深拷贝；key 不存在或已过期时返回 `undefined`。读取绝不刷新 TTL。
+  - `set(key, value, opts)` 原子插入或替换值，并重置 TTL。没有 `ttl_ms` 时永不过期。
+  - `take(key)` 原子返回独立拷贝并删除 key；key 不存在或已过期时返回 `undefined`。
+  - `setIfAbsent(key, value, opts)` 是单次原子“检查 + 写入”。写入成功返回 `true`；已有有效值时原值不变并返回 `false`。
+  - key 必须是非空 UTF-8 字符串，最多 256 字节，按精确字节比较。value 只能是无损 JSON 数据：`null`、boolean、有限 number、string、稠密数组或普通对象。`undefined`、function、symbol、bigint、非有限 number、`-0`、循环引用、稀疏数组、accessor、隐藏属性或 symbol 属性、非普通对象，以及超过 32 层的嵌套都抛出 `state_invalid_input`。单个 value 的紧凑 JSON 表示最多 16 KiB。该字节数由宿主对解析后的值重新编码得出，不以脚本引擎 `JSON.stringify` 的输出或 number 词法为准。宿主在提交前独立校验 key、TTL、深度、value 与容量；worker 侧检查只用于更早返回可捕获错误。
+  - `opts` 必须是普通对象，且只接受 `ttl_ms`。若提供，`ttl_ms` 必须是 `[1, 604800000]`（7 天）范围内的正整数安全整数。TTL 使用宿主单调时钟，从变更提交时开始计算；下一次成功的 `set` 或 `setIfAbsent` 会替换 TTL，读取不续期。
+  - 存储最多保留 1024 个有效 key，计费总量最多 8 MiB，按 `UTF-8(key).len() + compact_json(value).len()` 计算。过期项在访问时惰性移除，并在写入可能需要其容量前清理。任一上限耗尽都抛出 `state_capacity_exceeded`；没有 LRU 或静默淘汰，失败的替换保留旧值与旧 TTL。
+  - 状态错误可捕获：参数、序列化或 TTL 校验失败抛出 `state_invalid_input`；容量不足抛出 `state_capacity_exceeded`；互斥锁中毒或宿主一致性失败抛出 `state_internal_error`。未捕获的状态错误是普通 500 `script_error`。失败操作不得修改 key 的原值与 TTL。
+  - 宿主提交立即生效，且与请求生命周期独立。之后脚本抛错、超时、客户端断开或 worker 崩溃都不会回滚已完成的状态写入。宿主日志绝不记录 state key 或 value。
 - `ctx.log.info` / `warn` / `error` 只写入服务端日志，绝不进客户端 Response。消息不会被脱敏或过滤：脚本作者必须确保消息中不含请求／响应 body、Token、Cookie 或其他机密。宿主自身不会自动记录 body。
 - 脚本抛错、超过 `sandbox.script_timeout_ms`（默认 10000）、超过内存上限或加载失败时返回 500 `script_error`；脚本结束却没有产生 Response 时返回 500 `script_no_response`；未捕获的上游传输层失败返回 502 `upstream_unreachable`。三者都带 `request_id`。
 - 脚本在全新的 worker 进程中运行；宿主拥有的并发槽位池为 4–16 个，数量按可用并行度推导。命中 Route 的脚本拿不到槽位时不会运行，而是快速失败：500 `script_error`；`--verbose` 附加稳定 detail `script worker capacity exhausted`。`sandbox.script_timeout_ms` 到期时，宿主立即杀死 worker 进程并释放其槽位。
+- 父进程到 worker 与 worker 到父进程的每条 JSON Lines 协议消息最多 64 MiB。超限属于协议失败：worker 输出超限会终止该 worker，宿主结果超限会作为 bridge 错误被 worker 拒绝。
 - Linux 上每个 worker 会在脚本代码运行前把 `sandbox.script_memory_limit_mb`（默认 256 MiB，最低 64）作为 `RLIMIT_AS` 应用到自身。该上限约束虚拟地址空间而非 RSS；因此停止的 worker 返回 500 `script_error`，`--verbose` 附加稳定 detail `script exceeded the configured memory limit`。Windows 上由父进程把每个 worker 放进独立的 Job Object，并以同一预算设置 `JOB_OBJECT_LIMIT_PROCESS_MEMORY`：约束的是提交内存而非地址空间，超限的 worker 返回同样的 500 `script_error` 与 detail；宿主若无法把 worker 放进 job，则拒绝运行而非放任无界执行。本切片中 macOS 无法用 `RLIMIT_AS` 建立有用的上界，因此保留进程隔离与 deadline，但没有硬内存上限。
 
 ## 已推迟能力
@@ -98,6 +110,7 @@
 - 按 worker 设置的内存上限（`sandbox.script_memory_limit_mb`），在脚本代码运行前应用：Linux 用 `RLIMIT_AS` 约束虚拟地址空间，Windows 用 Job Object 约束提交内存；本切片中 macOS 不承诺硬内存上限
 - 脚本 worker 进程并发上限（按可用并行度取 4–16 个槽位），槽满时快速失败
 - 网络 allowlist
+- 宿主持有的进程内状态，具有固定的 key、value、条目、字节与 TTL 边界
 - `ctx.file` 的静态文件根限制
 - 请求级 multipart 临时存储：`files.upload_max_bytes`、流式计数、8 MiB 缓冲上传读取与 guard 清理
 - 堆栈绝不返回给客户端
@@ -108,7 +121,7 @@ Boa 0.22 不暴露堆指标、堆上限或 interrupt 钩子。进程隔离 worke
 
 产品必须为每个受支持的 `apiVersion` 发布 `.d.ts` 文件；[ADR 0012](../../plans/adr/0012-release-artifacts-and-supply-chain.md) 已把它列入发布产物集合。T9 (#12) 接入该流水线。源码定义已经属于本契约。
 
-当前已实现第一切片子集的 `apiVersion` 1 源码定义在 [`types/ctx-api-v1.d.ts`](../../types/ctx-api-v1.d.ts)。在 `apiVersion` 1 内新增能力时，必须在同一次变更中更新该文件与契约。
+当前已实现子集（含进程内 Shared state 切片）的 `apiVersion` 1 源码定义在 [`types/ctx-api-v1.d.ts`](../../types/ctx-api-v1.d.ts)。在 `apiVersion` 1 内新增能力时，必须在同一次变更中更新该文件与契约。
 
 ## 弃用
 

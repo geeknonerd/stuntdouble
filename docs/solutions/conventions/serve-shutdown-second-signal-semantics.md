@@ -1,7 +1,7 @@
 ---
 title: "A second shutdown signal is only guaranteed after the first one is observed"
 date: 2026-09-22
-last_updated: 2026-10-18
+last_updated: 2026-10-22
 category: conventions
 module: serve shutdown lifecycle
 problem_type: convention
@@ -25,7 +25,7 @@ T10（issue #33，分支 `feat/graceful-shutdown`）为 `serve` 增加信号驱�
 
 初稿曾把后一半写成“第二个信号总是立即终止”。本次会话的人工复现使用 30 秒后才返回的上游响应并保持客户端连接：连续发送两次 SIGTERM 后，stderr 只有一次 `starting graceful shutdown`，1 秒后进程仍在 drain，没有出现强制退出。原因不是缺少第二个监听任务，而是标准（非实时）信号不排队：同一信号的前一次通知尚未被消费时，后续投递可能被合并成一个通知。早期测试在两个信号之间固定 `sleep(200 ms)`，让第一次信号先有机会被观测，因而掩盖了该竞态（人工复现与旧测试属于会话记录；最终契约见上述文档）。
 
-因此 T10 明确选择：契约只承诺“第一次 shutdown 已启动之后”的第二个信号；背靠背信号若被合并，就按第一次信号正常排空并退出 `0`。不要为了强迫计数引入 signal-hook 或实时信号。迁移影响记录在 `CHANGELOG.md:212-222`：把 `130`/`143` 当作普通停止码的脚本应接受正常关闭的 `0`，这两个码现在表示操作者强制中止排空。Windows 契约与 Ctrl-C 等同 SIGINT。自 [#147](https://github.com/geeknonerd/stuntdouble/pull/147)（2026-10-18）起，required CI 已有 `test-macos` 与 `test-windows` 两个作业（`.github/workflows/ci.yml:60-83`），在 macOS 与 Windows 上运行完整测试套件，取代了此前“仅 Linux 行为覆盖、Windows 只靠手写最小 crate 做 `x86_64-pc-windows-gnu` 类型检查”的做法；但信号行为用例本身仍全部 `#[cfg(unix)]`（`tests/cli.rs:5639-5768`），Windows Ctrl-C 的行为自动化尚未建立。release 流水线在构建矩阵里声明 `x86_64-pc-windows-msvc` artifact，但不运行信号行为测试（`dist-workspace.toml:13-17`、`.github/workflows/release.yml`）。
+因此 T10 明确选择：契约只承诺“第一次 shutdown 已启动之后”的第二个信号；背靠背信号若被合并，就按第一次信号正常排空并退出 `0`。不要为了强迫计数引入 signal-hook 或实时信号。迁移影响记录在 `CHANGELOG.md:212-222`：把 `130`/`143` 当作普通停止码的脚本应接受正常关闭的 `0`，这两个码现在表示操作者强制中止排空。Windows 契约与 Ctrl-C 等同 SIGINT。自 [#147](https://github.com/geeknonerd/stuntdouble/pull/147)（2026-10-18）起，required CI 已有 `test-macos` 与 `test-windows` 两个 job（`.github/workflows/ci.yml`），在 macOS 与 Windows 上运行完整测试套件，取代了此前“仅 Linux 行为覆盖、Windows 只靠手写最小 crate 做 `x86_64-pc-windows-gnu` 类型检查”的做法；但信号行为用例本身仍全部 `#[cfg(unix)]`（`tests/cli.rs:5639-5768`），Windows Ctrl-C 的行为自动化尚未建立。release 流水线在构建矩阵里声明 `x86_64-pc-windows-msvc` artifact，但不运行信号行为测试（`dist-workspace.toml:13-17`、`.github/workflows/release.yml`）。
 
 ## 指导
 

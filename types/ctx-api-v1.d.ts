@@ -3,7 +3,8 @@
 // This file is part of the public contract; the release artifact set defined by
 // plans/adr/0012-release-artifacts-and-supply-chain.md must include it. T9 wires
 // the release pipeline.
-// It covers the implemented subset through T1-T12; capabilities deferred by
+// It covers the implemented subset through T1-T13 plus the v2 process-local
+// Shared state slice; capabilities deferred by
 // plans/adr/0016-v1-ctx-pending-capabilities-deferred.md are intentionally
 // absent. Keep this file in sync with docs/contracts/ctx-api.md.
 
@@ -142,6 +143,46 @@ interface SdLog {
   error(...values: unknown[]): void;
 }
 
+interface SdStateObject {
+  readonly [key: string]: SdStateValue;
+}
+
+/** A losslessly JSON-serializable value accepted by `ctx.state`. */
+type SdStateValue =
+  | null
+  | boolean
+  | number
+  | string
+  | readonly SdStateValue[]
+  | SdStateObject;
+
+interface SdStateOptions {
+  /**
+   * Per-key lifetime in milliseconds. Must be a positive safe integer in
+   * [1, 604800000] (7 days). TTL starts when a mutation commits and does not
+   * slide on reads.
+   */
+  ttl_ms?: number;
+}
+
+/**
+ * Process-local state shared by all Route scripts in one running `serve`
+ * instance. The store starts empty and is cleared by restart.
+ */
+interface SdState {
+  /** Returns an independent copy, or `undefined` when absent or expired. */
+  get(key: string): SdStateValue | undefined;
+  /** Inserts or replaces a value and resets its TTL. */
+  set(key: string, value: SdStateValue, opts?: SdStateOptions): void;
+  /** Atomically returns an independent copy and removes the key. */
+  take(key: string): SdStateValue | undefined;
+  /**
+   * Atomically stores the value only when the key is absent or expired.
+   * Returns true when stored and false when a live value already exists.
+   */
+  setIfAbsent(key: string, value: SdStateValue, opts?: SdStateOptions): boolean;
+}
+
 type SdErrorCode =
   | "script_error"
   | "upstream_url_invalid"
@@ -152,7 +193,10 @@ type SdErrorCode =
   | "file_not_found"
   | "file_too_large"
   | "file_encoding_error"
-  | "file_io_error";
+  | "file_io_error"
+  | "state_invalid_input"
+  | "state_capacity_exceeded"
+  | "state_internal_error";
 
 /** Host-created errors carry a stable `code`; ordinary script errors may omit it. */
 interface SdError extends Error {
@@ -167,6 +211,7 @@ interface SdContext {
   readonly file: SdFile;
   readonly env: Readonly<Record<string, string>>;
   readonly log: SdLog;
+  readonly state: SdState;
   /**
    * Produces the client Response. The first call wins and returns true;
    * later calls are ignored and return false. Bytes must be integers in [0, 255].

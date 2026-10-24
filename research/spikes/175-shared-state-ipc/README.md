@@ -1,15 +1,15 @@
 # Shared state worker IPC spike（#175）
 
-- 状态：一次性原型，不进入生产代码
+- 状态：已完成（一次性原型，不进入生产代码）
 - 日期：2026-10-22
 - 环境：Linux x86_64、Rust 1.98.1
-- 关联：[ADR 0021](../../../plans/adr/0021-v2-shared-state.md)、[Post-v1 路线](../../../plans/post-v1-roadmap.md)
+- 关联：[ADR 0021](../../../plans/adr/0021-v2-shared-state.md)、[Post-v1 路线](../../../plans/post-v1-roadmap.md)、[正式实现 #176](https://github.com/geeknonerd/stuntdouble/issues/176)
 
 ## 结论
 
-**架构层 GO，生产接入仍需一次真实 worker 集成验证。** 现有“每请求一个 worker + stdio JSON Lines + 宿主能力代调用”的模型可以承载进程内 Shared state，不需要第二套执行路径。
+**有条件架构层 GO：协议与进程模型可行；真实 worker 路径已在 #176 的生产实现中通过集成测试确认。** 现有“每请求一个 worker + stdio JSON Lines + 宿主能力代调用”的模型可以承载进程内 Shared state，不需要第二套执行路径。
 
-因此本 spike 只把 `host_call` / `host_result` 视为 wire-compatible 证据，不把“真实生产 worker 路径”标为已完成；正式实现前必须在 `src/script.rs` 的 `HostState` / `exchange` 路径补集成测试。
+因此本 spike 只把 `host_call` / `host_result` 视为 wire-compatible 证据，本身不包含真实生产 worker 路径；正式实现与真实 `src/script.rs` 的 `HostState` / `exchange` 路径集成测试已在 [#176](https://github.com/geeknonerd/stuntdouble/issues/176) 完成。
 
 - `get`、`set`、`take`、`setIfAbsent` 都经 `host_call` / `host_result` 往返。
 - 宿主用一个 `Mutex<Store>` 包住“检查 + 修改”，两个并发 worker 对同一 key 执行 `take` 或 `setIfAbsent` 时都恰好只有一个赢家。
@@ -22,7 +22,7 @@
 
 这是一个独立 crate，不修改仓库根 `Cargo.toml`、`src/` 或公开 CLI。worker 由同一 spike 二进制启动，协议字段复用现有 worker IPC 的 `job`、`host_call`、`host_result`、`final_result` 形状。Boa 只负责执行脚本和把 `ctx.state` 调用转发给宿主。
 
-worker 是针对本 spike 的聚焦实现，不是对 `src/script.rs` 的直接 patch。因此本原型证明的是现有协议与进程模型足以承载状态桥；正式接入仍需在真实 worker / `HostState` 路径补集成测试，覆盖异步 exchange、现有超时分支与 worker 回收。
+worker 是针对本 spike 的聚焦实现，不是对 `src/script.rs` 的直接 patch。因此本原型证明的是现有协议与进程模型足以承载状态桥；正式接入已在 #176 完成，真实 worker / `HostState` 路径的集成测试覆盖了异步 exchange、现有超时分支与 worker 回收。
 
 worker 在显式 8 MiB 栈的专用线程上运行 Boa，与生产 worker 一致；Windows 主线程默认只有 1 MiB，直接在主线程初始化 Boa 会栈溢出。
 
@@ -99,7 +99,7 @@ worker 到宿主：
 
 宿主侧继续强制 key 最大 256 UTF-8 字节、单值紧凑 JSON 最大 16 KiB、总容量 8 MiB、最多 1024 项、TTL 范围 `1..=604_800_000` ms。worker 预检不能替代宿主侧边界，因为恶意或版本不匹配的 worker 仍可能绕过 JavaScript 层。
 
-原型在宿主和 worker 两侧都把协议行限制为 64 KiB。现有生产 worker 的 `lines()` / `read_line` 没有这一上限；正式实现应使用同等的有界读取，避免异常脚本让协议行无限增长。
+原型在宿主和 worker 两侧都把协议行限制为 64 KiB。生产实现在 #176 已采用有界读取，避免异常脚本让协议行无限增长。
 
 ## 失败映射
 
