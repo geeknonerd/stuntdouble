@@ -6875,7 +6875,7 @@ ctx.respond(200, {}, JSON.stringify({ results: results }));
     assert_eq!(response.status, 200, "body: {}", response.body);
     let json: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
     let list = json["results"].as_array().expect("array");
-    assert!(!list.is_empty());
+    assert_eq!(list.len(), 24);
     for (i, entry) in list.iter().enumerate() {
         assert_eq!(
             entry, "crypto_invalid_input",
