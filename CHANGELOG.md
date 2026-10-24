@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- *(sandbox)* add process-local ctx.state ([#184](https://github.com/geeknonerd/stuntdouble/pull/184))
+- add process-local `ctx.state` with deep-copy reads, atomic `take` / `setIfAbsent`, per-key monotonic TTL, fixed capacity, and restart clearing; remains an additive `apiVersion` 1 change ([#184](https://github.com/geeknonerd/stuntdouble/pull/184))
 
 ### Fixed
 
@@ -24,10 +24,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - add OAuth authorization mock plan and ADRs ([#168](https://github.com/geeknonerd/stuntdouble/pull/168))
 - *(dist)* pin cargo-dist bootstrap override ([#167](https://github.com/geeknonerd/stuntdouble/pull/167))
 - *(dist)* harden cargo-dist bootstrap verification ([#166](https://github.com/geeknonerd/stuntdouble/pull/166))
-
-### Added
-
-- add process-local `ctx.state` with deep-copy reads, atomic `take` / `setIfAbsent`, per-key monotonic TTL, fixed capacity, and restart clearing; remains an additive `apiVersion` 1 change ([#176](https://github.com/geeknonerd/stuntdouble/issues/176))
 
 ### Changed
 
