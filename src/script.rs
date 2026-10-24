@@ -31,6 +31,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 
 use crate::config::{FilesConfig, SandboxConfig, UpstreamConfig, SCRIPT_MEMORY_LIMIT_FLOOR_MB};
+use crate::crypto;
 use crate::files;
 use crate::matcher::percent_decode;
 use crate::state::{self, SharedState};
@@ -278,7 +279,7 @@ impl Outcome {
 // The prelude is the only writer of `__sd`; `ctx` is a frozen view over it.
 const PRELUDE: &str = r#"
 var __sd = { response: null, logs: [] };
-var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_upstream_marker, __sd_file, __sd_upload, __sd_state, __sd_intrinsics) {
+var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_upstream_marker, __sd_file, __sd_upload, __sd_state, __sd_crypto, __sd_intrinsics) {
   "use strict";
   var envelope = __sd;
   var __sd_json_stringify = __sd_intrinsics.json_stringify;
@@ -420,6 +421,36 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
       }
     }
     return out;
+  }
+  function encodeBase64(bytes) {
+    var len = bytes.length;
+    var extra = len % 3;
+    var mainLen = len - extra;
+    var parts = [];
+    var chunk = "";
+    for (var i = 0; i < mainLen; i += 3) {
+      var b0 = bytes[i];
+      var b1 = bytes[i + 1];
+      var b2 = bytes[i + 2];
+      chunk += BASE64_ALPHABET.charAt(b0 >> 2) +
+               BASE64_ALPHABET.charAt(((b0 & 3) << 4) | (b1 >> 4)) +
+               BASE64_ALPHABET.charAt(((b1 & 15) << 2) | (b2 >> 6)) +
+               BASE64_ALPHABET.charAt(b2 & 63);
+      if (chunk.length >= 8192) {
+        parts.push(chunk);
+        chunk = "";
+      }
+    }
+    if (chunk.length > 0) { parts.push(chunk); }
+    if (extra === 1) {
+      var b0 = bytes[mainLen];
+      parts.push(BASE64_ALPHABET.charAt(b0 >> 2) + BASE64_ALPHABET.charAt((b0 & 3) << 4) + "==");
+    } else if (extra === 2) {
+      var b0 = bytes[mainLen];
+      var b1 = bytes[mainLen + 1];
+      parts.push(BASE64_ALPHABET.charAt(b0 >> 2) + BASE64_ALPHABET.charAt(((b0 & 3) << 4) | (b1 >> 4)) + BASE64_ALPHABET.charAt((b1 & 15) << 2) + "=");
+    }
+    return parts.join("");
   }
   function checkPlainOpts(opts, label, allowedKeys) {
     if (opts === undefined) { return {}; }
@@ -648,6 +679,113 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
       return result.stored;
     }
   });
+  function checkCryptoString(value, label) {
+    for (var i = 0; i < value.length; i++) {
+      var unit = value.charCodeAt(i);
+      if (unit >= 0xD800 && unit <= 0xDBFF) {
+        var next = i + 1 < value.length ? value.charCodeAt(i + 1) : -1;
+        if (next < 0xDC00 || next > 0xDFFF) {
+          throw makeError(label + ": strings must not contain lone surrogates", "crypto_invalid_input");
+        }
+        i += 1;
+      } else if (unit >= 0xDC00 && unit <= 0xDFFF) {
+        throw makeError(label + ": strings must not contain lone surrogates", "crypto_invalid_input");
+      }
+    }
+  }
+  function cryptoUtf8Length(value) {
+    var bytes = 0;
+    for (var i = 0; i < value.length; i++) {
+      var unit = value.charCodeAt(i);
+      if (unit <= 0x7F) {
+        bytes += 1;
+      } else if (unit <= 0x7FF) {
+        bytes += 2;
+      } else if (unit >= 0xD800 && unit <= 0xDBFF) {
+        bytes += 4;
+        i += 1;
+      } else {
+        bytes += 3;
+      }
+    }
+    return bytes;
+  }
+  function checkCryptoInput(value, label, minBytes, maxBytes) {
+    if (value === undefined || value === null) {
+      throw makeError(label + ": input is required", "crypto_invalid_input");
+    }
+    if (typeof value === "string") {
+      checkCryptoString(value, label);
+      var len = cryptoUtf8Length(value);
+      if (minBytes !== undefined && len < minBytes) {
+        throw makeError(label + ": input length below minimum", "crypto_invalid_input");
+      }
+      if (len > maxBytes) {
+        throw makeError(label + ": input length exceeds maximum", "crypto_invalid_input");
+      }
+      return { type: "string", value: value };
+    }
+    var bytes = null;
+    if (value instanceof Uint8Array) {
+      bytes = value;
+    } else if (value instanceof ArrayBuffer) {
+      bytes = new Uint8Array(value);
+    } else if (__sd_array_is_array(value)) {
+      var arrLen = value.length;
+      for (var i = 0; i < arrLen; i++) {
+        if (!hasOwn(value, i)) {
+          throw makeError(label + ": sparse arrays are not allowed", "crypto_invalid_input");
+        }
+        var item = value[i];
+        if (typeof item !== "number" || !__sd_number_is_integer(item) || item < 0 || item > 255) {
+          throw makeError(label + ": array elements must be integers in [0, 255]", "crypto_invalid_input");
+        }
+      }
+      bytes = value;
+    } else {
+      throw makeError(label + ": unsupported input type", "crypto_invalid_input");
+    }
+    if (minBytes !== undefined && bytes.length < minBytes) {
+      throw makeError(label + ": input length below minimum", "crypto_invalid_input");
+    }
+    if (bytes.length > maxBytes) {
+      throw makeError(label + ": input length exceeds maximum", "crypto_invalid_input");
+    }
+    return { type: "bytes", value: encodeBase64(bytes) };
+  }
+  function cryptoRandomBytes(byteLength) {
+    if (arguments.length < 1 || typeof byteLength !== "number" || !__sd_number_is_integer(byteLength) || byteLength < 1 || byteLength > 1024) {
+      throw makeError("ctx.crypto.randomBytes: byteLength must be an integer in [1, 1024]", "crypto_invalid_input");
+    }
+    var result = callBridge(__sd_crypto, { op: "random_bytes", byte_length: byteLength }, "ctx.crypto.randomBytes");
+    return decodeBase64(result.bytes_base64);
+  }
+  function cryptoSha256(input) {
+    if (arguments.length < 1) {
+      throw makeError("ctx.crypto.sha256: input is required", "crypto_invalid_input");
+    }
+    var checked = checkCryptoInput(input, "ctx.crypto.sha256", 0, 8388608);
+    var result = callBridge(__sd_crypto, { op: "sha256", input: checked }, "ctx.crypto.sha256");
+    return decodeBase64(result.bytes_base64);
+  }
+  function cryptoHmacSha256(key, message) {
+    if (arguments.length < 2) {
+      throw makeError("ctx.crypto.hmacSha256: key and message are required", "crypto_invalid_input");
+    }
+    var checkedKey = checkCryptoInput(key, "ctx.crypto.hmacSha256", 0, 1024);
+    var checkedMessage = checkCryptoInput(message, "ctx.crypto.hmacSha256", 0, 8388608);
+    var result = callBridge(__sd_crypto, { op: "hmac_sha256", key: checkedKey, message: checkedMessage }, "ctx.crypto.hmacSha256");
+    return decodeBase64(result.bytes_base64);
+  }
+  function cryptoTimingSafeEqual(left, right) {
+    if (arguments.length < 2) {
+      throw makeError("ctx.crypto.timingSafeEqual: left and right are required", "crypto_invalid_input");
+    }
+    var checkedLeft = checkCryptoInput(left, "ctx.crypto.timingSafeEqual", 1, 1024);
+    var checkedRight = checkCryptoInput(right, "ctx.crypto.timingSafeEqual", 1, 1024);
+    var result = callBridge(__sd_crypto, { op: "timing_safe_equal", left: checkedLeft, right: checkedRight }, "ctx.crypto.timingSafeEqual");
+    return result.equal;
+  }
   function httpGet(url, opts) {
     if (typeof url !== "string") {
       throw new TypeError("ctx.http.get: url must be a string");
@@ -770,6 +908,12 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
     env: Object.freeze(__sd_env),
     http: Object.freeze({ get: httpGet, pipe: httpPipe }),
     state: sharedState,
+    crypto: Object.freeze({
+      randomBytes: cryptoRandomBytes,
+      sha256: cryptoSha256,
+      hmacSha256: cryptoHmacSha256,
+      timingSafeEqual: cryptoTimingSafeEqual
+    }),
     file: Object.freeze({
       readText: fileReadText,
       readBytes: fileReadBytes,
@@ -801,7 +945,7 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
       return true;
     }
   });
-})(__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_upstream_marker, __sd_file, __sd_upload, __sd_state, {
+})(__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_upstream_marker, __sd_file, __sd_upload, __sd_state, __sd_crypto, {
   json_stringify: JSON.stringify,
   json_parse: JSON.parse,
   get_own_property_names: Object.getOwnPropertyNames,
@@ -828,6 +972,7 @@ delete globalThis.__sd_validate_headers;
 delete globalThis.__sd_file;
 delete globalThis.__sd_upload;
 delete globalThis.__sd_state;
+delete globalThis.__sd_crypto;
 "#;
 
 /// Read the recorded response and log lines back out of the realm.
@@ -848,6 +993,8 @@ enum BridgeName {
     State,
     #[serde(rename = "__sd_validate_headers")]
     ValidateHeaders,
+    #[serde(rename = "__sd_crypto")]
+    Crypto,
 }
 
 impl BridgeName {
@@ -859,6 +1006,7 @@ impl BridgeName {
             Self::Upload => "__sd_upload",
             Self::State => "__sd_state",
             Self::ValidateHeaders => "__sd_validate_headers",
+            Self::Crypto => "__sd_crypto",
         }
     }
 }
@@ -1152,6 +1300,14 @@ fn worker_validate_headers(
     worker_bridge(BridgeName::ValidateHeaders, args)
 }
 
+fn worker_crypto(
+    _this: &JsValue,
+    args: &[JsValue],
+    _context: &mut Context,
+) -> boa_engine::JsResult<JsValue> {
+    worker_bridge(BridgeName::Crypto, args)
+}
+
 /// Validate script-supplied response headers with the HTTP grammar shared by
 /// the final response path.
 pub(crate) fn validated_header_pairs(
@@ -1220,6 +1376,44 @@ fn prelude() -> String {
         )
 }
 
+fn register_worker_bridges(context: &mut Context) -> Result<(), Error> {
+    for (name, func) in [
+        (
+            js_string!("__sd_http_get"),
+            NativeFunction::from_fn_ptr(worker_http_get),
+        ),
+        (
+            js_string!("__sd_http_pipe"),
+            NativeFunction::from_fn_ptr(worker_http_pipe),
+        ),
+        (
+            js_string!("__sd_validate_headers"),
+            NativeFunction::from_fn_ptr(worker_validate_headers),
+        ),
+        (
+            js_string!("__sd_file"),
+            NativeFunction::from_fn_ptr(worker_file),
+        ),
+        (
+            js_string!("__sd_upload"),
+            NativeFunction::from_fn_ptr(worker_upload),
+        ),
+        (
+            js_string!("__sd_state"),
+            NativeFunction::from_fn_ptr(worker_state),
+        ),
+        (
+            js_string!("__sd_crypto"),
+            NativeFunction::from_fn_ptr(worker_crypto),
+        ),
+    ] {
+        context
+            .register_global_builtin_callable(name, 1, func)
+            .map_err(|error| Error::Failed(error.to_string()))?;
+    }
+    Ok(())
+}
+
 /// Evaluate one script inside the worker process. Every host function is
 /// forwarded to the parent; upstream, file, and upload policy stay there.
 fn evaluate_in_worker(source: &str, request: &Json) -> Result<Json, Error> {
@@ -1248,48 +1442,7 @@ fn evaluate_in_worker(source: &str, request: &Json) -> Result<Json, Error> {
         context
             .register_global_property(js_string!("__sd_upstream_marker"), marker, Attribute::all())
             .map_err(|error| Error::Failed(error.to_string()))?;
-        context
-            .register_global_builtin_callable(
-                js_string!("__sd_http_get"),
-                1,
-                NativeFunction::from_fn_ptr(worker_http_get),
-            )
-            .map_err(|error| Error::Failed(error.to_string()))?;
-        context
-            .register_global_builtin_callable(
-                js_string!("__sd_http_pipe"),
-                1,
-                NativeFunction::from_fn_ptr(worker_http_pipe),
-            )
-            .map_err(|error| Error::Failed(error.to_string()))?;
-        context
-            .register_global_builtin_callable(
-                js_string!("__sd_validate_headers"),
-                1,
-                NativeFunction::from_fn_ptr(worker_validate_headers),
-            )
-            .map_err(|error| Error::Failed(error.to_string()))?;
-        context
-            .register_global_builtin_callable(
-                js_string!("__sd_file"),
-                1,
-                NativeFunction::from_fn_ptr(worker_file),
-            )
-            .map_err(|error| Error::Failed(error.to_string()))?;
-        context
-            .register_global_builtin_callable(
-                js_string!("__sd_upload"),
-                1,
-                NativeFunction::from_fn_ptr(worker_upload),
-            )
-            .map_err(|error| Error::Failed(error.to_string()))?;
-        context
-            .register_global_builtin_callable(
-                js_string!("__sd_state"),
-                1,
-                NativeFunction::from_fn_ptr(worker_state),
-            )
-            .map_err(|error| Error::Failed(error.to_string()))?;
+        register_worker_bridges(&mut context)?;
         let evaluated = (|| -> Result<String, JsError> {
             context.eval(Source::from_bytes(&prelude))?;
             context.eval(Source::from_bytes(source))?;
@@ -1632,6 +1785,7 @@ impl HostState {
             )),
             BridgeName::State => Some(dispatch_state(&self.shared_state, payload)),
             BridgeName::ValidateHeaders => Some(validate_headers_json(payload)),
+            BridgeName::Crypto => Some(crypto::dispatch_crypto(payload)),
         }
     }
 
@@ -2348,6 +2502,7 @@ mod tests {
             (BridgeName::Upload, "__sd_upload"),
             (BridgeName::State, "__sd_state"),
             (BridgeName::ValidateHeaders, "__sd_validate_headers"),
+            (BridgeName::Crypto, "__sd_crypto"),
         ] {
             assert_eq!(name.as_str(), label);
             assert_eq!(serde_json::to_value(name).expect("serialize bridge"), label);

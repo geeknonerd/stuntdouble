@@ -1,6 +1,7 @@
 //! Stunt Double library: configuration, matching, script execution, HTTP server.
 //! Contracts: docs/contracts/
 pub mod config;
+mod crypto;
 mod files;
 pub mod matcher;
 mod request_log;

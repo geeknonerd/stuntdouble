@@ -4,7 +4,7 @@
 
 > 本页是英文版 [ctx-api.md](./ctx-api.md) 的译本；如有出入，以英文版为准。
 
-- **状态**：v1 切片已公开并冻结；本页描述至 T13 的已实现子集及进程内 Shared state 切片
+- **状态**：v1 切片已公开并冻结；本页描述至 T13 的已实现子集、进程内 Shared state 切片及宿主 Crypto API（ADR 0019）
 - **适用**：`apiVersion` 1
 - **稳定性**：同一 `apiVersion` 内只做增量；移除需要新的 `apiVersion`
 
@@ -33,6 +33,7 @@
 | 文件 | `ctx.file.readText` / `ctx.file.readBytes` / `ctx.file.stream` | 已实现（T11） |
 | 响应 | `ctx.respond` | 已实现（T2） |
 | 共享状态 | `ctx.state.get` / `set` / `take` / `setIfAbsent` | 已实现（v2 进程内切片） |
+| 加密原语 | `ctx.crypto.randomBytes` / `sha256` / `hmacSha256` / `timingSafeEqual` | 已实现（ADR 0019） |
 | 请求内状态 | `ctx.local` | 已移出 1.0（v2 候选，见 ADR 0016） |
 | 日志 | `ctx.log.info` / `warn` / `error` | 已实现（T2） |
 | 环境变量 | `ctx.env` | 已实现（T2） |
@@ -87,6 +88,14 @@
   - 存储最多保留 1024 个有效 key，计费总量最多 8 MiB，按 `UTF-8(key).len() + compact_json(value).len()` 计算。过期项在访问时惰性移除，并在写入可能需要其容量前清理。任一上限耗尽都抛出 `state_capacity_exceeded`；没有 LRU 或静默淘汰，失败的替换保留旧值与旧 TTL。
   - 状态错误可捕获：参数、序列化或 TTL 校验失败抛出 `state_invalid_input`；容量不足抛出 `state_capacity_exceeded`；互斥锁中毒或宿主一致性失败抛出 `state_internal_error`。未捕获的状态错误是普通 500 `script_error`。失败操作不得修改 key 的原值与 TTL。
   - 宿主提交立即生效，且与请求生命周期独立。之后脚本抛错、超时、客户端断开或 worker 崩溃都不会回滚已完成的状态写入。宿主日志绝不记录 state key 或 value。
+- `ctx.crypto` 提供最小、可审计的宿主加密原语，全部在 Rust 宿主内实现并经 worker 桥暴露，绝不在 JavaScript 中模拟。
+  - 输入接受 `SdCryptoInput`（`string | Uint8Array | ArrayBuffer | readonly number[]`）。字符串按 UTF-8 编码；含孤立 UTF-16 surrogate 会抛出可捕获的 `crypto_invalid_input`，不静默替换字符。数组输入必须为稠密数组且每个元素都是 `[0, 255]` 范围内的整数。非法类型、越界字节值、稀疏数组与超长输入均抛出可捕获的 `crypto_invalid_input`。长度限制一律按编码后的字节数计算，不按 JavaScript 字符数计算。
+  - 所有输入在进入宿主时复制；宿主返回新的 `Uint8Array`（或比较操作的 `boolean`），脚本修改返回值不影响宿主。
+  - `randomBytes(byteLength)` 从操作系统 CSPRNG 读取指定字节数。`byteLength` 必须是 `[1, 1024]` 内的整数。操作系统熵源失败抛出可捕获的 `crypto_random_unavailable`，不提供降级。
+  - `sha256(input)` 返回 32 字节的 `Uint8Array`。输入字节数必须在 `[0, 8 MiB]` 范围内。
+  - `hmacSha256(key, message)` 返回 32 字节的 `Uint8Array`。`key` 字节数必须在 `[0, 1 KiB]` 范围内；`message` 字节数必须在 `[0, 8 MiB]` 范围内。
+  - `timingSafeEqual(left, right)` 以常数时间比较两个字节序列。每个操作数长度必须在 `[1, 1024]` 字节范围内。两端长度不相等时不按字节短路，直接返回 `false`。
+  - 未捕获的 crypto 错误是普通脚本错误，映射为 HTTP 500 `script_error`。宿主绝不将输入、密钥、随机输出、摘要或签名写入请求日志、运维日志或客户端诊断信息。
 - `ctx.log.info` / `warn` / `error` 只写入服务端日志，绝不进客户端 Response。消息不会被脱敏或过滤：脚本作者必须确保消息中不含请求／响应 body、Token、Cookie 或其他机密。宿主自身不会自动记录 body。
 - 脚本抛错、超过 `sandbox.script_timeout_ms`（默认 10000）、超过内存上限或加载失败时返回 500 `script_error`；脚本结束却没有产生 Response 时返回 500 `script_no_response`；未捕获的上游传输层失败返回 502 `upstream_unreachable`。三者都带 `request_id`。
 - 脚本在全新的 worker 进程中运行；宿主拥有的并发槽位池为 4–16 个，数量按可用并行度推导。命中 Route 的脚本拿不到槽位时不会运行，而是快速失败：500 `script_error`；`--verbose` 附加稳定 detail `script worker capacity exhausted`。`sandbox.script_timeout_ms` 到期时，宿主立即杀死 worker 进程并释放其槽位。
@@ -121,7 +130,7 @@ Boa 0.22 不暴露堆指标、堆上限或 interrupt 钩子。进程隔离 worke
 
 产品必须为每个受支持的 `apiVersion` 发布 `.d.ts` 文件；[ADR 0012](../../plans/adr/0012-release-artifacts-and-supply-chain.md) 已把它列入发布产物集合。T9 (#12) 接入该流水线。源码定义已经属于本契约。
 
-当前已实现子集（含进程内 Shared state 切片）的 `apiVersion` 1 源码定义在 [`types/ctx-api-v1.d.ts`](../../types/ctx-api-v1.d.ts)。在 `apiVersion` 1 内新增能力时，必须在同一次变更中更新该文件与契约。
+当前已实现子集（含进程内 Shared state 切片与宿主 Crypto API）的 `apiVersion` 1 源码定义在 [`types/ctx-api-v1.d.ts`](../../types/ctx-api-v1.d.ts)。在 `apiVersion` 1 内新增能力时，必须在同一次变更中更新该文件与契约。
 
 ## 弃用
 

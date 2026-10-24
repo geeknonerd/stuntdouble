@@ -6646,3 +6646,282 @@ fn back_to_back_sigterm_signals_still_exit() {
         "status: {status:?}, stderr: {stderr}"
     );
 }
+
+#[test]
+fn ctx_crypto_sha256_supports_all_input_types_and_matches_known_answers() {
+    let script = r#"
+function toHex(bytes) {
+  var hex = "";
+  for (var i = 0; i < bytes.length; i++) {
+    var b = bytes[i].toString(16);
+    if (b.length < 2) { b = "0" + b; }
+    hex += b;
+  }
+  return hex;
+}
+
+var emptyDigest = ctx.crypto.sha256("");
+var abcDigest = ctx.crypto.sha256("abc");
+var u8Digest = ctx.crypto.sha256(new Uint8Array([97, 98, 99]));
+var abDigest = ctx.crypto.sha256(new Uint8Array([97, 98, 99]).buffer);
+var arrDigest = ctx.crypto.sha256([97, 98, 99]);
+var nulDigest = ctx.crypto.sha256(new Uint8Array([104, 101, 108, 108, 111, 0, 119, 111, 114, 108, 100]));
+
+ctx.respond(200, {}, JSON.stringify({
+  isUint8Array: emptyDigest instanceof Uint8Array,
+  emptyHex: toHex(emptyDigest),
+  abcHex: toHex(abcDigest),
+  u8Hex: toHex(u8Digest),
+  abHex: toHex(abDigest),
+  arrHex: toHex(arrDigest),
+  nulHex: toHex(nulDigest)
+}));
+"#;
+    let (response, _) = with_server_full(good_config(), script, &[], |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(json["isUint8Array"], true);
+    assert_eq!(
+        json["emptyHex"],
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+    let abc_expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    assert_eq!(json["abcHex"], abc_expected);
+    assert_eq!(json["u8Hex"], abc_expected);
+    assert_eq!(json["abHex"], abc_expected);
+    assert_eq!(json["arrHex"], abc_expected);
+    assert_eq!(
+        json["nulHex"],
+        "b206899bc103669c8e7b36de29d73f95b46795b508aa87d612b2ce84bfb29df2"
+    );
+}
+
+#[test]
+fn ctx_crypto_hmac_sha256_matches_rfc_4231() {
+    let script = r#"
+function toHex(bytes) {
+  var hex = "";
+  for (var i = 0; i < bytes.length; i++) {
+    var b = bytes[i].toString(16);
+    if (b.length < 2) { b = "0" + b; }
+    hex += b;
+  }
+  return hex;
+}
+
+// RFC 4231 Test Case 1
+var tc1Key = [];
+for (var i = 0; i < 20; i++) { tc1Key.push(0x0b); }
+var tc1Digest = ctx.crypto.hmacSha256(tc1Key, "Hi There");
+
+// RFC 4231 Test Case 2
+var tc2Digest = ctx.crypto.hmacSha256("Jefe", "what do ya want for nothing?");
+
+// RFC 4231 Test Case 6: key 131 bytes (larger than 64-byte block size)
+var tc6Key = new Uint8Array(131);
+tc6Key.fill(0xaa);
+var tc6Digest = ctx.crypto.hmacSha256(tc6Key, "Test Using Larger Than Block-Size Key - Hash Key First");
+
+ctx.respond(200, {}, JSON.stringify({
+  tc1: toHex(tc1Digest),
+  tc2: toHex(tc2Digest),
+  tc6: toHex(tc6Digest)
+}));
+"#;
+    let (response, _) = with_server_full(good_config(), script, &[], |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(
+        json["tc1"],
+        "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+    );
+    assert_eq!(
+        json["tc2"],
+        "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+    );
+    assert_eq!(
+        json["tc6"],
+        "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+    );
+}
+
+#[test]
+fn ctx_crypto_timing_safe_equal_semantics() {
+    let script = r#"
+var equalSame = ctx.crypto.timingSafeEqual("secret_token_1", "secret_token_1");
+var unequalSameLen = ctx.crypto.timingSafeEqual("secret_token_1", "secret_token_2");
+var diffLen = ctx.crypto.timingSafeEqual("short", "longer_secret_token");
+var mixedType = ctx.crypto.timingSafeEqual("abc", new Uint8Array([97, 98, 99]));
+
+ctx.respond(200, {}, JSON.stringify({
+  equalSame: equalSame,
+  unequalSameLen: unequalSameLen,
+  diffLen: diffLen,
+  mixedType: mixedType
+}));
+"#;
+    let (response, _) = with_server_full(good_config(), script, &[], |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(json["equalSame"], true);
+    assert_eq!(json["unequalSameLen"], false);
+    assert_eq!(json["diffLen"], false);
+    assert_eq!(json["mixedType"], true);
+}
+
+#[test]
+fn ctx_crypto_random_bytes_returns_exact_length_and_is_unpredictable() {
+    let script = r#"
+function toHex(bytes) {
+  var hex = "";
+  for (var i = 0; i < bytes.length; i++) {
+    var b = bytes[i].toString(16);
+    if (b.length < 2) { b = "0" + b; }
+    hex += b;
+  }
+  return hex;
+}
+
+var rand1 = ctx.crypto.randomBytes(1);
+var rand32 = ctx.crypto.randomBytes(32);
+var rand1024 = ctx.crypto.randomBytes(1024);
+
+ctx.respond(200, {}, JSON.stringify({
+  len1: rand1.length,
+  len32: rand32.length,
+  len1024: rand1024.length,
+  hex32: toHex(rand32)
+}));
+"#;
+    let (response1, _) = with_server_full(good_config(), script, &[], |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    let (response2, _) = with_server_full(good_config(), script, &[], |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response1.status, 200);
+    assert_eq!(response2.status, 200);
+    let json1: serde_json::Value = serde_json::from_str(&response1.body).expect("json1");
+    let json2: serde_json::Value = serde_json::from_str(&response2.body).expect("json2");
+
+    assert_eq!(json1["len1"], 1);
+    assert_eq!(json1["len32"], 32);
+    assert_eq!(json1["len1024"], 1024);
+    assert_ne!(
+        json1["hex32"], json2["hex32"],
+        "two calls must produce distinct random bytes"
+    );
+}
+
+#[test]
+fn ctx_crypto_rejects_invalid_inputs_with_catchable_code() {
+    let script = r#"
+var results = [];
+function record(action) {
+  try {
+    action();
+    results.push("unexpected_success");
+  } catch (error) {
+    results.push(error.code || error.message || "unknown");
+  }
+}
+
+// randomBytes invalid byteLength
+record(function () { ctx.crypto.randomBytes(); });
+record(function () { ctx.crypto.randomBytes(0); });
+record(function () { ctx.crypto.randomBytes(1025); });
+record(function () { ctx.crypto.randomBytes(-1); });
+record(function () { ctx.crypto.randomBytes(16.5); });
+record(function () { ctx.crypto.randomBytes("32"); });
+record(function () { ctx.crypto.randomBytes(null); });
+
+// sha256 invalid inputs
+record(function () { ctx.crypto.sha256(); });
+record(function () { ctx.crypto.sha256(null); });
+record(function () { ctx.crypto.sha256(123); });
+record(function () { ctx.crypto.sha256(true); });
+record(function () { ctx.crypto.sha256({}); });
+record(function () { ctx.crypto.sha256([1, "2"]); });
+record(function () { ctx.crypto.sha256([1, -1]); });
+record(function () { ctx.crypto.sha256([1, 256]); });
+record(function () { ctx.crypto.sha256([1, 1.5]); });
+record(function () { ctx.crypto.sha256([1, , 3]); });
+record(function () { ctx.crypto.sha256("abc\uD800def"); });
+
+// timingSafeEqual invalid inputs
+record(function () { ctx.crypto.timingSafeEqual("abc"); });
+record(function () { ctx.crypto.timingSafeEqual("", "abc"); });
+record(function () { ctx.crypto.timingSafeEqual("abc", ""); });
+record(function () { ctx.crypto.timingSafeEqual(new Uint8Array(0), "abc"); });
+
+// hmacSha256 invalid inputs
+record(function () { ctx.crypto.hmacSha256("key"); });
+record(function () {
+  var oversizedKey = new Uint8Array(1025);
+  ctx.crypto.hmacSha256(oversizedKey, "message");
+});
+
+ctx.respond(200, {}, JSON.stringify({ results: results }));
+"#;
+    let (response, _) = with_server_full(good_config(), script, &[], |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    let list = json["results"].as_array().expect("array");
+    assert!(!list.is_empty());
+    for (i, entry) in list.iter().enumerate() {
+        assert_eq!(
+            entry, "crypto_invalid_input",
+            "case #{i} was not rejected with crypto_invalid_input: got {entry:?}"
+        );
+    }
+}
+
+#[test]
+fn ctx_crypto_uncaught_error_maps_to_500_without_leaking_secrets_or_params() {
+    let script = r#"
+// Intentionally trigger an unhandled crypto error with sensitive key and message
+var superSecretKey = "sk_live_99999_secret_token_never_leak";
+var superSecretPayload = "confidential_customer_ssn_123456789";
+ctx.crypto.hmacSha256(superSecretKey, { bad: "not_valid_crypto_input" });
+ctx.respond(200, {}, "ok");
+"#;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (response, stderr) = serve_and_run(
+        |port| fixture_with_script(dir.path(), port, good_config(), script),
+        &[],
+        &["--verbose"],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 500);
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(json["error"], "script_error");
+    assert_eq!(json["detail"], "script execution failed");
+    assert!(
+        !response
+            .body
+            .contains("sk_live_99999_secret_token_never_leak"),
+        "body leaked secret"
+    );
+    assert!(
+        !response
+            .body
+            .contains("confidential_customer_ssn_123456789"),
+        "body leaked secret"
+    );
+    assert!(
+        !stderr.contains("sk_live_99999_secret_token_never_leak"),
+        "stderr leaked secret"
+    );
+    assert!(
+        !stderr.contains("confidential_customer_ssn_123456789"),
+        "stderr leaked secret"
+    );
+}

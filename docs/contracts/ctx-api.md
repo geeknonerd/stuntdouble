@@ -2,7 +2,7 @@
 
 **English** \| [中文](./ctx-api.zh-CN.md)
 
-- **Status**: public and frozen for the v1 slice; this page documents the implemented subset through T13 plus the process-local Shared state slice
+- **Status**: public and frozen for the v1 slice; this page documents the implemented subset through T13 plus the process-local Shared state slice and host crypto API (ADR 0019)
 - **Applies to**: `apiVersion` 1
 - **Stability**: additive within an `apiVersion`; removals require a new `apiVersion`
 
@@ -31,6 +31,7 @@ Within one `apiVersion`:
 | Files | `ctx.file.readText` / `ctx.file.readBytes` / `ctx.file.stream` | implemented (T11) |
 | Response | `ctx.respond` | implemented (T2) |
 | Shared state | `ctx.state.get` / `set` / `take` / `setIfAbsent` | implemented (v2 process-local slice) |
+| Crypto | `ctx.crypto.randomBytes` / `sha256` / `hmacSha256` / `timingSafeEqual` | implemented (ADR 0019) |
 | Request-local state | `ctx.local` | deferred out of 1.0 (v2 candidate, see ADR 0016) |
 | Logging | `ctx.log.info` / `warn` / `error` | implemented (T2) |
 | Environment | `ctx.env` | implemented (T2) |
@@ -85,6 +86,14 @@ Within one `apiVersion`:
   - The store holds at most 1024 live keys and 8 MiB counted as `UTF-8(key).len() + compact_json(value).len()`. Expired entries are removed lazily when accessed and before a write may need their capacity. Reaching either limit raises `state_capacity_exceeded`; there is no LRU or silent eviction, and a failed replacement preserves the old value and TTL.
   - State errors are catchable. Parameter, serialization, or TTL validation raises `state_invalid_input`; capacity exhaustion raises `state_capacity_exceeded`; a poisoned lock or host consistency failure raises `state_internal_error`. An uncaught state error is an ordinary 500 `script_error`. A failed operation leaves the prior value and TTL unchanged.
   - Host commits are immediate and request-independent. A later script throw, timeout, client disconnect, or worker crash does not roll back a completed state write. The host never logs state keys or values.
+- `ctx.crypto` provides minimal, auditable host cryptographic primitives implemented in the Rust host and exposed through the worker bridge. Operations are never emulated in JavaScript.
+  - Inputs accept `SdCryptoInput` (`string | Uint8Array | ArrayBuffer | readonly number[]`). Strings are encoded as UTF-8; lone UTF-16 surrogates fail with catchable `crypto_invalid_input`. Array inputs must be dense arrays whose elements are integers in `[0, 255]`. Non-conforming types, out-of-range byte values, sparse arrays, and oversized inputs fail with catchable `crypto_invalid_input`. Length limits are enforced on encoded byte counts, never JavaScript string length.
+  - Inputs are copied into the host and outputs are returned as fresh `Uint8Array` buffers (or `boolean` for comparison), preventing shared buffer tampering.
+  - `randomBytes(byteLength)` reads from the operating system CSPRNG. `byteLength` must be an integer in `[1, 1024]`. Failure of the OS entropy source throws catchable `crypto_random_unavailable` without fallback.
+  - `sha256(input)` returns a 32-byte `Uint8Array`. Input size must be in `[0, 8 MiB]`.
+  - `hmacSha256(key, message)` returns a 32-byte `Uint8Array`. `key` size must be in `[0, 1 KiB]`; `message` size must be in `[0, 8 MiB]`.
+  - `timingSafeEqual(left, right)` compares two byte sequences in constant time. Each operand must be in `[1, 1024]` bytes. Operands of differing lengths return `false` without byte-by-byte short-circuiting.
+  - Uncaught crypto errors are ordinary script errors and map to HTTP 500 `script_error`. Inputs, keys, random outputs, digests, and signatures are never written to request logs, operator logs, or client-visible diagnostics.
 - `ctx.log.info` / `warn` / `error` write to server logs only and never to the client Response. Messages are not redacted or filtered: the script author must keep request/Response bodies, tokens, cookies, and other secrets out of them. The host itself never logs bodies automatically.
 - A script that throws, exceeds `sandbox.script_timeout_ms` (default 10000), exceeds the configured memory bound, or fails to load returns 500 `script_error`; a script that finishes without producing a Response returns 500 `script_no_response`; an uncaught upstream transport failure returns 502 `upstream_unreachable`. All three carry a `request_id`.
 - Scripts run in fresh worker processes under a host-owned pool of 4–16 concurrent slots derived from available parallelism. A matched Route whose script cannot get a slot fails fast without running it: 500 `script_error`, and `--verbose` adds the stable detail `script worker capacity exhausted`. When `sandbox.script_timeout_ms` expires, the host kills the worker process immediately and releases its slot.
@@ -119,7 +128,7 @@ Boa 0.22 exposes no heap metric, heap limit, or interrupt hook. The process-isol
 
 The product must publish the `.d.ts` file for each supported `apiVersion`; [ADR 0012](../../plans/adr/0012-release-artifacts-and-supply-chain.md) makes it part of the release artifact set. T9 (#12) wires that pipeline. The source definition is already part of this contract.
 
-The `apiVersion` 1 source definition for the implemented subset, including the process-local Shared state slice, is [`types/ctx-api-v1.d.ts`](../../types/ctx-api-v1.d.ts). Additions within `apiVersion` 1 must update that file and the contract in the same change.
+The `apiVersion` 1 source definition for the implemented subset, including the process-local Shared state slice and host crypto API, is [`types/ctx-api-v1.d.ts`](../../types/ctx-api-v1.d.ts). Additions within `apiVersion` 1 must update that file and the contract in the same change.
 
 ## Deprecation
 
