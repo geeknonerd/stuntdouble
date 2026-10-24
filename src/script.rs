@@ -492,21 +492,21 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
   function invalidState(message) {
     throw makeError(message, "state_invalid_input");
   }
-  function checkStateString(value) {
+  function checkUtf16Surrogates(value, message, code) {
     for (var i = 0; i < value.length; i++) {
       var unit = value.charCodeAt(i);
       if (unit >= 0xD800 && unit <= 0xDBFF) {
         var next = i + 1 < value.length ? value.charCodeAt(i + 1) : -1;
         if (next < 0xDC00 || next > 0xDFFF) {
-          invalidState("ctx.state: strings must be well-formed UTF-16");
+          throw makeError(message, code);
         }
         i += 1;
       } else if (unit >= 0xDC00 && unit <= 0xDFFF) {
-        invalidState("ctx.state: strings must be well-formed UTF-16");
+        throw makeError(message, code);
       }
     }
   }
-  function stateUtf8Length(value) {
+  function measureUtf8Bytes(value) {
     var bytes = 0;
     for (var i = 0; i < value.length; i++) {
       var unit = value.charCodeAt(i);
@@ -522,6 +522,9 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
       }
     }
     return bytes;
+  }
+  function checkStateString(value) {
+    checkUtf16Surrogates(value, "ctx.state: strings must be well-formed UTF-16", "state_invalid_input");
   }
   function checkStateValue(value, seen, depth) {
     if (depth > __SD_STATE_MAX_DEPTH__) {
@@ -593,7 +596,7 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
       throw makeError("ctx.state: key must be a non-empty string", "state_invalid_input");
     }
     checkStateString(key);
-    if (stateUtf8Length(key) > __SD_STATE_MAX_KEY_BYTES__) {
+    if (measureUtf8Bytes(key) > __SD_STATE_MAX_KEY_BYTES__) {
       throw makeError(
         "ctx.state: key exceeds __SD_STATE_MAX_KEY_BYTES__ UTF-8 bytes",
         "state_invalid_input"
@@ -680,35 +683,7 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
     }
   });
   function checkCryptoString(value, label) {
-    for (var i = 0; i < value.length; i++) {
-      var unit = value.charCodeAt(i);
-      if (unit >= 0xD800 && unit <= 0xDBFF) {
-        var next = i + 1 < value.length ? value.charCodeAt(i + 1) : -1;
-        if (next < 0xDC00 || next > 0xDFFF) {
-          throw makeError(label + ": strings must not contain lone surrogates", "crypto_invalid_input");
-        }
-        i += 1;
-      } else if (unit >= 0xDC00 && unit <= 0xDFFF) {
-        throw makeError(label + ": strings must not contain lone surrogates", "crypto_invalid_input");
-      }
-    }
-  }
-  function cryptoUtf8Length(value) {
-    var bytes = 0;
-    for (var i = 0; i < value.length; i++) {
-      var unit = value.charCodeAt(i);
-      if (unit <= 0x7F) {
-        bytes += 1;
-      } else if (unit <= 0x7FF) {
-        bytes += 2;
-      } else if (unit >= 0xD800 && unit <= 0xDBFF) {
-        bytes += 4;
-        i += 1;
-      } else {
-        bytes += 3;
-      }
-    }
-    return bytes;
+    checkUtf16Surrogates(value, label + ": strings must not contain lone surrogates", "crypto_invalid_input");
   }
   function checkCryptoInput(value, label, minBytes, maxBytes) {
     if (value === undefined || value === null) {
@@ -716,7 +691,7 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
     }
     if (typeof value === "string") {
       checkCryptoString(value, label);
-      var len = cryptoUtf8Length(value);
+      var len = measureUtf8Bytes(value);
       if (minBytes !== undefined && len < minBytes) {
         throw makeError(label + ": input length below minimum", "crypto_invalid_input");
       }

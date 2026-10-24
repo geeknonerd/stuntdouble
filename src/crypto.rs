@@ -139,6 +139,13 @@ fn decode_crypto_input(
     Ok(bytes)
 }
 
+fn bytes_response_json(bytes: &[u8]) -> Json {
+    json!({
+        "ok": true,
+        "bytes_base64": base64::prelude::BASE64_STANDARD.encode(bytes)
+    })
+}
+
 pub(crate) fn dispatch_crypto_with_entropy(payload: &Json, entropy: &dyn EntropySource) -> Json {
     let Some(op) = payload.get("op").and_then(Json::as_str) else {
         return crypto_error_json(CryptoError::InvalidInput("crypto: missing op"));
@@ -156,10 +163,7 @@ pub(crate) fn dispatch_crypto_with_entropy(payload: &Json, entropy: &dyn Entropy
                 ));
             };
             match generate_random_bytes(len, entropy) {
-                Ok(bytes) => {
-                    let b64 = base64::prelude::BASE64_STANDARD.encode(&bytes);
-                    json!({ "ok": true, "bytes_base64": b64 })
-                }
+                Ok(bytes) => bytes_response_json(&bytes),
                 Err(err) => crypto_error_json(err),
             }
         }
@@ -169,10 +173,7 @@ pub(crate) fn dispatch_crypto_with_entropy(payload: &Json, entropy: &dyn Entropy
                 Err(err) => return crypto_error_json(err),
             };
             match sha256_digest(&input) {
-                Ok(digest) => {
-                    let b64 = base64::prelude::BASE64_STANDARD.encode(digest);
-                    json!({ "ok": true, "bytes_base64": b64 })
-                }
+                Ok(digest) => bytes_response_json(&digest),
                 Err(err) => crypto_error_json(err),
             }
         }
@@ -187,10 +188,7 @@ pub(crate) fn dispatch_crypto_with_entropy(payload: &Json, entropy: &dyn Entropy
                     Err(err) => return crypto_error_json(err),
                 };
             match hmac_sha256_digest(&key, &message) {
-                Ok(digest) => {
-                    let b64 = base64::prelude::BASE64_STANDARD.encode(digest);
-                    json!({ "ok": true, "bytes_base64": b64 })
-                }
+                Ok(digest) => bytes_response_json(&digest),
                 Err(err) => crypto_error_json(err),
             }
         }
