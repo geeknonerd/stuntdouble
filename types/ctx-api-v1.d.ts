@@ -4,7 +4,7 @@
 // plans/adr/0012-release-artifacts-and-supply-chain.md must include it. T9 wires
 // the release pipeline.
 // It covers the implemented subset through T1-T13 plus the v2 process-local
-// Shared state slice; capabilities deferred by
+// Shared state slice and host crypto API (ADR 0019); capabilities deferred by
 // plans/adr/0016-v1-ctx-pending-capabilities-deferred.md are intentionally
 // absent. Keep this file in sync with docs/contracts/ctx-api.md.
 
@@ -183,6 +183,40 @@ interface SdState {
   setIfAbsent(key: string, value: SdStateValue, opts?: SdStateOptions): boolean;
 }
 
+/** Input accepted by `ctx.crypto` hashing, HMAC, and constant-time comparison. */
+type SdCryptoInput = string | Uint8Array | ArrayBuffer | readonly number[];
+
+/**
+ * Host-provided cryptographic primitives. All operations run in the Rust
+ * host; inputs and outputs are never shared across calls.
+ */
+interface SdCrypto {
+  /**
+   * Reads cryptographically secure random bytes from the operating system CSPRNG.
+   * Throws `crypto_invalid_input` when `byteLength` is not an integer in [1, 1024].
+   * Throws `crypto_random_unavailable` when the system entropy source fails.
+   */
+  randomBytes(byteLength: number): Uint8Array;
+  /**
+   * Computes the SHA-256 digest of `input`.
+   * Throws `crypto_invalid_input` when input exceeds 8 MiB or contains invalid types,
+   * out-of-range byte values, or lone UTF-16 surrogates.
+   */
+  sha256(input: SdCryptoInput): Uint8Array;
+  /**
+   * Computes the HMAC-SHA256 signature for `message` with `key`.
+   * Throws `crypto_invalid_input` when `key` exceeds 1 KiB, `message` exceeds 8 MiB,
+   * or an argument contains invalid types, out-of-range byte values, or lone surrogates.
+   */
+  hmacSha256(key: SdCryptoInput, message: SdCryptoInput): Uint8Array;
+  /**
+   * Compares two byte sequences in constant time.
+   * Each argument must be in [1, 1024] bytes; throws `crypto_invalid_input` if out of bounds.
+   * Returns false without short-circuiting when lengths differ.
+   */
+  timingSafeEqual(left: SdCryptoInput, right: SdCryptoInput): boolean;
+}
+
 type SdErrorCode =
   | "script_error"
   | "upstream_url_invalid"
@@ -196,7 +230,9 @@ type SdErrorCode =
   | "file_io_error"
   | "state_invalid_input"
   | "state_capacity_exceeded"
-  | "state_internal_error";
+  | "state_internal_error"
+  | "crypto_invalid_input"
+  | "crypto_random_unavailable";
 
 /** Host-created errors carry a stable `code`; ordinary script errors may omit it. */
 interface SdError extends Error {
@@ -212,6 +248,7 @@ interface SdContext {
   readonly env: Readonly<Record<string, string>>;
   readonly log: SdLog;
   readonly state: SdState;
+  readonly crypto: SdCrypto;
   /**
    * Produces the client Response. The first call wins and returns true;
    * later calls are ignored and return false. Bytes must be integers in [0, 255].
