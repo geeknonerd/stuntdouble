@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0](https://github.com/geeknonerd/stuntdouble/compare/v1.2.0...v1.3.0) - 2026-10-24
+
+### Added
+
+- *(sandbox)* add host crypto API ([#185](https://github.com/geeknonerd/stuntdouble/pull/185))
+
 ### Added
 
 - *(sandbox)* add host crypto API (`randomBytes`, `sha256`, `hmacSha256`, `timingSafeEqual`) under `ctx.crypto` ([#172](https://github.com/geeknonerd/stuntdouble/issues/172))
