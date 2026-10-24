@@ -7,9 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0](https://github.com/geeknonerd/stuntdouble/compare/v1.1.1...v1.2.0) - 2026-10-24
+
 ### Added
 
-- add process-local `ctx.state` with deep-copy reads, atomic `take` / `setIfAbsent`, per-key monotonic TTL, fixed capacity, and restart clearing; remains an additive `apiVersion` 1 change ([#176](https://github.com/geeknonerd/stuntdouble/issues/176))
+- add process-local `ctx.state` with deep-copy reads, atomic `take` / `setIfAbsent`, per-key monotonic TTL, fixed capacity, and restart clearing; remains an additive `apiVersion` 1 change ([#184](https://github.com/geeknonerd/stuntdouble/pull/184))
+
+### Fixed
+
+- *(deps)* update rustls-webpki and webpki-root-certs ([#169](https://github.com/geeknonerd/stuntdouble/pull/169))
+
+### Other
+
+- *(deps)* bump release-plz/action ([#183](https://github.com/geeknonerd/stuntdouble/pull/183))
+- *(sandbox)* spike shared state over worker IPC ([#182](https://github.com/geeknonerd/stuntdouble/pull/182))
+- add OAuth authorization mock plan and ADRs ([#168](https://github.com/geeknonerd/stuntdouble/pull/168))
+- *(dist)* pin cargo-dist bootstrap override ([#167](https://github.com/geeknonerd/stuntdouble/pull/167))
+- *(dist)* harden cargo-dist bootstrap verification ([#166](https://github.com/geeknonerd/stuntdouble/pull/166))
 
 ### Changed
 
