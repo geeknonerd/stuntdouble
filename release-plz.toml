@@ -3,6 +3,10 @@
 # not the crate itself. Set publish = true and provide CARGO_REGISTRY_TOKEN in
 # the release-plz workflow to enable crates.io publishing.
 publish = false
+# Rust library semver checks are disabled because the crate is publish = false
+# and its public contracts are CLI, config, and ctx API (ADR 0011). Internal
+# struct changes must not trigger false major version bumps.
+semver_check = false
 # release-plz creates the tag; cargo-dist owns the GitHub Release and its assets.
 git_release_enable = false
 git_tag_enable = true
