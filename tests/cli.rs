@@ -1822,7 +1822,8 @@ method = "POST"
 path = "/sign/:target"
 script = "scripts/manifest.js"
 "#;
-    // Independent source of truth: NIST vector for 2048 bytes of 0x00.
+    // Independent source of truth: SHA-256 of 2048 zero bytes, cross-checked
+    // against a host-side hashlib computation at test-authoring time.
     let zeros_2048_sha256: [u8; 32] =
         hex_decode("e5a00aa9991ac8a5ee3109844d84a55583bd20572ad3ffcd42792f3c36b183ad").unwrap();
     let (response, _) = with_server_full(body, script, &[], |port| {

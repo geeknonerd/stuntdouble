@@ -32,11 +32,11 @@ use tokio::process::{Child, Command};
 
 use crate::config::{FilesConfig, SandboxConfig, UpstreamConfig, SCRIPT_MEMORY_LIMIT_FLOOR_MB};
 use crate::crypto;
-use base64::Engine as _;
 use crate::files;
 use crate::matcher::percent_decode;
 use crate::state::{self, SharedState};
 use crate::upstream;
+use base64::Engine as _;
 
 /// Value of `ctx.apiVersion`; see docs/contracts/ctx-api.md.
 pub const API_VERSION: &str = "1";
