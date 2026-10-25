@@ -1,7 +1,7 @@
 ---
 title: "Hold a transient upload temp directory with an unfinished request body"
 date: 2026-09-24
-last_updated: 2026-10-19
+last_updated: 2026-10-26
 category: test-failures
 module: upload temp directory integration test
 problem_type: test_failure
@@ -79,3 +79,4 @@ tags: [flaky-test, integration-test, async-timing, request-scoped-temp-dir, mult
 - 同类「用固定 sleep 代替同步」的既有教训：[serve-shutdown-second-signal-semantics.md](../conventions/serve-shutdown-second-signal-semantics.md)。
 - 相邻的请求体截止与 multipart 清理边界：[request-read-deadline-at-the-connection-layer.md](../conventions/request-read-deadline-at-the-connection-layer.md)、[separate-multipart-data-budget-from-raw-body-limit.md](../conventions/separate-multipart-data-budget-from-raw-body-limit.md)、[host-boundary-fail-closed-input-classification.md](../conventions/host-boundary-fail-closed-input-classification.md)。
 - 更早的 E2E 稳定化先例：issue #35 与 PR #38（把端口启动竞态换成可观察的就绪证据）。
+- 相邻的未读 Body 与跨平台套接字重置经验：[macos-connection-reset-on-early-response-unread-body.md](macos-connection-reset-on-early-response-unread-body.md) —— 服务端提前响应关闭未读连接时，客户端写入容忍 ECONNRESET/EPIPE 的测试实践。
