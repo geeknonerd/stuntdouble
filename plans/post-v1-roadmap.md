@@ -29,7 +29,7 @@
 | 显式 Route、`ctx.respond`、302、JSON、header | 已支持 | 直接使用 |
 | `ctx.request.bodyBytes`、原始查询串 | 已实现（M1.1，#171：`bodyBytes` 与 `rawQuery`） | v1.x |
 | 安全随机、SHA-256、HMAC-SHA256、常量时间比较 | 未实现；脚本层不能可靠提供安全语义 | v1.x |
-| 未知路径与错误方法的可控响应 | 未知路径已支持通过 [fallback] 脚本响应（#173）；错误方法留待 #174 | v1.x |
+| 未知路径与错误方法的可控响应 | 未知路径已支持通过 `[fallback]` 脚本响应（#173）；已知路径方法错误仍返回引擎 404，405 与 `Allow` 留待 #174 | v1.x |
 | 授权码生命周期、access token 生命周期、签名 request ID 防重放 | 需要跨请求数据，v1 明确不提供 | v2 |
 | OAuth 授权、令牌与 userinfo 流程 | 需要以上能力组合 | 场景验收 |
 
@@ -81,7 +81,7 @@
 - 在 Body 解析前区分 `not_found` 与 `method_not_allowed`，使脚本返回精确 JSON；405 的 `Allow` 由宿主注入。（`not_found` 早期判定已完成 #173；`method_not_allowed` 与 `Allow` 注入留待 #174）
 - 未配置 `[fallback]` 时保持现有 404 行为；不引入通配方法或通配路径。（已完成 #173）
 - 保持路由声明、脚本 worker、`ctx.respond` 和日志链路不变，Fallback 禁止流式 Body。（已完成 #173）
-- 用未知路径、方法错误和错误优先级测试验证。（未知路径与 fail-closed 验证已完成 #173；方法错误留待 #174）
+- 用未知路径、方法错误和错误优先级测试验证。（未知路径、body 不读取、非法 fallback 响应、无响应与方法错误隔离已由 #173 覆盖；`method_not_allowed` 与 `Allow` 留待 #174）
 
 **退出条件**
 
