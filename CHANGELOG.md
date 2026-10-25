@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0](https://github.com/geeknonerd/stuntdouble/compare/v1.4.0...v1.5.0) - 2026-10-25
+
+### Added
+
+- *(config)* add scriptable fallback route for unknown paths ([#198](https://github.com/geeknonerd/stuntdouble/pull/198))
+
+### Other
+
+- document fallback contract and align script error semantics ([#200](https://github.com/geeknonerd/stuntdouble/pull/200))
+
 ### Added
 
 *(config)* add optional `[fallback]` table: a scriptable fallback route that runs when no Route matches the request path at all, exposed to scripts as `ctx.match = { kind: "not_found", allowedMethods: [] }` ([#173](https://github.com/geeknonerd/stuntdouble/issues/173))
