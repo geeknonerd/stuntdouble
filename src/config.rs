@@ -17,6 +17,10 @@ pub struct Config {
     pub sandbox: SandboxConfig,
     pub upstream: UpstreamConfig,
     pub routes: Vec<Route>,
+    /// Optional global fallback route that generates a scripted 404 response
+    /// for a path no normal Route matches (`ctx.match.kind` = `"not_found"`).
+    /// Method-mismatch 405 handling arrives in #174.
+    pub fallback: Option<Fallback>,
 }
 
 /// Script execution limits. The timeout is a wall-clock deadline enforced by
@@ -53,6 +57,14 @@ pub struct Route {
     pub name: Option<String>,
     pub method: String,
     pub path: String,
+    pub script: PathBuf,
+}
+
+/// An optional fallback route that shares the `name`/`script` validation rules
+/// of normal Routes but has no `method` or `path`.
+#[derive(Debug, Clone)]
+pub struct Fallback {
+    pub name: Option<String>,
     pub script: PathBuf,
 }
 
@@ -147,6 +159,7 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
             "sandbox",
             "upstream",
             "routes",
+            "fallback",
         ],
         "",
         &mut v,
@@ -196,6 +209,9 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
     // Optional: an absent [upstream] denies every host by default.
     let upstream = parse_upstream(root_table, &mut v);
 
+    // Optional: an absent [fallback] means unknown paths keep the engine's 404.
+    let fallback = parse_fallback(root_table, path, &mut v);
+
     let routes = parse_routes(root_table, path, &mut v);
 
     let root_dir = existing_dir(root_dir, &mut v);
@@ -214,7 +230,39 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
         sandbox,
         upstream,
         routes,
+        fallback,
     })
+}
+
+/// Parse the optional `[fallback]` table.
+///
+/// A fallback Route shares the `name`/`script` validation rules of normal
+/// Routes but has no `method` or `path`: it runs only when no normal Route
+/// matches method + path and no Route matches the path at all ("unknown path"),
+/// classifying the request as `not_found`.
+fn parse_fallback(root: &Table, config_path: &Path, v: &mut Vec<Violation>) -> Option<Fallback> {
+    match root.get("fallback") {
+        None => None,
+        Some(toml::Value::Table(t)) => {
+            reject_unknown(t, &["name", "script"], "fallback", v);
+            let name = opt_string(t, "name", "fallback.name", v);
+            let script = req_string(t, "script", "fallback.script", v).unwrap_or_default();
+            validate_script_extension(&script, "fallback", v);
+            let script_path = if PathBuf::from(&script).is_absolute() {
+                PathBuf::from(&script)
+            } else {
+                config_path.parent().unwrap_or(Path::new(".")).join(&script)
+            };
+            Some(Fallback {
+                name,
+                script: script_path,
+            })
+        }
+        Some(other) => {
+            v.push(bad("fallback", "table", other));
+            None
+        }
+    }
 }
 
 /// Parse the required `[files]` table and resolve its static root.

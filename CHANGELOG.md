@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+*(config)* add optional `[fallback]` table: a scriptable fallback route that runs when no Route matches the request path at all, exposed to scripts as `ctx.match = { kind: "not_found", allowedMethods: [] }` ([#173](https://github.com/geeknonerd/stuntdouble/issues/173))
+
 ## [1.4.0](https://github.com/geeknonerd/stuntdouble/compare/v1.3.0...v1.4.0) - 2026-10-25
 
 ### Added

@@ -506,6 +506,28 @@ fn with_request_timeout(body: &str, timeout_ms: u64) -> String {
     )
 }
 
+/// Same as `request_partial_body` but ignores a failed body write: a server
+/// that closes the socket early (e.g. the fallback never reads the body)
+/// resets the connection, so the client write can lose the race.
+fn request_partial_body_lenient(
+    port: u16,
+    path: &str,
+    content_type: &str,
+    announced: usize,
+    partial: &[u8],
+) -> Response {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .expect("read timeout");
+    let head = format!(
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Type: {content_type}\r\nContent-Length: {announced}\r\n\r\n"
+    );
+    stream.write_all(head.as_bytes()).expect("write head");
+    let _ = stream.write_all(partial);
+    read_response_until_complete(&mut stream)
+}
+
 /// The same deadline plus a POST route, so a test can send an unfinished body
 /// to a matched route.
 fn with_partial_body_route(body: &str, timeout_ms: u64) -> String {
@@ -7103,5 +7125,250 @@ ctx.respond(200, {}, "ok");
     assert!(
         !stderr.contains("confidential_customer_ssn_123456789"),
         "stderr leaked secret"
+    );
+}
+
+/// Fallback: unknown path hits the `[fallback]` script and answers 404.
+#[test]
+fn fallback_unknown_path_answers_404() {
+    let config_body = r#"
+config_version = "1"
+
+[server]
+bind = "127.0.0.1"
+port = {port}
+
+[files]
+root = "./files"
+
+[[routes]]
+name = "manifest"
+method = "GET"
+path = "/demo/documents/manifest/:group"
+script = "scripts/manifest.js"
+
+[fallback]
+name = "not-found"
+script = "scripts/404.js"
+"#;
+    let fallback_script = r#"ctx.respond(404, { "Content-Type": "text/plain; charset=utf-8" }, "not found: " + ctx.request.path);
+"#;
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
+    std::fs::write(dir.path().join("scripts/manifest.js"), OK_SCRIPT).expect("manifest script");
+    std::fs::write(dir.path().join("scripts/404.js"), fallback_script).expect("fallback script");
+    let (response, _) = serve_and_run(
+        |port| fixture_with_script(dir.path(), port, config_body, OK_SCRIPT),
+        &[],
+        &[],
+        |port| request(port, "GET", "/unknown/path/here", &[]),
+    );
+    assert_eq!(response.status, 404, "body: {}", response.body);
+    assert!(
+        response.body.contains("not found: /unknown/path/here"),
+        "body: {}",
+        response.body
+    );
+}
+
+/// Fallback: unknown path without a `[fallback]` keeps the engine 404.
+#[test]
+fn no_fallback_unknown_path_stays_404() {
+    let config_body = good_config();
+    let (response, _) = with_server_full(config_body, OK_SCRIPT, &[], |port| {
+        request(port, "GET", "/unknown/path/here", &[])
+    });
+    assert_eq!(response.status, 404, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("not_found"),
+        "body: {}",
+        response.body
+    );
+}
+
+/// Fallback: a non-404 status is fail-closed to 500 `script_error`.
+#[test]
+fn fallback_non_404_status_is_500() {
+    let config_body = r#"
+config_version = "1"
+
+[server]
+bind = "127.0.0.1"
+port = {port}
+
+[files]
+root = "./files"
+
+[[routes]]
+name = "manifest"
+method = "GET"
+path = "/demo/documents/manifest/:group"
+script = "scripts/manifest.js"
+
+[fallback]
+name = "not-found"
+script = "scripts/404.js"
+"#;
+    let fallback_script = r#"ctx.respond(200, { "Content-Type": "text/plain" }, "oops");
+"#;
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
+    std::fs::write(dir.path().join("scripts/manifest.js"), OK_SCRIPT).expect("manifest script");
+    std::fs::write(dir.path().join("scripts/404.js"), fallback_script).expect("fallback script");
+    let (response, _) = serve_and_run(
+        |port| fixture_with_script(dir.path(), port, config_body, OK_SCRIPT),
+        &[],
+        &[],
+        |port| request(port, "GET", "/unknown/path/here", &[]),
+    );
+    assert_eq!(response.status, 500, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("script_error"),
+        "body: {}",
+        response.body
+    );
+}
+
+/// Fallback: oversized body still works because fallback never reads the body.
+#[test]
+fn fallback_oversized_body_still_answers_404() {
+    let config_body = r#"
+config_version = "1"
+
+[server]
+bind = "127.0.0.1"
+port = {port}
+
+[files]
+root = "./files"
+
+[[routes]]
+name = "manifest"
+method = "GET"
+path = "/demo/documents/manifest/:group"
+script = "scripts/manifest.js"
+
+[fallback]
+name = "not-found"
+script = "scripts/404.js"
+"#;
+    let fallback_script = r#"ctx.respond(404, { "Content-Type": "text/plain; charset=utf-8" }, "not found: " + ctx.request.path);
+"#;
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
+    std::fs::write(dir.path().join("scripts/manifest.js"), OK_SCRIPT).expect("manifest script");
+    std::fs::write(dir.path().join("scripts/404.js"), fallback_script).expect("fallback script");
+    let (response, _) = serve_and_run(
+        |port| fixture_with_script(dir.path(), port, config_body, OK_SCRIPT),
+        &[],
+        &[],
+        |port| {
+            // The fallback never reads the body, so an oversized body must not
+            // block the 404. `request_partial_body` writes head + a partial
+            // body and reads with `read_response_until_complete`, which
+            // tolerates the connection reset macOS sends when the server
+            // closes the socket mid-body.
+            let partial = vec![b'x'; 5 * 1024 * 1024];
+            request_partial_body_lenient(
+                port,
+                "/unknown/path/here",
+                "text/plain",
+                partial.len(),
+                &partial,
+            )
+        },
+    );
+    assert_eq!(response.status, 404, "body: {}", response.body);
+}
+
+/// Fallback: `ctx.request.bodyBytes` and `bodyText` are `null` because the
+/// fallback never reads or parses the request body.
+#[test]
+fn fallback_never_reads_body_snapshot_is_null() {
+    let config_body = r#"
+config_version = "1"
+
+[server]
+bind = "127.0.0.1"
+port = {port}
+
+[files]
+root = "./files"
+
+[[routes]]
+name = "manifest"
+method = "GET"
+path = "/demo/documents/manifest/:group"
+script = "scripts/manifest.js"
+
+[fallback]
+name = "not-found"
+script = "scripts/404.js"
+"#;
+    let fallback_script = r#"var b = ctx.request.bodyBytes === null ? 1 : 0; var t = ctx.request.bodyText === null ? 1 : 0; ctx.respond(404, { "Content-Type": "text/plain" }, "null_flags_" + b + t);
+"#;
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
+    std::fs::write(dir.path().join("scripts/manifest.js"), OK_SCRIPT).expect("manifest script");
+    std::fs::write(dir.path().join("scripts/404.js"), fallback_script).expect("fallback script");
+    let (response, _) = serve_and_run(
+        |port| fixture_with_script(dir.path(), port, config_body, OK_SCRIPT),
+        &[],
+        &[],
+        |port| request(port, "GET", "/unknown/path/here", &[]),
+    );
+    assert_eq!(response.status, 404, "body: {}", response.body);
+    assert!(
+        response.body.contains("null_flags_11"),
+        "expected null_flags_11, got: {}",
+        response.body
+    );
+}
+
+/// Fallback: `ctx.http.pipe` as a response body is rejected with 500 `script_error`.
+#[test]
+fn fallback_streaming_body_is_500() {
+    let config_body = r#"
+config_version = "1"
+
+[server]
+bind = "127.0.0.1"
+port = {port}
+
+[files]
+root = "./files"
+
+[[routes]]
+name = "manifest"
+method = "GET"
+path = "/demo/documents/manifest/:group"
+script = "scripts/manifest.js"
+
+[fallback]
+name = "not-found"
+script = "scripts/404.js"
+"#;
+    // A valid upstream is not reachable here; the script only attempts pipe
+    // and never reaches respond, so it must fail closed as 500 script_error.
+    let fallback_script = r#"ctx.http.pipe("http://127.0.0.1:1/never");
+"#;
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
+    std::fs::write(dir.path().join("scripts/manifest.js"), OK_SCRIPT).expect("manifest script");
+    std::fs::write(dir.path().join("scripts/404.js"), fallback_script).expect("fallback script");
+    let (response, _) = serve_and_run(
+        |port| fixture_with_script(dir.path(), port, config_body, OK_SCRIPT),
+        &[],
+        &[],
+        |port| request(port, "GET", "/unknown/path/here", &[]),
+    );
+    assert_eq!(response.status, 500, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("script_error"),
+        "body: {}",
+        response.body
     );
 }

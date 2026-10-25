@@ -36,11 +36,13 @@ Within one `apiVersion`:
 | Logging | `ctx.log.info` / `warn` / `error` | implemented (T2) |
 | Environment | `ctx.env` | implemented (T2) |
 | Timers | `setTimeout` / `setInterval` | deferred out of 1.0 (v2 candidate, see ADR 0016) |
+| Match category | `ctx.match.kind` / `ctx.match.allowedMethods` | implemented (#173) |
 
 ## Implemented subset
 
 - `ctx.apiVersion` is `"1"`.
 - `ctx.request` is a read-only snapshot with `method`, `path`, `params`, `query`, `rawQuery`, `headers`, `bodyText`, `bodyBytes`, and `files`. Header names are lowercased; `bodyText` is `null` when the request body is not valid UTF-8. A parsed multipart request also exposes `bodyText` as `null`, because the framing is consumed before the script runs. Query names and values in `query` are percent-decoded. A repeated query or header name keeps the last value in the snapshot.
+- `ctx.match` exposes the match category of the current request relative to the configured Routes: `kind` is `"route"` when a normal Route matched, `"not_found"` when the optional fallback Route ran because no Route matched the path at all, and `"method_not_allowed"` is reserved for Issue #174. `allowedMethods` is empty in this slice and is only populated for `"method_not_allowed"` in a later slice. The fallback script sees `"not_found"` and must respond with status 404 and a buffered body; any other status or a streamed body is fail-closed to 500 `script_error`.
   - `rawQuery` is the raw query component of the request line, exactly as sent: duplicate names, order, and percent-encoding are preserved; it is `""` when the request has no query. Combine it with `query` to canonicalize signature inputs without losing repeated parameters.
   - `bodyBytes` is the exact request body as a `Uint8Array`, with no UTF-8 conversion, so binary, NUL, and invalid-UTF-8 bodies stay byte-accurate. It is `null` when the body was not read: for a parsed multipart request the framing is consumed before the script runs. An empty `Uint8Array` means a read empty body; it is distinct from `null`.
 - `ctx.respond(status, headers, body)` accepts a status in `[100, 599]`, headers as an object or `[name, value]` pairs, and a body that is a string, byte array, `Uint8Array`, `ArrayBuffer`, or a `ctx.file.stream` / `ctx.request.files[].stream()` handle. The first call wins and returns `true`; later calls are ignored, return `false`, and produce a server-side warning. A byte array must contain integers in `[0, 255]`. Header names and values are validated when the call is made; malformed pairs raise a catchable `script_error` before a Response is recorded and are never silently dropped.

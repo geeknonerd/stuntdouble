@@ -3,6 +3,7 @@
 // script_no_response. Stream failures are log-only classes.
 use crate::config::Config;
 use crate::files;
+use crate::matcher::has_path_match;
 use crate::matcher::match_route;
 use crate::script::{self, RequestSnapshot, ResponseBody, ScriptResponse};
 use crate::state::{self, SharedState};
@@ -98,6 +99,15 @@ impl AppState {
         let method_label = method.as_str().to_ascii_uppercase();
         let path = uri.path().to_string();
         let Some(found) = match_route(&self.config.routes, &method_label, &path) else {
+            // No normal Route matched method + path. Fallback runs only when no
+            // Route matches the path at all (unknown path -> not_found). A known
+            // path with a wrong method keeps the existing engine 404 behavior
+            // until #174 adds method_not_allowed handling.
+            if let Some(fallback) = &self.config.fallback {
+                if !has_path_match(&self.config.routes, &path) {
+                    return self.run_fallback(fallback, request, &path, &headers).await;
+                }
+            }
             return Routed {
                 route_label: String::new(),
                 params: HashMap::new(),
@@ -124,7 +134,10 @@ impl AppState {
         )
         .await
         {
-            Ok(Ok(prepared)) => self.run_script(route_index, label, params, prepared).await,
+            Ok(Ok(prepared)) => {
+                self.run_script_inner(label, &self.config.routes[route_index].script, prepared)
+                    .await
+            }
             Ok(Err(PrepareError::Upload {
                 failure,
                 request_body_bytes,
@@ -206,6 +219,7 @@ impl AppState {
                         headers,
                         None,
                         metas,
+                        "route",
                     );
                     Ok(PreparedRequest {
                         snapshot,
@@ -230,6 +244,7 @@ impl AppState {
                         headers,
                         Some(&bytes),
                         Vec::new(),
+                        "route",
                     );
                     Ok(PreparedRequest {
                         snapshot,
@@ -246,22 +261,23 @@ impl AppState {
     }
 
     /// Run one route script against a prepared request.
-    async fn run_script(
+    /// Run a script by path instead of by route index; used by both normal
+    /// routes and the optional fallback.
+    async fn run_script_inner(
         &self,
-        route_index: usize,
-        route_label: String,
-        params: HashMap<String, String>,
+        label: String,
+        script_path: &std::path::Path,
         prepared: PreparedRequest,
     ) -> Routed {
-        let route = &self.config.routes[route_index];
         let PreparedRequest {
             snapshot,
             uploads,
             upload,
             request_body_bytes,
         } = prepared;
+        let params = snapshot.params.clone();
         let script_started = Instant::now();
-        let outcome = match std::fs::read_to_string(&route.script) {
+        let outcome = match std::fs::read_to_string(script_path) {
             Ok(source) => {
                 // Fail fast instead of queueing: queued scripts would spend
                 // their own deadline behind the workers already holding a slot.
@@ -288,7 +304,7 @@ impl AppState {
             // runtime failure, not a silent 404.
             Err(error) => script::Outcome::failed(script::Error::Failed(format!(
                 "cannot read script {}: {error}",
-                route.script.display()
+                script_path.display()
             ))),
         };
         let script_duration_ms = Some(elapsed_ms(script_started.elapsed()));
@@ -305,7 +321,7 @@ impl AppState {
             (None, None) => Handled::Failed(script::Error::NoResponse),
         };
         Routed {
-            route_label,
+            route_label: label,
             params,
             handled,
             script_logs: logs,
@@ -315,6 +331,63 @@ impl AppState {
             request_body_bytes,
             upload,
         }
+    }
+
+    /// Run the optional `[fallback]` script for an unknown path.
+    ///
+    /// The fallback never reads or parses the request Body. It must answer 404
+    /// with a buffered body; any other status, a streaming/file/upload stream
+    /// body, or a script failure is fail-closed to the existing script error
+    /// mapping.
+    async fn run_fallback(
+        &self,
+        fallback: &crate::config::Fallback,
+        request: Request,
+        path: &str,
+        headers: &HeaderMap,
+    ) -> Routed {
+        // Fallback never reads or parses the request Body; absent Body values
+        // remain distinguishable from an empty Body.
+        let snapshot = RequestSnapshot::new(
+            request.method(),
+            path,
+            HashMap::new(),
+            request.uri().query().unwrap_or(""),
+            headers,
+            None,
+            Vec::new(),
+            "not_found",
+        );
+        let prepared = PreparedRequest {
+            snapshot,
+            uploads: None,
+            upload: upload_log(0, 0, None),
+            request_body_bytes: None,
+        };
+        // ADR 0020: when the fallback has no name, the log `route` field is the
+        // fixed label `fallback`, not the script path.
+        let label = fallback
+            .name
+            .clone()
+            .unwrap_or_else(|| "fallback".to_string());
+        let mut routed = self
+            .run_script_inner(label, &fallback.script, prepared)
+            .await;
+
+        // Fail closed: the fallback must return status 404 with a buffered body.
+        if let Handled::Responded(response) = &routed.handled {
+            let invalid = response.status != 404
+                || matches!(
+                    response.body,
+                    ResponseBody::Stream(_) | ResponseBody::File(_)
+                );
+            if invalid {
+                routed.handled = Handled::Failed(script::Error::Failed(
+                    "fallback script must respond with status 404 and a buffered body".to_string(),
+                ));
+            }
+        }
+        routed
     }
 }
 
