@@ -2,7 +2,7 @@
 //! Contracts: docs/contracts/ctx-api.md, plans/adr/0019-host-crypto-api.md
 
 use base64::Engine;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde_json::{json, Value as Json};
 use sha2::{Digest, Sha256};
 
