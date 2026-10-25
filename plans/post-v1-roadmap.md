@@ -64,7 +64,8 @@
 
 - 新增 `ctx.request.bodyBytes`（精确请求 Body 字节，`Uint8Array`；未读取为 `null`）与 `ctx.request.rawQuery`（原始 query 片段，保留重复参数、顺序与编码）。
 - 保持现有 `bodyText` 与已解码 `query` 的行为不变。
-- 已用签名规范化、原始 Body 哈希（NIST 已知向量）和重复查询参数端到端测试验证。
+- 已用签名规范化、原始 Body 哈希（2048 零字节的 SHA-256，非 FIPS 180-4 官方向量）和重复查询参数端到端测试验证。
+- tradeoff: 快照保真 e2e 测试逐例手写 config 与 fixture（3 例），与既有测试风格一致；业内经验以 4 例以上近似重复变体为提取 helper 门槛。升级触发：第 4 个快照测试落地时提取 `snapshot_config(route, path)` 小 helper。
 
 **M1.2 Host crypto API**
 
