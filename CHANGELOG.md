@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- add `ctx.request.bodyBytes` (exact request body as a `Uint8Array`, `null` when the body was not read) and `ctx.request.rawQuery` (raw query component preserving duplicate names, order, and percent-encoding) to the `apiVersion` 1 request snapshot ([#171](https://github.com/geeknonerd/stuntdouble/issues/171))
+
 ## [1.3.0](https://github.com/geeknonerd/stuntdouble/compare/v1.2.0...v1.3.0) - 2026-10-24
 
 ### Added

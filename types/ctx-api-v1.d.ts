@@ -15,6 +15,12 @@ interface SdRequest {
   readonly params: Readonly<Record<string, string>>;
   /** Percent-decoded query names and values; a repeated name keeps the last value. */
   readonly query: Readonly<Record<string, string>>;
+  /**
+   * The raw query component of the request line, exactly as sent: duplicate
+   * names, order, and percent-encoding are preserved. `""` when the request
+   * has no query. Use with `query` for signature canonicalization.
+   */
+  readonly rawQuery: string;
   /** Lowercased header names; a repeated name keeps the last value. */
   readonly headers: Readonly<Record<string, string>>;
   /**
@@ -22,6 +28,13 @@ interface SdRequest {
    * requests because the framing is consumed before the script runs.
    */
   readonly bodyText: string | null;
+  /**
+   * The exact request body bytes. `null` when the body was not read
+   * (multipart requests, where the framing is consumed before the script
+   * runs); an empty `Uint8Array` means a read empty body. No UTF-8
+   * conversion is applied.
+   */
+  readonly bodyBytes: Uint8Array | null;
   /** Uploaded files in multipart order; empty for non-multipart requests. */
   readonly files: readonly SdUploadedFile[];
 }

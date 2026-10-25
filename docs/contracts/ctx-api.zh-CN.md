@@ -24,8 +24,9 @@
 | 分组 | API | 状态 |
 | --- | --- | --- |
 | 请求快照 | `ctx.request.method` / `path` / `params` / `query` / `headers` / `bodyText` | 已实现（T2） |
+| 请求快照 | `ctx.request.rawQuery` / `bodyBytes` | 已实现（M1.1，v1.x） |
 | 请求快照 | `ctx.request.files` | 已实现（T12） |
-| 请求快照 | `ctx.request.bodyBytes` | 已移出 1.0（v1.x 候选，见 ADR 0016） |
+
 | 上游 HTTP | `ctx.http.get` | 已实现（T4） |
 | 上游 HTTP | `ctx.http.get` 的 `opts.retries` / `backoff` | 已移出 1.0（v1.x 候选，见 ADR 0016） |
 | 上游 HTTP | `ctx.http.request` | 已移出 1.0（v1.x 候选，见 ADR 0016） |
@@ -42,7 +43,9 @@
 ## 已实现的子集
 
 - `ctx.apiVersion` 为 `"1"`。
-- `ctx.request` 是只读快照，含 `method`、`path`、`params`、`query`、`headers`、`bodyText` 与 `files`。Header 名小写化；请求 body 不是合法 UTF-8 时 `bodyText` 为 `null`。已解析的 multipart 请求同样把 `bodyText` 暴露为 `null`，因为 framing 在脚本运行前已被消费。Query 名与值都会做百分号解码，Header 名小写化。重复的 query 或 Header 名在快照中保留最后一个值。
+- `ctx.request` 是只读快照，含 `method`、`path`、`params`、`query`、`rawQuery`、`headers`、`bodyText`、`bodyBytes` 与 `files`。Header 名小写化；请求 body 不是合法 UTF-8 时 `bodyText` 为 `null`。已解析的 multipart 请求同样把 `bodyText` 暴露为 `null`，因为 framing 在脚本运行前已被消费。`query` 中的名与值都会做百分号解码。重复的 query 或 Header 名在快照中保留最后一个值。
+  - `rawQuery` 是请求行中的原始 query 片段，按客户端发送的原样保留：重复参数名、顺序与百分号编码均不丢失；请求没有 query 时为 `""`。与 `query` 配合可对签名输入做规范化，同时不丢失重复参数。
+  - `bodyBytes` 是精确的请求 body 字节，以 `Uint8Array` 提供，不做 UTF-8 转换，因此二进制、NUL 与非法 UTF-8 内容都能逐字节还原。body 未被读取时为 `null`：已解析的 multipart 请求的 framing 在脚本运行前已被消费。空 `Uint8Array` 表示已读取的空 body，与 `null` 可区分。
 - `ctx.respond(status, headers, body)` 接受 `[100, 599]` 范围内的状态码、对象或 `[name, value]` 对形式的 headers，以及字符串、字节数组、`Uint8Array`、`ArrayBuffer` 或 `ctx.file.stream` / `ctx.request.files[].stream()` handle 类型的 body。第一次调用生效并返回 `true`；后续调用被忽略、返回 `false`，并在服务端产生警告。字节数组的每个值必须是 `[0, 255]` 范围内的整数。Header 名与值在调用时校验；畸形 pair 抛出可捕获的 `script_error`，不会记录 Response，也绝不静默丢弃。
 - `ctx.http.get(url, opts)` 执行 allowlist 约束的上游 GET，返回 `{status, headers, text(), bytes()}`。
   - `url` 必须是绝对的 `http` 或 `https` URL，其 host 大小写不敏感地匹配 `upstream.allow_hosts`；端口不参与匹配，IP 字面量与 `localhost` 需要显式条目。
@@ -106,7 +109,6 @@
 
 以下能力经 [ADR 0016](../../plans/adr/0016-v1-ctx-pending-capabilities-deferred.md) 移出 1.0，尚未实现。它们有意不出现在 `ctx` 与 `types/ctx-api-v1.d.ts` 中；调用不存在的成员是普通脚本错误，映射为 500 `script_error`。
 
-- `ctx.request.bodyBytes`
 - `ctx.http.request` 与 `ctx.http.get` 的 retry/backoff 选项
 - `ctx.local`
 - `setTimeout` 与 `setInterval`

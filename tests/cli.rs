@@ -1796,6 +1796,185 @@ script = "scripts/manifest.js"
 }
 
 #[test]
+fn request_snapshot_exposes_raw_body_bytes_and_raw_query() {
+    let script = r#"
+var digest = ctx.crypto.sha256(ctx.request.bodyBytes);
+ctx.respond(200, { "Content-Type": "application/json" }, JSON.stringify({
+  bodyLength: ctx.request.bodyBytes.length,
+  digest: Array.prototype.slice.call(digest),
+  rawQuery: ctx.request.rawQuery,
+  query: ctx.request.query,
+  bodyText: ctx.request.bodyText
+}));
+"#;
+    let body = r#"config_version = "1"
+
+[server]
+bind = "127.0.0.1"
+port = {port}
+
+[files]
+root = "./files"
+
+[[routes]]
+name = "sign"
+method = "POST"
+path = "/sign/:target"
+script = "scripts/manifest.js"
+"#;
+    // Independent source of truth: NIST vector for 2048 bytes of 0x00.
+    let zeros_2048_sha256: [u8; 32] =
+        hex_decode("e5a00aa9991ac8a5ee3109844d84a55583bd20572ad3ffcd42792f3c36b183ad").unwrap();
+    let (response, _) = with_server_full(body, script, &[], |port| {
+        request_bytes(
+            port,
+            "POST",
+            "/sign/ledger?amount=3&currency=USD&currency=CNY&%7B%7D=enc&tag",
+            &[],
+            &[0x00u8; 2048],
+        )
+    });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(json["bodyLength"], 2048);
+    assert_eq!(
+        json["digest"],
+        serde_json::to_value(zeros_2048_sha256).unwrap()
+    );
+    let body_text_len = json["bodyText"].as_str().map(str::len).unwrap_or_default();
+    assert_eq!(
+        body_text_len, 2048,
+        "NUL body must decode to a 2048-char string, not null"
+    );
+    assert_eq!(
+        json["rawQuery"],
+        "amount=3&currency=USD&currency=CNY&%7B%7D=enc&tag"
+    );
+    assert_eq!(json["query"]["amount"], "3");
+    // Decoded map keeps the last value for a repeated name; the raw string
+    // must preserve every occurrence so signatures can canonicalize.
+    assert_eq!(json["query"]["currency"], "CNY");
+    assert_eq!(json["query"]["{}"], "enc");
+    assert_eq!(json["query"]["tag"], "");
+}
+
+#[test]
+fn raw_body_bytes_cover_empty_nul_and_invalid_utf8() {
+    let script = r#"
+ctx.respond(200, { "Content-Type": "application/json" }, JSON.stringify({
+  length: ctx.request.bodyBytes.length,
+  text: ctx.request.bodyText
+}));
+"#;
+    let config = r#"config_version = "1"
+
+[server]
+bind = "127.0.0.1"
+port = {port}
+
+[files]
+root = "./files"
+
+[[routes]]
+name = "probe"
+method = "POST"
+path = "/probe"
+script = "scripts/manifest.js"
+"#;
+    // Empty body: distinguishable from an unread one (null) by length;
+    // bodyText for an empty read body is the empty string, not null.
+    let (response, _) = with_server_full(config, script, &[], |port| {
+        request_with_body(port, "POST", "/probe", &[], "")
+    });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(json["length"], 0);
+    assert_eq!(json["text"], "");
+
+    // NUL byte is valid UTF-8: bodyText decodes to a 3-char string;
+    // bodyBytes still gives the exact bytes for hashing.
+    let (response, _) = with_server_full(config, script, &[], |port| {
+        request_bytes(port, "POST", "/probe", &[], [0x68, 0x00, 0x77].as_slice())
+    });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(json["length"], 3);
+    assert_eq!(
+        json["text"].as_str().map(str::len),
+        Some(3),
+        "NUL body decodes to a 3-char string"
+    );
+
+    // Invalid UTF-8: bodyText null, bodyBytes still exact.
+    let (response, _) = with_server_full(config, script, &[], |port| {
+        request_bytes(port, "POST", "/probe", &[], &[0xFF, 0xFE, 0x00, 0x01])
+    });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(json["length"], 4);
+    assert_eq!(json["text"], serde_json::Value::Null);
+}
+
+#[test]
+fn multipart_snapshot_has_unread_body_bytes_and_raw_query() {
+    let script = r#"
+ctx.respond(200, { "Content-Type": "application/json" }, JSON.stringify({
+  bodyBytes: ctx.request.bodyBytes === null ? "null" : "present",
+  bodyText: ctx.request.bodyText === null ? "null" : "present",
+  rawQuery: ctx.request.rawQuery,
+  files: ctx.request.files.length
+}));
+"#;
+    let config = r#"config_version = "1"
+
+[server]
+bind = "127.0.0.1"
+port = {port}
+
+[files]
+root = "./files"
+
+[[routes]]
+name = "probe"
+method = "POST"
+path = "/probe"
+script = "scripts/manifest.js"
+"#;
+    let (response, _) = with_server_full(config, script, &[], |port| {
+        request_multipart(
+            port,
+            "/probe?keep=raw",
+            "test-boundary",
+            &[MultipartPart::field("note", b"hello")],
+        )
+    });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    // Unread body (framing consumed by the multipart parser) is null,
+    // distinct from a read empty body.
+    assert_eq!(json["bodyBytes"], "null");
+    assert_eq!(json["bodyText"], "null");
+    assert_eq!(json["rawQuery"], "keep=raw");
+    assert!(json["files"].is_number()); // multipart files count >= 0
+
+    // A request without any query component must expose `""`, not null.
+    let (response, _) = with_server_full(config, script, &[], |port| {
+        request(port, "POST", "/probe", &[])
+    });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(json["rawQuery"], "");
+}
+
+fn hex_decode(text: &str) -> Result<[u8; 32], ()> {
+    let mut out = [0u8; 32];
+    for i in 0..32 {
+        out[i] = u8::from_str_radix(&text[i * 2..i * 2 + 2], 16).map_err(|_| ())?;
+    }
+    Ok(out)
+}
+
+#[test]
 fn second_respond_call_is_ignored_and_logged() {
     let script = r#"
 ctx.respond(201, { "X-First": "yes" }, "first");

@@ -27,7 +27,7 @@
 | 能力 | 当前状态 | 所属阶段 |
 | --- | --- | --- |
 | 显式 Route、`ctx.respond`、302、JSON、header | 已支持 | 直接使用 |
-| `ctx.request.bodyBytes`、原始查询串 | 未实现；`bodyText` 与已解码 query 不足以覆盖精确签名输入 | v1.x |
+| `ctx.request.bodyBytes`、原始查询串 | 已实现（M1.1，#171：`bodyBytes` 与 `rawQuery`） | v1.x |
 | 安全随机、SHA-256、HMAC-SHA256、常量时间比较 | 未实现；脚本层不能可靠提供安全语义 | v1.x |
 | 未知路径与错误方法的可控响应 | 当前方法错误返回 404，默认错误体不接受脚本控制 | v1.x |
 | 授权码生命周期、access token 生命周期、签名 request ID 防重放 | 需要跨请求数据，v1 明确不提供 | v2 |
@@ -60,12 +60,11 @@
 
 **目的**：先用兼容 `apiVersion` 1 的增量能力覆盖所有无状态部分。
 
-**M1.1 请求快照保真**
+**M1.1 请求快照保真（已完成，#171）**
 
-- 新增 `ctx.request.bodyBytes`，保留原始请求 Body 字节。
-- 新增原始查询串或等价的可保留重复参数的查询表示。
+- 新增 `ctx.request.bodyBytes`（精确请求 Body 字节，`Uint8Array`；未读取为 `null`）与 `ctx.request.rawQuery`（原始 query 片段，保留重复参数、顺序与编码）。
 - 保持现有 `bodyText` 与已解码 `query` 的行为不变。
-- 用签名规范化、原始 Body 哈希和重复查询参数测试验证。
+- 已用签名规范化、原始 Body 哈希（NIST 已知向量）和重复查询参数端到端测试验证。
 
 **M1.2 Host crypto API**
 

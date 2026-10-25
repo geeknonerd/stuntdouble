@@ -51,7 +51,7 @@
 
 | 分组 | API | 约束 |
 | --- | --- | --- |
-| 请求只读 | `ctx.request`: `method` / `path` / `params` / `query` / `headers` / `bodyText`（`bodyBytes` 移出 1.0，见 ADR 0016） | 只读；不暴露原始 socket |
+| 请求只读 | `ctx.request`: `method` / `path` / `params` / `query` / `rawQuery` / `headers` / `bodyText` / `bodyBytes`（M1.1，v1.x） | 只读；不暴露原始 socket |
 | 外部取数 | `ctx.http.get(url, opts)`（`opts` 仅 `timeout_ms`；`retries` / `backoff` 与 `ctx.http.request` 移出 1.0，见 ADR 0016） | 仅白名单 host；返回 `{status, headers, text(), bytes()}` |
 | 二进制透传 | `ctx.http.pipe(url, {status, headers})` | 于 T6 实现；上游 2xx 响应体直接流到客户端，不进脚本堆内存；默认透传上游 2xx 状态并转发 Range/206；不做字节级变换 |
 | 读文件 | `ctx.file.readText(p)` / `ctx.file.readBytes(p)` / `ctx.file.stream(p)` | 只读；路径相对静态文件目录解析；拒绝绝对路径与 `..`；v1 不提供脚本写文件能力（上传由宿主落盘） |
@@ -73,7 +73,7 @@
 | 第三方包 | 不支持 import / npm / pip | ADR 0003 |
 | 脚本写文件 | 不提供 `ctx.file.write`；上传由宿主落盘 | 本轮讨论 |
 | 上游自动重试 | 默认不重试；`opts.retries` 显式开启（v1.x 候选，见 ADR 0016） | [ADR 0005](adr/0005-upstream-failure-semantics.md) |
-| 请求二进制快照 | `ctx.request.bodyBytes` 不提供；非 UTF-8 用 `bodyText: null` 表达（v1.x 候选，见 ADR 0016） | [ADR 0016](adr/0016-v1-ctx-pending-capabilities-deferred.md) |
+| 请求二进制快照 | `ctx.request.bodyBytes` 提供精确请求 Body 字节（未读取为 `null`）；`rawQuery` 保留原始 query 片段（M1.1，v1.x） | [ADR 0016](adr/0016-v1-ctx-pending-capabilities-deferred.md) |
 | 上游任意方法 | `ctx.http.request` 不提供；先用 `ctx.http.get` / `ctx.http.pipe`（v1.x 候选，见 ADR 0016） | [ADR 0016](adr/0016-v1-ctx-pending-capabilities-deferred.md) |
 | 请求内暂存 | `ctx.local` 不提供（v2 候选，见 ADR 0016） | [ADR 0001](adr/0001-no-shared-state-in-v1.md)、[ADR 0016](adr/0016-v1-ctx-pending-capabilities-deferred.md) |
 | 脚本定时器 | `setTimeout` / `setInterval` 不提供（v2 候选，见 ADR 0016） | [ADR 0016](adr/0016-v1-ctx-pending-capabilities-deferred.md) |
@@ -88,7 +88,7 @@
 
 - 实际 MSRV：Rust 1.91（由 Boa 0.22 决定；clap 4.6 与 toml 1.x 要求 1.85）。策略是工具链跟随 stable、MSRV 取“安全门槛 + 依赖树”共同确定的实际最低值：不允许为压低 MSRV 保留未修复的 advisory 或未维护依赖。Python（RustPython）接入时需重新校准（见 [ADR 0015](adr/0015-python-runtime-deferred-to-v2.md)）。
 - Post-v1 路线：以 [OAuth authorization mock 场景](oauth-authorization-mock.md) 驱动 [Post-v1 开发路线](post-v1-roadmap.md)；v2 Shared state 的边界见 [ADR 0021](adr/0021-v2-shared-state.md)。
-- v1.x 候选（`apiVersion` 1 内增量）：`ctx.request.bodyBytes`、原始查询串、Host crypto API、Fallback Route（见 [ADR 0019](adr/0019-host-crypto-api.md)、[ADR 0020](adr/0020-fallback-route-and-method-mismatch.md)）、`ctx.http.get` 的 `retries` / `backoff`、`ctx.http.request`（见 [ADR 0016](adr/0016-v1-ctx-pending-capabilities-deferred.md)）。
+- v1.x 候选（`apiVersion` 1 内增量）：Fallback Route（见 [ADR 0020](adr/0020-fallback-route-and-method-mismatch.md)）、`ctx.http.get` 的 `retries` / `backoff`、`ctx.http.request`（见 [ADR 0016](adr/0016-v1-ctx-pending-capabilities-deferred.md)）。Host crypto API 与 `ctx.request.bodyBytes` / `rawQuery` 已落地（M1.1，#171；见 [ADR 0019](adr/0019-host-crypto-api.md)）。
 - v2 其他候选：Python 脚本运行时（[ADR 0015](adr/0015-python-runtime-deferred-to-v2.md)）、声明式响应序列、资源模型预设生成器、Admin API（模式 3）、内置 TLS、`ctx.local`、脚本定时器（均见 [ADR 0016](adr/0016-v1-ctx-pending-capabilities-deferred.md)）。
 - crates.io：v1.0.0 已按此落地——只做包名占位，未开自动化发布（保持 `publish = false` + `git_only = true`）；转正触发条件见 [ADR 0017](adr/0017-v1-release-readiness.md)。
 - 独立治理邮箱：v1.0.0 未设，继续用 GitHub 私密报告；转正触发条件见 [ADR 0017](adr/0017-v1-release-readiness.md)。
