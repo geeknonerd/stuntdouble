@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0](https://github.com/geeknonerd/stuntdouble/compare/v1.3.0...v1.4.0) - 2026-10-25
+
+### Added
+
+- *(sandbox)* expose rawQuery and bodyBytes in request snapshot ([#194](https://github.com/geeknonerd/stuntdouble/pull/194))
+
+### Other
+
+- *(release)* disable semver_check for unpublished binary workspace ([#197](https://github.com/geeknonerd/stuntdouble/pull/197))
+- *(deps)* bump sha2 to 0.11 and hmac to 0.13 ([#196](https://github.com/geeknonerd/stuntdouble/pull/196))
+- *(deps)* bump the actions group with 3 updates ([#193](https://github.com/geeknonerd/stuntdouble/pull/193))
+- *(deps)* bump ureq from 3.4.2 to 3.5.0 ([#192](https://github.com/geeknonerd/stuntdouble/pull/192))
+- *(deps)* bump tokio from 1.53.3 to 1.54.1 ([#189](https://github.com/geeknonerd/stuntdouble/pull/189))
+- *(deps)* bump debian from `7c7b2c9` to `7ff6ba3` ([#188](https://github.com/geeknonerd/stuntdouble/pull/188))
+- document host crypto API in contract and README indexes ([#187](https://github.com/geeknonerd/stuntdouble/pull/187))
+
 ### Added
 
 - add `ctx.request.bodyBytes` (exact request body as a `Uint8Array`, `null` when the body was not read) and `ctx.request.rawQuery` (raw query component preserving duplicate names, order, and percent-encoding) to the `apiVersion` 1 request snapshot ([#171](https://github.com/geeknonerd/stuntdouble/issues/171))
