@@ -2807,7 +2807,41 @@ mod tests {
             Vec::new(),
         );
         assert_eq!(empty.body_bytes.as_deref(), Some(b"".as_slice()));
+        // decodeBase64("") in the prelude yields an empty Uint8Array (length 0),
+        // which is the "read empty body" signal distinct from null.
         assert_eq!(empty.to_json()["bodyBytes"], "");
+    }
+
+    #[test]
+    fn raw_query_preserves_duplicates_order_and_encoding() {
+        let snapshot = RequestSnapshot::new(
+            &Method::GET,
+            "/demo",
+            HashMap::new(),
+            "a=1&a=2&b=%7B%7D&flag",
+            &HeaderMap::new(),
+            None,
+            Vec::new(),
+        );
+        assert_eq!(snapshot.raw_query, "a=1&a=2&b=%7B%7D&flag");
+        // Decoded map keeps last value for "a"; rawQuery keeps both.
+        assert_eq!(snapshot.query["a"], "2"); // last value wins in the decoded map
+        assert_eq!(snapshot.to_json()["rawQuery"], "a=1&a=2&b=%7B%7D&flag");
+    }
+
+    #[test]
+    fn no_query_is_empty_string_not_null() {
+        let snapshot = RequestSnapshot::new(
+            &Method::GET,
+            "/demo",
+            HashMap::new(),
+            "",
+            &HeaderMap::new(),
+            None,
+            Vec::new(),
+        );
+        assert_eq!(snapshot.raw_query, "");
+        assert_eq!(snapshot.to_json()["rawQuery"], "");
     }
 
     #[test]
