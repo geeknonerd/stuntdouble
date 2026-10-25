@@ -39,10 +39,13 @@
 | 日志 | `ctx.log.info` / `warn` / `error` | 已实现（T2） |
 | 环境变量 | `ctx.env` | 已实现（T2） |
 | 定时器 | `setTimeout` / `setInterval` | 已移出 1.0（v2 候选，见 ADR 0016） |
+| 匹配类别 | `ctx.match.kind` / `ctx.match.allowedMethods` | 已实现（#173） |
 
 ## 已实现的子集
 
 - `ctx.apiVersion` 为 `"1"`。
+- `ctx.match` 暴露当前请求相对于已配置 Route 的匹配类别：`kind` 是 `"route"` 时表示普通 Route 命中；`"not_found"` 表示可选 fallback Route 因没有任何 Route 匹配该路径而运行；`"method_not_allowed"` 预留给 Issue #174。本切片中 `allowedMethods` 为空，仅在以后的切片中为 `"method_not_allowed"` 填充。fallback 脚本看到 `"not_found"`，必须用状态 404 和缓冲 body 响应；任何其他状态或流式 body 都会 fail-closed 为 500 `script_error`。
+
 - `ctx.request` 是只读快照，含 `method`、`path`、`params`、`query`、`rawQuery`、`headers`、`bodyText`、`bodyBytes` 与 `files`。Header 名小写化；请求 body 不是合法 UTF-8 时 `bodyText` 为 `null`。已解析的 multipart 请求同样把 `bodyText` 暴露为 `null`，因为 framing 在脚本运行前已被消费。`query` 中的名与值都会做百分号解码。重复的 query 或 Header 名在快照中保留最后一个值。
   - `rawQuery` 是请求行中的原始 query 片段，按客户端发送的原样保留：重复参数名、顺序与百分号编码均不丢失；请求没有 query 时为 `""`。与 `query` 配合可对签名输入做规范化，同时不丢失重复参数。
   - `bodyBytes` 是精确的请求 body 字节，以 `Uint8Array` 提供，不做 UTF-8 转换，因此二进制、NUL 与非法 UTF-8 内容都能逐字节还原。body 未被读取时为 `null`：已解析的 multipart 请求的 framing 在脚本运行前已被消费。空 `Uint8Array` 表示已读取的空 body，与 `null` 可区分。

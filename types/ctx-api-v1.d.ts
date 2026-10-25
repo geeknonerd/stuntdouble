@@ -255,6 +255,8 @@ interface SdError extends Error {
 /** Host-injected global available in every Route script. */
 interface SdContext {
   readonly apiVersion: "1";
+  /** The match category for this request and the allowed methods, if any. */
+  readonly match: SdMatch;
   readonly request: SdRequest;
   readonly http: SdHttp;
   readonly file: SdFile;
@@ -277,3 +279,13 @@ interface SdContext {
 
 /** Host-injected global available in every Route script. */
 declare const ctx: SdContext;
+
+/** The match category of a request, relative to the configured Routes. */
+type SdMatchKind = "route" | "not_found" | "method_not_allowed";
+
+/** The match category for a request and the allowed methods, if any. */
+interface SdMatch {
+  readonly kind: SdMatchKind;
+  /** Empty unless `kind` is `"method_not_allowed"`; then uppercase, deduplicated methods in first-declaration order. */
+  readonly allowedMethods: readonly string[];
+}

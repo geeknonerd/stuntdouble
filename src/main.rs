@@ -191,4 +191,12 @@ fn report(config: &config::Config) {
         let script = route.script.display();
         eprintln!("  {name}: {} {} -> {}", route.method, route.path, script);
     }
+    if let Some(fallback) = &config.fallback {
+        let name = fallback.name.as_deref().unwrap_or("<unnamed>");
+        eprintln!(
+            "fallback: {} not_found -> {}",
+            name,
+            fallback.script.display()
+        );
+    }
 }

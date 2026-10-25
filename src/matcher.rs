@@ -27,6 +27,18 @@ pub fn match_route(routes: &[Route], method: &str, path: &str) -> Option<Match> 
     None
 }
 
+/// Returns true if any route's path matches `path`, ignoring method.
+///
+/// Used to distinguish an unknown path (`not_found`) from a method mismatch
+/// on an existing path (`method_not_allowed`, handled by a later slice).
+#[must_use]
+pub fn has_path_match(routes: &[Route], path: &str) -> bool {
+    let segments = split(path);
+    routes
+        .iter()
+        .any(|route| match_segments(&route.path, &segments).is_some())
+}
+
 fn split(value: &str) -> Vec<&str> {
     value
         .split('/')
@@ -147,5 +159,21 @@ mod tests {
         let routes = vec![route("GET", "/")];
         assert!(match_route(&routes, "GET", "/").is_some());
         assert!(match_route(&routes, "GET", "").is_some());
+    }
+
+    #[test]
+    fn path_match_exists_for_any_method() {
+        let routes = vec![route("GET", "/x"), route("POST", "/y/:id")];
+        assert!(has_path_match(&routes, "/x"));
+        assert!(has_path_match(&routes, "/y/7"));
+        assert!(!has_path_match(&routes, "/z"));
+    }
+
+    #[test]
+    fn path_match_ignores_method() {
+        let routes = vec![route("GET", "/x")];
+        assert!(has_path_match(&routes, "/x"));
+        assert!(has_path_match(&routes, "/x"));
+        assert!(!has_path_match(&routes, "/other"));
     }
 }

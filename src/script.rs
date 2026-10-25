@@ -86,12 +86,16 @@ pub struct RequestSnapshot {
     /// Exact body bytes; `None` when the body was not read (multipart).
     pub body_bytes: Option<Vec<u8>>,
     pub files: Vec<files::UploadFileMeta>,
+    /// `ctx.match.kind` for this request: `"route"` for a normal Route match,
+    /// `"not_found"` for a fallback script on an unknown path.
+    pub match_kind: &'static str,
 }
 
 impl RequestSnapshot {
     /// Build the script-visible snapshot. Header names are lowercased; a body
     /// that is not UTF-8 becomes `null` instead of a lossy string.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         method: &Method,
         path: &str,
@@ -100,6 +104,7 @@ impl RequestSnapshot {
         headers: &HeaderMap,
         body: Option<&[u8]>,
         files: Vec<files::UploadFileMeta>,
+        match_kind: &'static str,
     ) -> Self {
         Self {
             method: method.as_str().to_ascii_uppercase(),
@@ -119,6 +124,7 @@ impl RequestSnapshot {
             body_text: body.and_then(|body| std::str::from_utf8(body).map(str::to_string).ok()),
             body_bytes: body.map(ToOwned::to_owned),
             files,
+            match_kind,
         }
     }
 
@@ -295,7 +301,7 @@ impl Outcome {
 // The prelude is the only writer of `__sd`; `ctx` is a frozen view over it.
 const PRELUDE: &str = r#"
 var __sd = { response: null, logs: [] };
-var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_upstream_marker, __sd_file, __sd_upload, __sd_state, __sd_crypto, __sd_intrinsics) {
+var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_upstream_marker, __sd_match, __sd_file, __sd_upload, __sd_state, __sd_crypto, __sd_intrinsics) {
   "use strict";
   var envelope = __sd;
   var __sd_json_stringify = __sd_intrinsics.json_stringify;
@@ -900,6 +906,7 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
   return Object.freeze({
     apiVersion: "__SD_API_VERSION__",
     request: requestSnapshot(__sd_request),
+    match: Object.freeze(__sd_match),
     env: Object.freeze(__sd_env),
     http: Object.freeze({ get: httpGet, pipe: httpPipe }),
     state: sharedState,
@@ -940,7 +947,7 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
       return true;
     }
   });
-})(__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_upstream_marker, __sd_file, __sd_upload, __sd_state, __sd_crypto, {
+})(__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_upstream_marker, __sd_match, __sd_file, __sd_upload, __sd_state, __sd_crypto, {
   json_stringify: JSON.stringify,
   json_parse: JSON.parse,
   get_own_property_names: Object.getOwnPropertyNames,
@@ -960,6 +967,7 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
 });
 delete globalThis.__sd_request;
 delete globalThis.__sd_env;
+delete globalThis.__sd_match;
 delete globalThis.__sd_upstream_marker;
 delete globalThis.__sd_http_get;
 delete globalThis.__sd_http_pipe;
@@ -1010,8 +1018,14 @@ impl BridgeName {
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ParentMessage {
-    Job { script: String, request: Json },
-    HostResult { result: Json },
+    Job {
+        script: String,
+        request: Json,
+        match_kind: String,
+    },
+    HostResult {
+        result: Json,
+    },
 }
 
 /// Worker-to-parent JSON Lines messages.
@@ -1411,7 +1425,7 @@ fn register_worker_bridges(context: &mut Context) -> Result<(), Error> {
 
 /// Evaluate one script inside the worker process. Every host function is
 /// forwarded to the parent; upstream, file, and upload policy stay there.
-fn evaluate_in_worker(source: &str, request: &Json) -> Result<Json, Error> {
+fn evaluate_in_worker(source: &str, request: &Json, match_kind: &str) -> Result<Json, Error> {
     let upstream_marker = upstream_marker();
     let prelude = prelude();
     let mut context = Context::default();
@@ -1436,6 +1450,15 @@ fn evaluate_in_worker(source: &str, request: &Json) -> Result<Json, Error> {
             .map_err(|error| Error::Failed(error.to_string()))?;
         context
             .register_global_property(js_string!("__sd_upstream_marker"), marker, Attribute::all())
+            .map_err(|error| Error::Failed(error.to_string()))?;
+        let match_json = json!({
+            "kind": match_kind,
+            "allowedMethods": [],
+        });
+        let match_value = JsValue::from_json(&match_json, &mut context)
+            .map_err(|error| Error::Failed(error.to_string()))?;
+        context
+            .register_global_property(js_string!("__sd_match"), match_value, Attribute::all())
             .map_err(|error| Error::Failed(error.to_string()))?;
         register_worker_bridges(&mut context)?;
         let evaluated = (|| -> Result<String, JsError> {
@@ -2290,6 +2313,7 @@ pub(crate) async fn execute_with_state(
     let job = ParentMessage::Job {
         script: source,
         request: request.to_json(),
+        match_kind: request.match_kind.to_string(),
     };
     let mut outcome = run_worker(
         job,
@@ -2387,7 +2411,12 @@ fn worker_main(memory_limit_mb: u64) -> std::io::Result<()> {
     };
     let message: ParentMessage = serde_json::from_str(&line)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    let ParentMessage::Job { script, request } = message else {
+    let ParentMessage::Job {
+        script,
+        request,
+        match_kind,
+    } = message
+    else {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "expected a job line",
@@ -2399,7 +2428,7 @@ fn worker_main(memory_limit_mb: u64) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("script-worker-eval".into())
         .stack_size(SCRIPT_THREAD_STACK_SIZE)
-        .spawn(move || run_job(&script, &request))
+        .spawn(move || run_job(&script, &request, &match_kind))
         .map_err(|error| {
             std::io::Error::new(
                 error.kind(),
@@ -2410,8 +2439,8 @@ fn worker_main(memory_limit_mb: u64) -> std::io::Result<()> {
         .map_err(|_| std::io::Error::other("script evaluation thread panicked"))?
 }
 
-fn run_job(script: &str, request: &Json) -> std::io::Result<()> {
-    let message = match evaluate_in_worker(script, request) {
+fn run_job(script: &str, request: &Json, match_kind: &str) -> std::io::Result<()> {
+    let message = match evaluate_in_worker(script, request, match_kind) {
         Ok(result) => WorkerMessage::FinalResult(FinalResult::Success(result)),
         Err(Error::UpstreamUnreachable { message, kind }) => {
             let Some(kind) = FinalErrorKind::from_upstream(kind) else {
@@ -2753,6 +2782,7 @@ mod tests {
             &headers,
             Some(b"body"),
             Vec::new(),
+            "route",
         );
         assert_eq!(snapshot.method, "POST");
         assert_eq!(snapshot.params["group"], "a");
@@ -2776,6 +2806,7 @@ mod tests {
             &HeaderMap::new(),
             Some(&[0xFF, 0xFE]),
             Vec::new(),
+            "route",
         );
         assert!(snapshot.body_text.is_none());
         // The exact bytes survive even when they are not valid UTF-8.
@@ -2793,6 +2824,7 @@ mod tests {
             &HeaderMap::new(),
             None,
             Vec::new(),
+            "route",
         );
         assert!(unread.body_bytes.is_none());
         assert_eq!(unread.to_json()["bodyBytes"], Json::Null);
@@ -2805,6 +2837,7 @@ mod tests {
             &HeaderMap::new(),
             Some(b""),
             Vec::new(),
+            "route",
         );
         assert_eq!(empty.body_bytes.as_deref(), Some(b"".as_slice()));
         // decodeBase64("") in the prelude yields an empty Uint8Array (length 0),
@@ -2822,6 +2855,7 @@ mod tests {
             &HeaderMap::new(),
             None,
             Vec::new(),
+            "route",
         );
         assert_eq!(snapshot.raw_query, "a=1&a=2&b=%7B%7D&flag");
         // Decoded map keeps last value for "a"; rawQuery keeps both.
@@ -2839,6 +2873,7 @@ mod tests {
             &HeaderMap::new(),
             None,
             Vec::new(),
+            "route",
         );
         assert_eq!(snapshot.raw_query, "");
         assert_eq!(snapshot.to_json()["rawQuery"], "");

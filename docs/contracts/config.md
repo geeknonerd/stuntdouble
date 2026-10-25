@@ -35,6 +35,7 @@ Every valid configuration is a TOML table. Unknown keys, unknown `config_version
 | `upstream.allow_hosts` | no | array of strings | `[]` | URL host syntax; entries carry no scheme or port, and the default denies every host |
 | `upstream.timeout_ms` | no | integer | `15000` | positive integer (0 is rejected) |
 | `routes` | yes | array of tables | — | must contain at least one Route table; `routes = []` is invalid |
+| `fallback` | no | table | — | only `{name, script}` is accepted; an optional fallback script that runs for paths no Route matches |
 
 Domains in `upstream.allow_hosts` are lowercased/punycoded. IPv6 literals are written in brackets (`"[::1]"`) and normalized to their unbracketed form at load time. Hosts are matched case-insensitively without the port, and IP literals and `localhost` must be listed explicitly.
 
@@ -45,8 +46,15 @@ Domains in `upstream.allow_hosts` are lowercased/punycoded. IPv6 literals are wr
 | Field | Required | Type | Validation |
 | --- | --- | --- | --- |
 | `name` | no | string | non-empty; used in logs and diagnostics, otherwise the `path` is used |
-| `method` | yes | string | one of `GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `HEAD`, `OPTIONS` (case-insensitive, normalized to uppercase) |
-| `path` | yes | string | absolute path starting with `/`; `:param` segments are captured by name |
+| `method` | yes | string | one of GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS (case-insensitive, normalized to uppercase) |
+| `path` | yes | string | absolute path starting with /; `:param` segments are captured by name |
+| `script` | yes | string | file name ending in `.js`, `.mjs`, or `.cjs`; relative paths resolve against the configuration file's parent, absolute paths are accepted |
+
+### Fallback schema
+
+| Field | Required | Type | Validation |
+| --- | --- | --- | --- |
+| `name` | no | string | non-empty; used in logs and diagnostics; omitted means the fixed label `fallback` |
 | `script` | yes | string | file name ending in `.js`, `.mjs`, or `.cjs`; relative paths resolve against the configuration file's parent, absolute paths are accepted |
 
 `validate` checks the `script` extension but does not read the script file. The file is loaded per request; if it is missing or cannot be read when a Route is matched, the request returns 500 `script_error`.
@@ -77,11 +85,15 @@ name = "manifest"         # optional
 method = "GET"            # one of GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS
 path = "/demo/..."        # path starting with '/', :param segments supported
 script = "scripts/x.js"   # .js/.mjs/.cjs; relative or absolute
+
+[fallback]              # optional table; runs when no Route matches the path at all
+name = "not-found"        # optional
+script = "scripts/404.js" # .js/.mjs/.cjs; relative or absolute
 ```
 
 ## Route execution model
 
-Routes follow the single pipeline: `match → source → transform → response`. This slice implements Match plus the script Transform: a matched Route runs its JavaScript, and the script produces the Response through `ctx.respond` or `ctx.http.pipe`. Unmatched requests return 404 `not_found`; a script that throws, times out, fails to load, or cannot get a script worker slot returns 500 `script_error`; a script that finishes without producing a Response returns 500 `script_no_response`. `ctx.http.get` treats upstream responses (including 4xx/5xx) as data; `ctx.http.pipe` streams a 2xx upstream Response to the client and raises a catchable `upstream_http_error` for a final non-2xx answer; an uncaught upstream transport failure returns 502 `upstream_unreachable`. Local static-file reads and multipart uploads are implemented. A matched `multipart/form-data` request is parsed before the script runs into a request-scoped temporary directory and exposed as `ctx.request.files`. Every multipart part must carry a `name` attribute; a part without one is malformed. Malformed multipart answers 400 `invalid_multipart`; a body whose file and form-field data exceeds `files.upload_max_bytes` answers 413 `upload_too_large`. The entire multipart body stream, including framing, is bounded by `files.upload_max_bytes` plus a 1 MiB framing allowance. The two multipart failures use the project JSON error envelope with a `request_id`; a non-multipart body over the existing 2 MiB bound keeps its bounded 413 response without a JSON error class.
+Routes follow the single pipeline: `match → source → transform → response`. This slice implements Match plus the script Transform: a matched Route runs its JavaScript, and the script produces the Response through `ctx.respond` or `ctx.http.pipe`. Unmatched requests return 404 `not_found`. When a `[fallback]` table is configured, an unknown path runs the fallback script with `ctx.match.kind` set to `"not_found"`; the fallback never reads the request body and must respond with status 404 and a buffered body, otherwise the host fails closed with 500 `script_error`. A script that throws, times out, fails to load, or cannot get a script worker slot returns 500 `script_error`; a script that finishes without producing a Response returns 500 `script_no_response`. `ctx.http.get` treats upstream responses (including 4xx/5xx) as data; `ctx.http.pipe` streams a 2xx upstream Response to the client and raises a catchable `upstream_http_error` for a final non-2xx answer; an uncaught upstream transport failure returns 502 `upstream_unreachable`. Local static-file reads and multipart uploads are implemented. A matched `multipart/form-data` request is parsed before the script runs into a request-scoped temporary directory and exposed as `ctx.request.files`. Every multipart part must carry a `name` attribute; a part without one is malformed. Malformed multipart answers 400 `invalid_multipart`; a body whose file and form-field data exceeds `files.upload_max_bytes` answers 413 `upload_too_large`. The entire multipart body stream, including framing, is bounded by `files.upload_max_bytes` plus a 1 MiB framing allowance. The two multipart failures use the project JSON error envelope with a `request_id`; a non-multipart body over the existing 2 MiB bound keeps its bounded 413 response without a JSON error class.
 
 ### Matching semantics
 
