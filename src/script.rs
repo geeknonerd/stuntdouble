@@ -36,6 +36,7 @@ use crate::files;
 use crate::matcher::percent_decode;
 use crate::state::{self, SharedState};
 use crate::upstream;
+use base64::Engine as _;
 
 /// Value of `ctx.apiVersion`; see docs/contracts/ctx-api.md.
 pub const API_VERSION: &str = "1";
@@ -77,8 +78,13 @@ pub struct RequestSnapshot {
     pub path: String,
     pub params: HashMap<String, String>,
     pub query: BTreeMap<String, String>,
+    /// Raw query component exactly as sent: duplicate names, order and
+    /// percent-encoding preserved; `""` when the request line has none.
+    pub raw_query: String,
     pub headers: Vec<(String, String)>,
     pub body_text: Option<String>,
+    /// Exact body bytes; `None` when the body was not read (multipart).
+    pub body_bytes: Option<Vec<u8>>,
     pub files: Vec<files::UploadFileMeta>,
 }
 
@@ -100,6 +106,7 @@ impl RequestSnapshot {
             path: path.to_string(),
             params,
             query: parse_query(raw_query),
+            raw_query: raw_query.to_string(),
             headers: headers
                 .iter()
                 .map(|(name, value)| {
@@ -110,6 +117,7 @@ impl RequestSnapshot {
                 })
                 .collect(),
             body_text: body.and_then(|body| std::str::from_utf8(body).map(str::to_string).ok()),
+            body_bytes: body.map(ToOwned::to_owned),
             files,
         }
     }
@@ -140,11 +148,19 @@ impl RequestSnapshot {
             "path": self.path,
             "params": params,
             "query": query,
+            "rawQuery": self.raw_query,
             "headers": headers,
             "bodyText": self.body_text,
+            "bodyBytes": self.body_bytes.as_ref().map(|bytes| bytes_base64(bytes)),
             "files": self.files.iter().map(files::UploadFileMeta::to_json).collect::<Vec<_>>(),
         })
     }
+}
+
+/// Base64 of the exact request body bytes; the prelude's `decodeBase64`
+/// already turns them into a lossless `Uint8Array` on the script side.
+fn bytes_base64(bytes: &[u8]) -> Json {
+    Json::String(base64::prelude::BASE64_STANDARD.encode(bytes))
 }
 
 /// Body of a script-produced response.
@@ -388,7 +404,8 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
   }
   function freezeShallow(value) {
     Object.keys(value).forEach(function (key) {
-      if (value[key] && typeof value[key] === "object") { Object.freeze(value[key]); }
+      var entry = value[key];
+      if (entry && typeof entry === "object" && !(entry instanceof Uint8Array)) { Object.freeze(entry); }
     });
     return Object.freeze(value);
   }
@@ -833,6 +850,9 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
     var rawFiles = raw.files || [];
     for (var i = 0; i < rawFiles.length; i++) { mapped.push(uploadFile(rawFiles[i], i)); }
     raw.files = mapped;
+    if (typeof raw.bodyBytes === "string") {
+      raw.bodyBytes = decodeBase64(raw.bodyBytes);
+    }
     return freezeShallow(raw);
   }
   var FILE_FRAMING_HEADERS = ["content-length", "content-range", "accept-ranges"];
@@ -2738,6 +2758,12 @@ mod tests {
         assert_eq!(snapshot.params["group"], "a");
         assert_eq!(snapshot.headers[0].0, "x-request-id");
         assert_eq!(snapshot.body_text.as_deref(), Some("body"));
+        assert_eq!(snapshot.raw_query, "x=1");
+        assert_eq!(snapshot.body_bytes.as_deref(), Some(b"body".as_slice()));
+        assert_eq!(
+            snapshot.to_json()["bodyBytes"],
+            base64::prelude::BASE64_STANDARD.encode(b"body")
+        );
     }
 
     #[test]
@@ -2752,6 +2778,70 @@ mod tests {
             Vec::new(),
         );
         assert!(snapshot.body_text.is_none());
+        // The exact bytes survive even when they are not valid UTF-8.
+        assert_eq!(snapshot.body_bytes.as_deref(), Some(&[0xFF, 0xFE][..]));
+        assert_eq!(snapshot.to_json()["bodyBytes"], "//4=");
+    }
+
+    #[test]
+    fn absent_body_is_distinguished_from_empty() {
+        let unread = RequestSnapshot::new(
+            &Method::POST,
+            "/demo/1",
+            HashMap::new(),
+            "",
+            &HeaderMap::new(),
+            None,
+            Vec::new(),
+        );
+        assert!(unread.body_bytes.is_none());
+        assert_eq!(unread.to_json()["bodyBytes"], Json::Null);
+
+        let empty = RequestSnapshot::new(
+            &Method::POST,
+            "/demo/1",
+            HashMap::new(),
+            "",
+            &HeaderMap::new(),
+            Some(b""),
+            Vec::new(),
+        );
+        assert_eq!(empty.body_bytes.as_deref(), Some(b"".as_slice()));
+        // decodeBase64("") in the prelude yields an empty Uint8Array (length 0),
+        // which is the "read empty body" signal distinct from null.
+        assert_eq!(empty.to_json()["bodyBytes"], "");
+    }
+
+    #[test]
+    fn raw_query_preserves_duplicates_order_and_encoding() {
+        let snapshot = RequestSnapshot::new(
+            &Method::GET,
+            "/demo",
+            HashMap::new(),
+            "a=1&a=2&b=%7B%7D&flag",
+            &HeaderMap::new(),
+            None,
+            Vec::new(),
+        );
+        assert_eq!(snapshot.raw_query, "a=1&a=2&b=%7B%7D&flag");
+        // Decoded map keeps last value for "a"; rawQuery keeps both.
+        assert_eq!(snapshot.query["a"], "2"); // last value wins in the decoded map
+        assert_eq!(snapshot.to_json()["rawQuery"], "a=1&a=2&b=%7B%7D&flag");
+    }
+
+    #[test]
+    fn no_query_is_empty_string_not_null() {
+        let snapshot = RequestSnapshot::new(
+            &Method::GET,
+            "/demo",
+            HashMap::new(),
+            "",
+            &HeaderMap::new(),
+            None,
+            Vec::new(),
+        );
+        assert_eq!(snapshot.raw_query, "");
+        assert_eq!(snapshot.to_json()["rawQuery"], "");
     }
 
     #[test]

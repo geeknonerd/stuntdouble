@@ -22,8 +22,8 @@ Within one `apiVersion`:
 | Group | API | Status |
 | --- | --- | --- |
 | Request snapshot | `ctx.request.method` / `path` / `params` / `query` / `headers` / `bodyText` | implemented (T2) |
+| Request snapshot | `ctx.request.rawQuery` / `bodyBytes` | implemented (M1.1, v1.x) |
 | Request snapshot | `ctx.request.files` | implemented (T12) |
-| Request snapshot | `ctx.request.bodyBytes` | deferred out of 1.0 (v1.x candidate, see ADR 0016) |
 | Upstream HTTP | `ctx.http.get` | implemented (T4) |
 | Upstream HTTP | `ctx.http.get` `opts.retries` / `backoff` | deferred out of 1.0 (v1.x candidate, see ADR 0016) |
 | Upstream HTTP | `ctx.http.request` | deferred out of 1.0 (v1.x candidate, see ADR 0016) |
@@ -40,7 +40,9 @@ Within one `apiVersion`:
 ## Implemented subset
 
 - `ctx.apiVersion` is `"1"`.
-- `ctx.request` is a read-only snapshot with `method`, `path`, `params`, `query`, `headers`, `bodyText`, and `files`. Header names are lowercased; `bodyText` is `null` when the request body is not valid UTF-8. A parsed multipart request also exposes `bodyText` as `null`, because the framing is consumed before the script runs. Query names and values are percent-decoded. A repeated query or header name keeps the last value in the snapshot.
+- `ctx.request` is a read-only snapshot with `method`, `path`, `params`, `query`, `rawQuery`, `headers`, `bodyText`, `bodyBytes`, and `files`. Header names are lowercased; `bodyText` is `null` when the request body is not valid UTF-8. A parsed multipart request also exposes `bodyText` as `null`, because the framing is consumed before the script runs. Query names and values in `query` are percent-decoded. A repeated query or header name keeps the last value in the snapshot.
+  - `rawQuery` is the raw query component of the request line, exactly as sent: duplicate names, order, and percent-encoding are preserved; it is `""` when the request has no query. Combine it with `query` to canonicalize signature inputs without losing repeated parameters.
+  - `bodyBytes` is the exact request body as a `Uint8Array`, with no UTF-8 conversion, so binary, NUL, and invalid-UTF-8 bodies stay byte-accurate. It is `null` when the body was not read: for a parsed multipart request the framing is consumed before the script runs. An empty `Uint8Array` means a read empty body; it is distinct from `null`.
 - `ctx.respond(status, headers, body)` accepts a status in `[100, 599]`, headers as an object or `[name, value]` pairs, and a body that is a string, byte array, `Uint8Array`, `ArrayBuffer`, or a `ctx.file.stream` / `ctx.request.files[].stream()` handle. The first call wins and returns `true`; later calls are ignored, return `false`, and produce a server-side warning. A byte array must contain integers in `[0, 255]`. Header names and values are validated when the call is made; malformed pairs raise a catchable `script_error` before a Response is recorded and are never silently dropped.
 - `ctx.http.get(url, opts)` performs an allowlisted upstream GET and returns `{status, headers, text(), bytes()}`.
   - `url` must be an absolute `http` or `https` URL whose host matches `upstream.allow_hosts` case-insensitively; the port is not part of the match, and IP literals and `localhost` require an explicit entry.
@@ -104,7 +106,6 @@ Within one `apiVersion`:
 
 The following capabilities are deferred out of 1.0 by [ADR 0016](../../plans/adr/0016-v1-ctx-pending-capabilities-deferred.md) and are not implemented. They are intentionally absent from `ctx` and from `types/ctx-api-v1.d.ts`; calling an absent member is an ordinary script error and maps to 500 `script_error`.
 
-- `ctx.request.bodyBytes`
 - `ctx.http.request` and `ctx.http.get` retry/backoff options
 - `ctx.local`
 - `setTimeout` and `setInterval`
