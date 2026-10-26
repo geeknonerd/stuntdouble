@@ -688,7 +688,11 @@ fn request_chunked_bytes(
     }
     let _ = stream.write_all(b"0\r\n\r\n");
     let _ = stream.flush();
-    read_response(&mut stream)
+    // The server answers 400/413 without draining a chunked body it never
+    // asked for, so the close can race the client write and arrive as a
+    // macOS RST (os error 54). Read by Content-Length instead of waiting for
+    // EOF, the same tolerance `request_partial_body_lenient` uses.
+    read_response_until_complete(&mut stream)
 }
 
 fn request_multipart_chunked(
