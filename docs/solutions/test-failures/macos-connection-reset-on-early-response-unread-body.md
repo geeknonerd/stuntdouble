@@ -43,7 +43,7 @@ tags: [macos, connection-reset, econnreset, broken-pipe, tcp-rst, early-response
 1. **请求头正常写入并断言**：`stream.write_all(head.as_bytes()).expect("write head");` 确保请求头顺利发出。
 2. **请求体写入忽略错误**：`let _ = stream.write_all(partial);`。因为服务端不读 Body 并提前完成响应关闭 socket，写入可能因竞争失败被重置，忽略此处的写入错误。
 3. **继续读取并定界响应**：调用已有的 `read_response_until_complete(&mut stream)`。该函数按 `Content-Length` 解析完整响应而无需等待 EOF，即使连接被重置或关闭，只要接收缓冲已有完整的 HTTP 头和响应体，即可成功完成断言。
-4. **精确断言 Fallback 语义**：在 `fallback_oversized_body_is_not_read_and_answers_404` 中使用 5MB 大包调用 `request_partial_body_lenient`，断言状态码为 404，验证服务端在不读 Body 的前提下提前关闭且正确响应。
+4. **精确断言 Fallback 语义**：在 `fallback_oversized_body_still_answers_404` 中使用 5MB 大包调用 `request_partial_body_lenient`，断言状态码为 404，验证服务端在不读 Body 的前提下提前关闭且正确响应。
 
 ## 为什么这样可行
 
@@ -61,6 +61,7 @@ tags: [macos, connection-reset, econnreset, broken-pipe, tcp-rst, early-response
 
 - GitHub issue #173：Scriptable fallback route for unknown paths
 - PR #198：`feat(config): add scriptable fallback route for unknown paths`
-- 关联测试代码：`tests/cli.rs:509-528`（`request_partial_body_lenient` 实现），`tests/cli.rs:7273-7281`（`fallback_oversized_body_is_not_read_and_answers_404`）
+- PR #200：`docs: document fallback contract and align script error semantics`
+- 关联测试代码：`tests/cli.rs:509-528`（`request_partial_body_lenient` 实现），`tests/cli.rs:7245`（`fallback_oversized_body_still_answers_404`）
 - 类似套接字与异步时序学习：`docs/solutions/test-failures/hold-upload-temp-dir-with-unfinished-request-body.md`
 - 请求体截止与读取边界：`docs/solutions/conventions/request-read-deadline-at-the-connection-layer.md`

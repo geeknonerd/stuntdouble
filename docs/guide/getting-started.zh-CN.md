@@ -125,11 +125,33 @@ if (!file) {
 
 `text()` 严格按 UTF-8 解码，`text()` 与 `bytes()` 上限为 8 MiB。`stream()` 不限大小、不透明、只能消费一次，且仅可作为同一请求内 `ctx.respond` 的 body；它遵循与 `ctx.file.stream` 相同的 Range 与宿主 framing 规则。上传存放在请求级临时存储中，请求结束或流结束时清理——精确形状见 [`ctx` API 契约](../contracts/ctx-api.zh-CN.md) 与[配置契约](../contracts/config.zh-CN.md)。
 
+## 自定义未命中路径（fallback 路由）
+
+默认情况下，路径未匹配任何已配置 Route 的请求会收到引擎生成的 404 `not_found` JSON 响应。若需返回自定义 header 或定制的 JSON 错误体，可在 `stuntdouble.toml` 中配置可选的 `[fallback]` 表：
+
+```toml
+[fallback]
+name = "not-found"
+script = "scripts/404.js"
+```
+
+fallback 脚本会收到 `ctx.match.kind = "not_found"`。它不读取也不等待请求体，且必须以 HTTP 状态码 404 和缓冲 body 响应：
+
+```js
+ctx.respond(404, { "Content-Type": "application/json" }, JSON.stringify({
+  error: "not_found",
+  path: ctx.request.path
+}));
+```
+
+若 fallback 脚本返回非 404 状态码、尝试流式响应或抛出未捕获异常，服务端会 fail-closed 返回 500 `script_error`。路径匹配某条已配置 Route 但方法不匹配的请求在本切片中仍返回引擎生成的 404。
+
 ## 出错时怎么判断
+
 
 | 你看到的 | 含义 |
 | --- | --- |
-| 404 `not_found` | 没有 Route 匹配该 method 与 path |
+| 404 `not_found` | 没有 Route 匹配该 method 与 path（或由自定义 `[fallback]` 脚本生成） |
 | 500 `script_error` | 脚本抛错、超时、加载失败或拿不到 worker 槽位；堆栈只留在服务端日志 |
 | 500 `script_no_response` | 脚本结束却没有调用 `ctx.respond` |
 | 502 `upstream_unreachable` | 未捕获的传输层失败（DNS、连接、TLS 或超时） |

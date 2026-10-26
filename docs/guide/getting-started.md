@@ -123,11 +123,33 @@ if (!file) {
 
 `text()` decodes strict UTF-8, and `text()`/`bytes()` are capped at 8 MiB. `stream()` is uncapped, opaque, single-consumption, and valid only as the `ctx.respond` body in the same request; it follows the same Range and host-owned framing rules as `ctx.file.stream`. Uploads use request-scoped temporary storage and are removed when the request ends or the stream finishes — see the [`ctx` API contract](../contracts/ctx-api.md) and [configuration contract](../contracts/config.md) for exact shapes.
 
+## Customizing unknown paths (fallback route)
+
+By default, any request whose path does not match a configured Route receives an engine-generated 404 `not_found` JSON response. To return custom headers or a tailored JSON error body, configure an optional `[fallback]` table in `stuntdouble.toml`:
+
+```toml
+[fallback]
+name = "not-found"
+script = "scripts/404.js"
+```
+
+The fallback script receives `ctx.match.kind = "not_found"`. It never reads or waits for the request body, and it must respond with HTTP status 404 and a buffered body:
+
+```js
+ctx.respond(404, { "Content-Type": "application/json" }, JSON.stringify({
+  error: "not_found",
+  path: ctx.request.path
+}));
+```
+
+If the fallback script returns a non-404 status, attempts a streamed response, or throws an unhandled error, the server fails closed with 500 `script_error`. Requests whose path matches a configured Route but whose method does not continue to return the engine 404 in this slice.
+
 ## When something fails
+
 
 | You see | Meaning |
 | --- | --- |
-| 404 `not_found` | no route matched the method and path |
+| 404 `not_found` | no route matched the method and path (or produced by a custom `[fallback]` script) |
 | 500 `script_error` | the script threw, timed out, failed to load, or could not get a worker slot; the stack stays in the server log |
 | 500 `script_no_response` | the script finished without calling `ctx.respond` |
 | 502 `upstream_unreachable` | an uncaught transport failure (DNS, connection, TLS, or timeout) |
