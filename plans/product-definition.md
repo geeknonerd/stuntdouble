@@ -88,7 +88,7 @@
 
 - 实际 MSRV：Rust 1.91（由 Boa 0.22 决定；clap 4.6 与 toml 1.x 要求 1.85）。策略是工具链跟随 stable、MSRV 取“安全门槛 + 依赖树”共同确定的实际最低值：不允许为压低 MSRV 保留未修复的 advisory 或未维护依赖。Python（RustPython）接入时需重新校准（见 [ADR 0015](adr/0015-python-runtime-deferred-to-v2.md)）。
 - Post-v1 路线：以 [OAuth authorization mock 场景](oauth-authorization-mock.md) 驱动 [Post-v1 开发路线](post-v1-roadmap.md)；v2 Shared state 的边界见 [ADR 0021](adr/0021-v2-shared-state.md)。
-- v1.x 候选（`apiVersion` 1 内增量）：Fallback Route（见 [ADR 0020](adr/0020-fallback-route-and-method-mismatch.md)）、`ctx.http.get` 的 `retries` / `backoff`、`ctx.http.request`（见 [ADR 0016](adr/0016-v1-ctx-pending-capabilities-deferred.md)）。Host crypto API 与 `ctx.request.bodyBytes` / `rawQuery` 已落地（M1.1，#171；见 [ADR 0019](adr/0019-host-crypto-api.md)）。
+- v1.x 增量与候选（`apiVersion` 1 内）：Host crypto API 与 `ctx.request.bodyBytes` / `rawQuery` 已落地（M1.1，#171；见 [ADR 0019](adr/0019-host-crypto-api.md)）；未知路径 Fallback Route 已落地（M1.3，#173；见 [ADR 0020](adr/0020-fallback-route-and-method-mismatch.md)），方法不匹配 405 与 `Allow` 留待 #174；`ctx.http.get` 的 `retries` / `backoff`、`ctx.http.request` 仍为候选（见 [ADR 0016](adr/0016-v1-ctx-pending-capabilities-deferred.md)）。
 - v2 其他候选：Python 脚本运行时（[ADR 0015](adr/0015-python-runtime-deferred-to-v2.md)）、声明式响应序列、资源模型预设生成器、Admin API（模式 3）、内置 TLS、`ctx.local`、脚本定时器（均见 [ADR 0016](adr/0016-v1-ctx-pending-capabilities-deferred.md)）。
 - crates.io：v1.0.0 已按此落地——只做包名占位，未开自动化发布（保持 `publish = false` + `git_only = true`）；转正触发条件见 [ADR 0017](adr/0017-v1-release-readiness.md)。
 - 独立治理邮箱：v1.0.0 未设，继续用 GitHub 私密报告；转正触发条件见 [ADR 0017](adr/0017-v1-release-readiness.md)。
