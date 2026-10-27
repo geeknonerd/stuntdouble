@@ -29,7 +29,7 @@
 | 显式 Route、`ctx.respond`、302、JSON、header | 已支持 | 直接使用 |
 | `ctx.request.bodyBytes`、原始查询串 | 已实现（M1.1，#171：`bodyBytes` 与 `rawQuery`） | v1.x |
 | 安全随机、SHA-256、HMAC-SHA256、常量时间比较 | 未实现；脚本层不能可靠提供安全语义 | v1.x |
-| 未知路径与错误方法的可控响应 | 未知路径已支持通过 `[fallback]` 脚本响应（#173）；已知路径方法错误仍返回引擎 404，405 与 `Allow` 留待 #174 | v1.x |
+| 未知路径与错误方法的可控响应 | 未知路径已支持通过 `[fallback]` 脚本响应（#173）；已知路径方法错误仍返回引擎 404，405 与 `Allow` 留待 #174；拒绝响应的有界 lingering drain（413/408/5xx，防 TCP RST 吞掉已发错误信封）留待 #204 | v1.x |
 | 授权码生命周期、access token 生命周期、签名 request ID 防重放 | 需要跨请求数据，v1 明确不提供 | v2 |
 | OAuth 授权、令牌与 userinfo 流程 | 需要以上能力组合 | 场景验收 |
 

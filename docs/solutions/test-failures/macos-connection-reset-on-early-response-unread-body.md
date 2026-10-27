@@ -11,6 +11,7 @@ symptoms:
 root_cause: tcp_rst_on_unread_body
 resolution_type: test_fix
 severity: medium
+last_updated: 2026-10-27
 related_components:
   - server
   - tests
@@ -19,6 +20,10 @@ tags: [macos, connection-reset, econnreset, broken-pipe, tcp-rst, early-response
 ---
 
 # 服务端提前响应且不读 Body 时，测试客户端需容忍写入重置（ECONNRESET / Broken pipe）
+
+## 第二次命中（chunked 上传路径，PR #202）
+
+同一根因的第二个调用链：`chunked_multipart_framing_is_bounded` → `request_multipart_chunked` → `request_chunked_bytes`（`tests/cli.rs`）。该 helper 写侧已用 `let _ = stream.write_all(...)` 容忍 RST，但读侧仍在 `read_response`（`read_to_end` 等 EOF）上 panic——服务端对未读取的 chunked body 提前回 400/413 并关闭连接，macOS 上 close 因接收缓冲仍有未读字节转为 RST，`read_to_end` 丢掉已收到的完整 413 信封并报 `Os { code: 54, kind: ConnectionReset }`。修复方式与本文方案一致：读侧改用 `read_response_until_complete` 按 `Content-Length` 定界，截断响应仍判失败，413 断言保持原义。
 
 ## 问题
 
