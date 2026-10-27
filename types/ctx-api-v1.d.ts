@@ -283,7 +283,11 @@ declare const ctx: SdContext;
 /** The match category of a request, relative to the configured Routes. */
 type SdMatchKind = "route" | "not_found" | "method_not_allowed";
 
-/** The match category for a request and the allowed methods, if any. */
+/**
+ * The match category for a request and the allowed methods, if any.
+ * A `method_not_allowed` fallback must respond with 405 and must not set
+ * `Allow`; the host injects it from `allowedMethods`.
+ */
 interface SdMatch {
   readonly kind: SdMatchKind;
   /** Empty unless `kind` is `"method_not_allowed"`; then uppercase, deduplicated methods in first-declaration order. */

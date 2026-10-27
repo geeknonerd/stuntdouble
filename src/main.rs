@@ -194,7 +194,7 @@ fn report(config: &config::Config) {
     if let Some(fallback) = &config.fallback {
         let name = fallback.name.as_deref().unwrap_or("<unnamed>");
         eprintln!(
-            "fallback: {} not_found -> {}",
+            "fallback: {} not_found/method_not_allowed -> {}",
             name,
             fallback.script.display()
         );

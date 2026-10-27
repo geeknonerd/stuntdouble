@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `[fallback]` scripts now handle method mismatches as `ctx.match.kind = "method_not_allowed"`, receive the deduplicated, declaration-ordered `ctx.match.allowedMethods`, must return 405, and the host injects `Allow`; without a fallback the engine keeps its 404
+
 ## [1.5.1](https://github.com/geeknonerd/stuntdouble/compare/v1.5.0...v1.5.1) - 2026-10-27
 
 ### Fixed

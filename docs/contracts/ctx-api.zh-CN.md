@@ -39,17 +39,17 @@
 | 日志 | `ctx.log.info` / `warn` / `error` | 已实现（T2） |
 | 环境变量 | `ctx.env` | 已实现（T2） |
 | 定时器 | `setTimeout` / `setInterval` | 已移出 1.0（v2 候选，见 ADR 0016） |
-| 匹配类别 | `ctx.match.kind` / `ctx.match.allowedMethods` | 已实现（#173） |
+| 匹配类别 | `ctx.match.kind` / `ctx.match.allowedMethods` | 已实现（#173、#174） |
 
 ## 已实现的子集
 
 - `ctx.apiVersion` 为 `"1"`。
-- `ctx.match` 暴露当前请求相对于已配置 Route 的匹配类别：`kind` 是 `"route"` 时表示普通 Route 命中；`"not_found"` 表示可选 fallback Route 因没有任何 Route 匹配该路径而运行；`"method_not_allowed"` 预留给 Issue #174。本切片中 `allowedMethods` 为空，仅在以后的切片中为 `"method_not_allowed"` 填充。路径匹配某条 Route 但方法不匹配的请求不属于未知路径：本切片不运行 fallback，仍返回引擎生成的 404。fallback 脚本看到 `"not_found"`，必须用状态 404 和缓冲 body 响应；任何其他状态或流式 body 都会 fail-closed 为 500 `script_error`。fallback 抛错、超时、内存超限、加载失败或拿不到 worker 槽位会映射为 500 `script_error`；结束但未产生 Response 会映射为 500 `script_no_response`。
+- `ctx.match` 暴露当前请求相对于已配置 Route 的匹配类别：`kind` 是 `"route"` 时表示普通 Route 命中；`"not_found"` 表示可选 fallback Route 因没有任何 Route 匹配该路径而运行；`"method_not_allowed"` 表示路径至少匹配一条 Route，但没有任何 Route 支持该请求方法。除非 `kind` 为 `"method_not_allowed"`，`allowedMethods` 均为空；此时它列出匹配该路径的所有已声明方法，统一大写、去重并按首次声明顺序排列，且为冻结的只读数组。路径匹配某条 Route 但方法不匹配的请求在配置了 `[fallback]` 时运行 fallback；未配置 `[fallback]` 时保持引擎的 404 `not_found`。方法分类先于任何 Body 处理，因此方法不匹配时绝不读取请求 Body。fallback 脚本对 `"not_found"` 必须返回 404，对 `"method_not_allowed"` 必须返回 405，并使用缓冲 body；任何其他状态、流式 body 或脚本自设 `Allow` 都会 fail-closed 为 500 `script_error`。fallback 抛错、超时、内存超限、加载失败或拿不到 worker 槽位会映射为 500 `script_error`；结束但未产生 Response 会映射为 500 `script_no_response`。
 
 - `ctx.request` 是只读快照，含 `method`、`path`、`params`、`query`、`rawQuery`、`headers`、`bodyText`、`bodyBytes` 与 `files`。Header 名小写化；请求 body 不是合法 UTF-8 时 `bodyText` 为 `null`。已解析的 multipart 请求同样把 `bodyText` 暴露为 `null`，因为 framing 在脚本运行前已被消费。`query` 中的名与值都会做百分号解码。重复的 query 或 Header 名在快照中保留最后一个值。
   - `rawQuery` 是请求行中的原始 query 片段，按客户端发送的原样保留：重复参数名、顺序与百分号编码均不丢失；请求没有 query 时为 `""`。与 `query` 配合可对签名输入做规范化，同时不丢失重复参数。
   - `bodyBytes` 是精确的请求 body 字节，以 `Uint8Array` 提供，不做 UTF-8 转换，因此二进制、NUL 与非法 UTF-8 内容都能逐字节还原。body 未被读取时为 `null`：已解析的 multipart 请求的 framing 在脚本运行前已被消费。空 `Uint8Array` 表示已读取的空 body，与 `null` 可区分。
-- `ctx.respond(status, headers, body)` 接受 `[100, 599]` 范围内的状态码、对象或 `[name, value]` 对形式的 headers，以及字符串、字节数组、`Uint8Array`、`ArrayBuffer` 或 `ctx.file.stream` / `ctx.request.files[].stream()` handle 类型的 body。第一次调用生效并返回 `true`；后续调用被忽略、返回 `false`，并在服务端产生警告。字节数组的每个值必须是 `[0, 255]` 范围内的整数。Header 名与值在调用时校验；畸形 pair 抛出可捕获的 `script_error`，不会记录 Response，也绝不静默丢弃。
+- `ctx.respond(status, headers, body)` 接受 `[100, 599]` 范围内的状态码、对象或 `[name, value]` 对形式的 headers，以及字符串、字节数组、`Uint8Array`、`ArrayBuffer` 或 `ctx.file.stream` / `ctx.request.files[].stream()` handle 类型的 body。第一次调用生效并返回 `true`；后续调用被忽略、返回 `false`，并在服务端产生警告。字节数组的每个值必须是 `[0, 255]` 范围内的整数。Header 名与值在调用时校验；畸形 pair 抛出可捕获的 `script_error`，不会记录 Response，也绝不静默丢弃。 当 `ctx.match.kind` 为 `"method_not_allowed"` 时，`Allow` header 由宿主拥有：脚本自设 `Allow` 会抛出可捕获的 `script_error`，宿主会在合法的 405 响应后按 `ctx.match.allowedMethods` 注入 `Allow`。
 - `ctx.http.get(url, opts)` 执行 allowlist 约束的上游 GET，返回 `{status, headers, text(), bytes()}`。
   - `url` 必须是绝对的 `http` 或 `https` URL，其 host 大小写不敏感地匹配 `upstream.allow_hosts`；端口不参与匹配，IP 字面量与 `localhost` 需要显式条目。
   - `opts` 必须是普通对象，且只接受 `{ timeout_ms }`。未知字符串或 symbol 键、继承键、非对象值，以及显式 `null`、`NaN`、`Infinity`、非整数或非正数的 `timeout_ms` 都是脚本错误（fail-closed）。

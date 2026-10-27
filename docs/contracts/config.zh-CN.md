@@ -37,7 +37,7 @@ v1 不接受 YAML 与 JSON。
 | `upstream.allow_hosts` | 否 | string 数组 | `[]` | 使用 URL host 语法；条目不带 scheme 与端口，默认拒绝所有 host |
 | `upstream.timeout_ms` | 否 | integer | `15000` | 正整数（0 被拒绝） |
 | `routes` | 是 | table 数组 | — | 至少包含一个 Route table；`routes = []` 非法 |
-| `fallback` | 否 | table | — | 只接受 `{name, script}`；当没有任何 Route 匹配路径时运行的可选 fallback 脚本 |
+| `fallback` | 否 | table | — | 只接受 `{name, script}`；为未知路径（`not_found`）与方法不匹配的已知路径（`method_not_allowed`）运行的可选 fallback 脚本 |
 
 `upstream.allow_hosts` 中的域名会被小写化／punycode 化。IPv6 字面量写成方括号形式（`"[::1]"`），加载时归一化为不带方括号的形式。Host 匹配大小写不敏感且不含端口，IP 字面量与 `localhost` 必须显式列出。
 
@@ -89,14 +89,14 @@ method = "GET"            # 取值之一：GET、POST、PUT、DELETE、PATCH、H
 path = "/demo/..."        # 以 '/' 开头的路径，支持 :param 段
 script = "scripts/x.js"   # .js/.mjs/.cjs；相对或绝对路径
 
-[fallback]              # 可选表；当没有任何 Route 匹配路径时运行
+[fallback]              # 可选表；为未知路径与方法不匹配运行
 name = "not-found"        # 可选
 script = "scripts/404.js" # .js/.mjs/.cjs；相对或绝对路径
 ```
 
 ## Route 执行模型
 
-Route 遵循唯一流水线：`match → source → transform → response`。本切片实现 Match 与脚本 Transform：命中的 Route 运行其 JavaScript，脚本通过 `ctx.respond` 或 `ctx.http.pipe` 产生 Response。路径匹配某条 Route 但方法不匹配的请求不属于未知路径：本切片不运行 fallback，仍返回引擎生成的 404 `not_found`。未知路径返回 404 `not_found`；若配置了 `[fallback]` 表，则以 `ctx.match.kind` 为 `"not_found"` 运行 fallback 脚本。fallback 从不读取请求 body，且必须以状态 404 和缓冲 body 响应。非 404 状态码或流式 body 属于非法 fallback 响应，映射为 500 `script_error`。fallback 沿用与普通 Route 相同的脚本失败映射：脚本抛错、超时、加载失败、内存超限或拿不到脚本 worker 槽位返回 500 `script_error`；脚本结束却没有产生 Response 时返回 500 `script_no_response`。`ctx.http.get` 把上游响应（含 4xx/5xx）视为数据；`ctx.http.pipe` 把上游 2xx Response 流式转发给客户端，并对最终非 2xx 响应抛出可捕获的 `upstream_http_error`；未捕获的上游传输层失败返回 502 `upstream_unreachable`。本地静态文件读取与 multipart 上传均已实现。命中的 `multipart/form-data` 请求会在脚本运行前解析进请求级临时目录，并通过 `ctx.request.files` 暴露。每个 multipart part 必须带 `name` 属性；缺少该属性的 part 属于畸形请求。multipart 畸形时返回 400 `invalid_multipart`；文件与非文件字段数据总量超过 `files.upload_max_bytes` 时返回 413 `upload_too_large`。整个 multipart body 流（含 framing）受 `files.upload_max_bytes` 加 1 MiB framing allowance 约束。两类 multipart 失败使用带 `request_id` 的项目 JSON 错误 envelope；非 multipart body 超过既有的 2 MiB 上限时保持有界的 413 响应，不引入 JSON 错误类别。
+Route 遵循唯一流水线：`match → source → transform → response`。本切片实现 Match 与脚本 Transform：命中的 Route 运行其 JavaScript，脚本通过 `ctx.respond` 或 `ctx.http.pipe` 产生 Response。路径匹配某条 Route 但方法不匹配的请求属于方法错误：配置了 `[fallback]` 时以 `ctx.match.kind` 为 `"method_not_allowed"` 运行 fallback 脚本；未配置时引擎返回 404 `not_found`。未知路径返回 404 `not_found`；若配置了 `[fallback]` 表，则以 `ctx.match.kind` 为 `"not_found"` 运行 fallback 脚本。fallback 从不读取请求 body，且对 `"not_found"` 必须以状态 404 响应、对 `"method_not_allowed"` 必须以状态 405 响应，并使用缓冲 body。任何其他状态码、流式 body 或脚本自设 `Allow` 均属于非法 fallback 响应，映射为 500 `script_error`；合法的 405 响应由宿主按 `ctx.match.allowedMethods` 注入 `Allow`。fallback 沿用与普通 Route 相同的脚本失败映射：脚本抛错、超时、加载失败、内存超限或拿不到脚本 worker 槽位返回 500 `script_error`；脚本结束却没有产生 Response 时返回 500 `script_no_response`。`ctx.http.get` 把上游响应（含 4xx/5xx）视为数据；`ctx.http.pipe` 把上游 2xx Response 流式转发给客户端，并对最终非 2xx 响应抛出可捕获的 `upstream_http_error`；未捕获的上游传输层失败返回 502 `upstream_unreachable`。本地静态文件读取与 multipart 上传均已实现。命中的 `multipart/form-data` 请求会在脚本运行前解析进请求级临时目录，并通过 `ctx.request.files` 暴露。每个 multipart part 必须带 `name` 属性；缺少该属性的 part 属于畸形请求。multipart 畸形时返回 400 `invalid_multipart`；文件与非文件字段数据总量超过 `files.upload_max_bytes` 时返回 413 `upload_too_large`。整个 multipart body 流（含 framing）受 `files.upload_max_bytes` 加 1 MiB framing allowance 约束。两类 multipart 失败使用带 `request_id` 的项目 JSON 错误 envelope；非 multipart body 超过既有的 2 MiB 上限时保持有界的 413 响应，不引入 JSON 错误类别。
 
 ### 匹配语义
 

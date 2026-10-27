@@ -87,7 +87,9 @@ pub struct RequestSnapshot {
     pub body_bytes: Option<Vec<u8>>,
     pub files: Vec<files::UploadFileMeta>,
     /// `ctx.match.kind` for this request: `"route"` for a normal Route match,
-    /// `"not_found"` for a fallback script on an unknown path.
+    /// `"not_found"` for a fallback script on an unknown path, and
+    /// `"method_not_allowed"` for a fallback script on a known path with an
+    /// unsupported method.
     pub match_kind: &'static str,
 }
 
@@ -127,7 +129,6 @@ impl RequestSnapshot {
             match_kind,
         }
     }
-
     fn to_json(&self) -> Json {
         let params = Json::Object(
             self.params
@@ -862,6 +863,14 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
     return freezeShallow(raw);
   }
   var FILE_FRAMING_HEADERS = ["content-length", "content-range", "accept-ranges"];
+  function checkHostOwnedAllow(headers) {
+    if (!__sd_match || __sd_match.kind !== "method_not_allowed") { return; }
+    for (var i = 0; i < headers.length; i++) {
+      if (String(headers[i][0]).toLowerCase() === "allow") {
+        throw makeError("ctx.respond: the host owns allow for method_not_allowed", "script_error");
+      }
+    }
+  }
   function checkFileStreamResponse(status, headers) {
     if (status !== 200) {
       throw makeError("ctx.respond: a file stream body requires status 200", "script_error");
@@ -906,7 +915,7 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
   return Object.freeze({
     apiVersion: "__SD_API_VERSION__",
     request: requestSnapshot(__sd_request),
-    match: Object.freeze(__sd_match),
+    match: freezeShallow(__sd_match),
     env: Object.freeze(__sd_env),
     http: Object.freeze({ get: httpGet, pipe: httpPipe }),
     state: sharedState,
@@ -933,6 +942,7 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
       }
       var checkedStatus = checkStatus(status, "ctx.respond");
       var checkedHeaders = checkHeaders(headers, "ctx.respond");
+      checkHostOwnedAllow(checkedHeaders);
       var checkedBody = checkBody(body);
       if (typeof checkedBody === "object" && checkedBody !== null &&
           (checkedBody.file !== undefined || checkedBody.upload !== undefined)) {
@@ -1022,6 +1032,7 @@ enum ParentMessage {
         script: String,
         request: Json,
         match_kind: String,
+        allowed_methods: Vec<String>,
     },
     HostResult {
         result: Json,
@@ -1425,7 +1436,12 @@ fn register_worker_bridges(context: &mut Context) -> Result<(), Error> {
 
 /// Evaluate one script inside the worker process. Every host function is
 /// forwarded to the parent; upstream, file, and upload policy stay there.
-fn evaluate_in_worker(source: &str, request: &Json, match_kind: &str) -> Result<Json, Error> {
+fn evaluate_in_worker(
+    source: &str,
+    request: &Json,
+    match_kind: &str,
+    allowed_methods: &[String],
+) -> Result<Json, Error> {
     let upstream_marker = upstream_marker();
     let prelude = prelude();
     let mut context = Context::default();
@@ -1453,7 +1469,7 @@ fn evaluate_in_worker(source: &str, request: &Json, match_kind: &str) -> Result<
             .map_err(|error| Error::Failed(error.to_string()))?;
         let match_json = json!({
             "kind": match_kind,
-            "allowedMethods": [],
+            "allowedMethods": allowed_methods,
         });
         let match_value = JsValue::from_json(&match_json, &mut context)
             .map_err(|error| Error::Failed(error.to_string()))?;
@@ -2260,6 +2276,7 @@ pub async fn execute(
             uploads,
             shared_state: state::new_shared_state(),
             worker_slot,
+            match_allowed_methods: Vec::new(),
         },
     )
     .await
@@ -2272,6 +2289,9 @@ pub(crate) struct ExecutionContext {
     pub(crate) uploads: Option<Arc<files::UploadStore>>,
     pub(crate) shared_state: SharedState,
     pub(crate) worker_slot: tokio::sync::OwnedSemaphorePermit,
+    /// `ctx.match.allowedMethods`; empty except for the `method_not_allowed`
+    /// fallback, which collects the methods of every Route matching the path.
+    pub(crate) match_allowed_methods: Vec<String>,
 }
 
 pub(crate) async fn execute_with_state(
@@ -2286,6 +2306,7 @@ pub(crate) async fn execute_with_state(
         uploads,
         shared_state,
         worker_slot,
+        match_allowed_methods,
     } = context;
     let _slot = worker_slot;
     let timeout = Duration::from_millis(sandbox.script_timeout_ms);
@@ -2314,6 +2335,7 @@ pub(crate) async fn execute_with_state(
         script: source,
         request: request.to_json(),
         match_kind: request.match_kind.to_string(),
+        allowed_methods: match_allowed_methods,
     };
     let mut outcome = run_worker(
         job,
@@ -2415,6 +2437,7 @@ fn worker_main(memory_limit_mb: u64) -> std::io::Result<()> {
         script,
         request,
         match_kind,
+        allowed_methods,
     } = message
     else {
         return Err(std::io::Error::new(
@@ -2428,7 +2451,7 @@ fn worker_main(memory_limit_mb: u64) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("script-worker-eval".into())
         .stack_size(SCRIPT_THREAD_STACK_SIZE)
-        .spawn(move || run_job(&script, &request, &match_kind))
+        .spawn(move || run_job(&script, &request, &match_kind, &allowed_methods))
         .map_err(|error| {
             std::io::Error::new(
                 error.kind(),
@@ -2439,8 +2462,13 @@ fn worker_main(memory_limit_mb: u64) -> std::io::Result<()> {
         .map_err(|_| std::io::Error::other("script evaluation thread panicked"))?
 }
 
-fn run_job(script: &str, request: &Json, match_kind: &str) -> std::io::Result<()> {
-    let message = match evaluate_in_worker(script, request, match_kind) {
+fn run_job(
+    script: &str,
+    request: &Json,
+    match_kind: &str,
+    allowed_methods: &[String],
+) -> std::io::Result<()> {
+    let message = match evaluate_in_worker(script, request, match_kind, allowed_methods) {
         Ok(result) => WorkerMessage::FinalResult(FinalResult::Success(result)),
         Err(Error::UpstreamUnreachable { message, kind }) => {
             let Some(kind) = FinalErrorKind::from_upstream(kind) else {

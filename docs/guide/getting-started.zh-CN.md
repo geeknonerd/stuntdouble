@@ -125,7 +125,7 @@ if (!file) {
 
 `text()` 严格按 UTF-8 解码，`text()` 与 `bytes()` 上限为 8 MiB。`stream()` 不限大小、不透明、只能消费一次，且仅可作为同一请求内 `ctx.respond` 的 body；它遵循与 `ctx.file.stream` 相同的 Range 与宿主 framing 规则。上传存放在请求级临时存储中，请求结束或流结束时清理——精确形状见 [`ctx` API 契约](../contracts/ctx-api.zh-CN.md) 与[配置契约](../contracts/config.zh-CN.md)。
 
-## 自定义未命中路径（fallback 路由）
+## 自定义未命中路径与方法不匹配（fallback 路由）
 
 默认情况下，路径未匹配任何已配置 Route 的请求会收到引擎生成的 404 `not_found` JSON 响应。若需返回自定义 header 或定制的 JSON 错误体，可在 `stuntdouble.toml` 中配置可选的 `[fallback]` 表：
 
@@ -144,14 +144,28 @@ ctx.respond(404, { "Content-Type": "application/json" }, JSON.stringify({
 }));
 ```
 
-若 fallback 脚本返回非 404 状态码、尝试流式响应或抛出未捕获异常，服务端会 fail-closed 返回 500 `script_error`。路径匹配某条已配置 Route 但方法不匹配的请求在本切片中仍返回引擎生成的 404。
+同一个 fallback 也处理路径存在但方法不支持的请求。此时脚本收到 `ctx.match.kind = "method_not_allowed"` 与 `ctx.match.allowedMethods`（统一大写、去重、按首次声明顺序），必须返回 HTTP 状态码 405，且不得设置 `Allow`：
+
+```js
+if (ctx.match.kind === "method_not_allowed") {
+  ctx.respond(405, { "Content-Type": "application/json" }, JSON.stringify({
+    error: "method_not_allowed",
+    allowed: ctx.match.allowedMethods
+  }));
+}
+```
+
+方法不匹配时，宿主会在校验 405 后按 `ctx.match.allowedMethods` 注入 `Allow`。脚本自设 `Allow` 会抛出可捕获的 `script_error`；未捕获时 fail-closed 返回 500 `script_error`。未配置 `[fallback]` 时，方法不匹配仍返回引擎生成的 404。
+
+若 fallback 脚本返回的状态码与其 `ctx.match.kind` 要求不符、尝试流式响应或抛出未捕获异常，服务端会 fail-closed 返回 500 `script_error`。
 
 ## 出错时怎么判断
 
 
 | 你看到的 | 含义 |
 | --- | --- |
-| 404 `not_found` | 没有 Route 匹配该 method 与 path（或由自定义 `[fallback]` 脚本生成） |
+| 404 `not_found` | 没有 Route 匹配该 path（或由自定义 `[fallback]` 脚本生成；未配置 fallback 时方法不匹配也返回此状态） |
+| 带 `Allow` 的 405 | 路径存在但不支持该方法；由返回 405 的自定义 `[fallback]` 脚本产生 |
 | 500 `script_error` | 脚本抛错、超时、加载失败或拿不到 worker 槽位；堆栈只留在服务端日志 |
 | 500 `script_no_response` | 脚本结束却没有调用 `ctx.respond` |
 | 502 `upstream_unreachable` | 未捕获的传输层失败（DNS、连接、TLS 或超时） |

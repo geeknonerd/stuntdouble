@@ -7195,11 +7195,12 @@ fn no_fallback_unknown_path_stays_404() {
     );
 }
 
-/// Fallback: a known path with the wrong method keeps the engine 404 and does
-/// not run the fallback until `method_not_allowed` lands in #174.
+/// Fallback: a known path with the wrong method runs the fallback as
+/// `method_not_allowed`; the script owns the 405 body and the host injects
+/// `Allow` from the collected methods.
 #[test]
-fn known_path_wrong_method_keeps_404_and_skips_fallback() {
-    let fallback_script = r#"ctx.respond(404, { "Content-Type": "text/plain" }, "fallback ran");
+fn known_path_wrong_method_runs_fallback_with_allow() {
+    let fallback_script = r#"ctx.respond(405, { "Content-Type": "text/plain; charset=utf-8" }, "kind=" + ctx.match.kind + " allow=" + ctx.match.allowedMethods.join("|"));
 "#;
     let dir = tempfile::tempdir().expect("tempdir");
     let (response, _) = serve_and_run(
@@ -7208,6 +7209,23 @@ fn known_path_wrong_method_keeps_404_and_skips_fallback() {
         &[],
         |port| request(port, "POST", "/demo/documents/manifest/group-a", &[]),
     );
+    assert_eq!(response.status, 405, "body: {}", response.body);
+    assert_eq!(response.header("allow"), Some("GET"));
+    assert!(
+        response.body.contains("kind=method_not_allowed allow=GET"),
+        "body: {}",
+        response.body
+    );
+}
+
+/// Fallback: a method mismatch with no `[fallback]` keeps the engine 404 and
+/// no `Allow` header.
+#[test]
+fn method_mismatch_without_fallback_stays_404() {
+    let config_body = good_config();
+    let (response, _) = with_server_full(config_body, OK_SCRIPT, &[], |port| {
+        request(port, "POST", "/demo/documents/manifest/group-a", &[])
+    });
     assert_eq!(response.status, 404, "body: {}", response.body);
     assert_eq!(
         error_class(&response.body).as_deref(),
@@ -7215,12 +7233,85 @@ fn known_path_wrong_method_keeps_404_and_skips_fallback() {
         "body: {}",
         response.body
     );
+    assert_eq!(response.header("allow"), None);
+}
+
+/// Fallback: the allowed-method list is uppercase, deduplicated, and ordered by
+/// first route declaration, including two routes that share a path shape.
+#[test]
+fn allowed_methods_are_deduped_and_ordered() {
+    let config = r#"
+config_version = "1"
+
+[server]
+bind = "127.0.0.1"
+port = {port}
+
+[files]
+root = "./files"
+
+[[routes]]
+name = "create"
+method = "post"
+path = "/things"
+script = "scripts/manifest.js"
+
+[[routes]]
+name = "read"
+method = "GET"
+path = "/things"
+script = "scripts/manifest.js"
+
+[[routes]]
+name = "duplicate-create"
+method = "POST"
+path = "/things"
+script = "scripts/manifest.js"
+
+[[routes]]
+name = "remove"
+method = "DELETE"
+path = "/things"
+script = "scripts/manifest.js"
+
+[fallback]
+name = "errors"
+script = "scripts/404.js"
+"#;
+    let fallback_script = r#"ctx.respond(405, { "Content-Type": "text/plain" }, ctx.match.allowedMethods.join(","));
+"#;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (response, _) = serve_and_run(
+        |port| fallback_fixture(dir.path(), port, config, fallback_script),
+        &[],
+        &[],
+        |port| request(port, "PATCH", "/things", &[]),
+    );
+    assert_eq!(response.status, 405, "body: {}", response.body);
+    assert_eq!(response.header("allow"), Some("POST, GET, DELETE"));
+    assert_eq!(response.body, "POST,GET,DELETE");
+}
+
+/// Fallback: a lowercase request method is normalized before matching, so a
+/// `get`/`post` mismatch still classifies as `method_not_allowed`.
+#[test]
+fn lowercase_request_method_still_classifies_as_method_not_allowed() {
+    let fallback_script = r#"ctx.respond(405, { "Content-Type": "text/plain" }, "kind=" + ctx.match.kind);
+"#;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (response, _) = serve_and_run(
+        |port| fallback_fixture(dir.path(), port, FALLBACK_CONFIG, fallback_script),
+        &[],
+        &[],
+        |port| request(port, "post", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 405, "body: {}", response.body);
+    assert_eq!(response.header("allow"), Some("GET"));
     assert!(
-        !response.body.contains("fallback ran"),
-        "fallback ran for a known path: {}",
+        response.body.contains("kind=method_not_allowed"),
+        "{}",
         response.body
     );
-    assert_eq!(response.header("allow"), None);
 }
 
 /// Fallback: a non-404 status is fail-closed to 500 `script_error`.
@@ -7388,6 +7479,264 @@ fn fallback_throw_is_500_script_error() {
     assert!(
         !response.body.contains("fallback boom"),
         "script message leaked: {}",
+        response.body
+    );
+}
+
+/// Fallback: a `method_not_allowed` fallback that answers a non-405 status is
+/// fail-closed to 500 `script_error`, and no `Allow` header leaks.
+#[test]
+fn method_not_allowed_wrong_status_is_500() {
+    let fallback_script = r#"ctx.respond(404, { "Content-Type": "text/plain" }, "wrong status");
+"#;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (response, _) = serve_and_run(
+        |port| fallback_fixture(dir.path(), port, FALLBACK_CONFIG, fallback_script),
+        &[],
+        &[],
+        |port| request(port, "POST", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 500, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("script_error"),
+        "body: {}",
+        response.body
+    );
+    assert_eq!(response.header("allow"), None);
+}
+
+/// Fallback: the prelude rejects a `method_not_allowed` script that sets
+/// `Allow` itself; the error is catchable, so an uncaught one is 500
+/// `script_error` and the host still owns the header.
+#[test]
+fn method_not_allowed_script_owned_allow_is_catchable_error() {
+    let fallback_script = r#"
+try {
+  ctx.respond(405, { "Content-Type": "text/plain", "Allow": "GET" }, "script allow");
+} catch (error) {
+  ctx.respond(405, { "Content-Type": "text/plain" }, "caught:" + error.code);
+}
+"#;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (response, _) = serve_and_run(
+        |port| fallback_fixture(dir.path(), port, FALLBACK_CONFIG, fallback_script),
+        &[],
+        &[],
+        |port| request(port, "POST", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 405, "body: {}", response.body);
+    assert_eq!(response.header("allow"), Some("GET"));
+    assert!(
+        response.body.contains("caught:script_error"),
+        "body: {}",
+        response.body
+    );
+}
+
+/// Fallback: a `method_not_allowed` script that sets `Allow` without a catch
+/// fails closed to 500 `script_error`.
+#[test]
+fn method_not_allowed_uncaught_allow_is_500() {
+    let fallback_script = r#"ctx.respond(405, { "Content-Type": "text/plain", "allow": "GET" }, "uncaught");
+"#;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (response, _) = serve_and_run(
+        |port| fallback_fixture(dir.path(), port, FALLBACK_CONFIG, fallback_script),
+        &[],
+        &[],
+        |port| request(port, "POST", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 500, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("script_error"),
+        "body: {}",
+        response.body
+    );
+    assert_eq!(response.header("allow"), None);
+}
+
+/// Fallback: method mismatch is classified before Body size, so an oversized
+/// body still answers 405 and the body is never read.
+#[test]
+fn method_not_allowed_oversized_body_still_answers_405() {
+    let fallback_script = r#"ctx.respond(405, { "Content-Type": "text/plain" }, "kind=" + ctx.match.kind);
+"#;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (response, _) = serve_and_run(
+        |port| fallback_fixture(dir.path(), port, FALLBACK_CONFIG, fallback_script),
+        &[],
+        &[],
+        |port| {
+            let partial = vec![b'x'; 5 * 1024 * 1024];
+            request_partial_body_lenient(
+                port,
+                "/demo/documents/manifest/group-a",
+                "text/plain",
+                partial.len(),
+                &partial,
+            )
+        },
+    );
+    assert_eq!(response.status, 405, "body: {}", response.body);
+    assert_eq!(response.header("allow"), Some("GET"));
+    assert!(
+        response.body.contains("kind=method_not_allowed"),
+        "{}",
+        response.body
+    );
+}
+
+/// Fallback: an unfinished body to a mismatched method returns 405 before the
+/// request timeout; the body read deadline never applies.
+#[test]
+fn method_not_allowed_unfinished_body_answers_405() {
+    let fallback_script = r#"ctx.respond(405, { "Content-Type": "text/plain" }, "kind=" + ctx.match.kind);
+"#;
+    let config = with_request_timeout(FALLBACK_CONFIG, 300);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (response, _) = serve_and_run(
+        |port| fallback_fixture(dir.path(), port, &config, fallback_script),
+        &[],
+        &[],
+        |port| {
+            // Announce a large body but send only a slice: a server that read
+            // the body would time out or wait forever.
+            let partial = vec![b'x'; 32];
+            request_partial_body_lenient(
+                port,
+                "/demo/documents/manifest/group-a",
+                "text/plain",
+                partial.len() + 4096,
+                &partial,
+            )
+        },
+    );
+    assert_eq!(response.status, 405, "body: {}", response.body);
+    assert_eq!(response.header("allow"), Some("GET"));
+}
+
+/// Fallback: a multipart body to a mismatched method is never parsed, so a
+/// malformed multipart payload still answers 405 instead of 400.
+#[test]
+fn method_not_allowed_multipart_body_is_not_parsed() {
+    let fallback_script = r#"ctx.respond(405, { "Content-Type": "text/plain" }, "kind=" + ctx.match.kind);
+"#;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (response, _) = serve_and_run(
+        |port| fallback_fixture(dir.path(), port, FALLBACK_CONFIG, fallback_script),
+        &[],
+        &[],
+        |port| {
+            // A multipart Content-Type whose body is not valid multipart. If
+            // the host parsed it, the answer would be 400 `invalid_multipart`.
+            request_with_body(
+                port,
+                "POST",
+                "/demo/documents/manifest/group-a",
+                &[("Content-Type", "multipart/form-data; boundary=nope")],
+                "not multipart at all",
+            )
+        },
+    );
+    assert_eq!(response.status, 405, "body: {}", response.body);
+    assert!(
+        response.body.contains("kind=method_not_allowed"),
+        "{}",
+        response.body
+    );
+}
+
+/// Fallback: two routes that share a path shape with different methods produce
+/// a deduplicated, declaration-ordered `Allow` for a third method.
+#[test]
+fn shared_path_method_mismatch_collects_all_methods() {
+    let config = r#"
+config_version = "1"
+
+[server]
+bind = "127.0.0.1"
+port = {port}
+
+[files]
+root = "./files"
+
+[[routes]]
+name = "read"
+method = "GET"
+path = "/demo/documents/manifest/:group"
+script = "scripts/manifest.js"
+
+[[routes]]
+name = "create"
+method = "POST"
+path = "/demo/documents/manifest/:id"
+script = "scripts/manifest.js"
+
+[fallback]
+name = "errors"
+script = "scripts/404.js"
+"#;
+    let fallback_script = r#"ctx.respond(405, { "Content-Type": "text/plain" }, ctx.match.allowedMethods.join(","));
+"#;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (response, _) = serve_and_run(
+        |port| fallback_fixture(dir.path(), port, config, fallback_script),
+        &[],
+        &[],
+        |port| request(port, "PUT", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 405, "body: {}", response.body);
+    assert_eq!(response.header("allow"), Some("GET, POST"));
+    assert_eq!(response.body, "GET,POST");
+}
+
+/// Fallback: the `method_not_allowed` request snapshot keeps empty params and
+/// null body values, matching the not-read contract.
+#[test]
+fn method_not_allowed_snapshot_has_empty_params_and_null_body() {
+    let fallback_script = r#"ctx.respond(405, { "Content-Type": "text/plain" }, "params=" + Object.keys(ctx.request.params).length + " body=" + (ctx.request.bodyBytes === null ? "null" : "read"));
+"#;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (response, _) = serve_and_run(
+        |port| fallback_fixture(dir.path(), port, FALLBACK_CONFIG, fallback_script),
+        &[],
+        &[],
+        |port| request(port, "POST", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 405, "body: {}", response.body);
+    assert!(
+        response.body.contains("params=0 body=null"),
+        "body: {}",
+        response.body
+    );
+}
+
+/// Fallback: `ctx.match.allowedMethods` is a frozen readonly array, so a
+/// script cannot mutate the host-owned `Allow` source.
+#[test]
+fn method_not_allowed_allowed_methods_are_readonly() {
+    let fallback_script = r#"
+var strict = typeof Object.isFrozen === "function" && Object.isFrozen(ctx.match.allowedMethods);
+var changed = false;
+try { ctx.match.allowedMethods.push("TRACE"); changed = true; } catch (error) { changed = false; }
+ctx.respond(405, { "Content-Type": "text/plain" }, "frozen=" + strict + " changed=" + changed + " allow=" + ctx.match.allowedMethods.join(","));
+"#;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (response, _) = serve_and_run(
+        |port| fallback_fixture(dir.path(), port, FALLBACK_CONFIG, fallback_script),
+        &[],
+        &[],
+        |port| request(port, "POST", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 405, "body: {}", response.body);
+    assert_eq!(response.header("allow"), Some("GET"));
+    assert!(
+        response
+            .body
+            .contains("frozen=true changed=false allow=GET"),
+        "body: {}",
         response.body
     );
 }
