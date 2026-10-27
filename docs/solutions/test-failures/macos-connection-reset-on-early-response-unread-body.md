@@ -67,7 +67,7 @@ tags: [macos, connection-reset, econnreset, broken-pipe, tcp-rst, early-response
 - GitHub issue #173：Scriptable fallback route for unknown paths
 - PR #198：`feat(config): add scriptable fallback route for unknown paths`
 - PR #200：`docs: document fallback contract and align script error semantics`
-- 关联测试代码：`tests/cli.rs:509-528`（`request_partial_body_lenient` 实现），`tests/cli.rs:7245`（`fallback_oversized_body_still_answers_404`）
+- 关联测试代码：`tests/cli.rs:509-529`（`request_partial_body_lenient` 实现），`tests/cli.rs:7249`（`fallback_oversized_body_still_answers_404`）
 - 第二次命中（chunked 上传路径，#202）：`tests/cli.rs` 的 `request_chunked_bytes` 写侧已用 `let _ = stream.write_all(...)` 容忍 RST，但读侧仍在 `read_response`（`read_to_end` 等 EOF）上 panic——服务端对未读取的 chunked body 提前回 400/413 并关闭连接，macOS 上 close 因接收缓冲仍有未读字节转为 RST，`read_to_end` 丢掉已收的完整 413 信封并报 os error 54。修复方式与本文方案一致：读侧改用 `read_response_until_complete` 按 `Content-Length` 定界，截断响应仍判失败，413 断言保持原义。
 - 类似套接字与异步时序学习：`docs/solutions/test-failures/hold-upload-temp-dir-with-unfinished-request-body.md`
 - 请求体截止与读取边界：`docs/solutions/conventions/request-read-deadline-at-the-connection-layer.md`
