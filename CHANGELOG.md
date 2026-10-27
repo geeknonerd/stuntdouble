@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.1](https://github.com/geeknonerd/stuntdouble/compare/v1.5.0...v1.5.1) - 2026-10-27
+
+### Fixed
+
+- *(test)* tolerate a connection reset after a complete chunked 413 ([#202](https://github.com/geeknonerd/stuntdouble/pull/202))
+
+### Other
+
+- record second RST hit on the chunked path and track issue 204 ([#206](https://github.com/geeknonerd/stuntdouble/pull/206))
+- record second RST hit on the chunked path and track refusal-envelope delivery as issue 204 ([#205](https://github.com/geeknonerd/stuntdouble/pull/205))
+- document fallback in getting started guide and sync repository status ([#201](https://github.com/geeknonerd/stuntdouble/pull/201))
+
 ## [1.5.0](https://github.com/geeknonerd/stuntdouble/compare/v1.4.0...v1.5.0) - 2026-10-25
 
 ### Added
