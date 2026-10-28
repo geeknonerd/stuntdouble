@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0](https://github.com/geeknonerd/stuntdouble/compare/v1.5.1...v1.6.0) - 2026-10-28
+
+### Added
+
+- *(config)* return 405 with Allow on method mismatch ([#208](https://github.com/geeknonerd/stuntdouble/pull/208))
+
+### Other
+
+- refresh RST solution code anchors to current tree ([#207](https://github.com/geeknonerd/stuntdouble/pull/207))
+
 ### Added
 
 - `[fallback]` scripts now handle method mismatches as `ctx.match.kind = "method_not_allowed"`, receive the deduplicated, declaration-ordered `ctx.match.allowedMethods`, must return 405, and the host injects `Allow`; without a fallback the engine keeps its 404
