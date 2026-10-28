@@ -3,8 +3,7 @@
 // script_no_response. Stream failures are log-only classes.
 use crate::config::Config;
 use crate::files;
-use crate::matcher::has_path_match;
-use crate::matcher::match_route;
+use crate::matcher::{allowed_methods, match_route};
 use crate::script::{self, RequestSnapshot, ResponseBody, ScriptResponse};
 use crate::state::{self, SharedState};
 use crate::{request_log::elapsed_ms, upstream};
@@ -99,26 +98,33 @@ impl AppState {
         let method_label = method.as_str().to_ascii_uppercase();
         let path = uri.path().to_string();
         let Some(found) = match_route(&self.config.routes, &method_label, &path) else {
-            // No normal Route matched method + path. Fallback runs only when no
-            // Route matches the path at all (unknown path -> not_found). A known
-            // path with a wrong method keeps the existing engine 404 behavior
-            // until #174 adds method_not_allowed handling.
-            if let Some(fallback) = &self.config.fallback {
-                if !has_path_match(&self.config.routes, &path) {
-                    return self.run_fallback(fallback, request, &path, &headers).await;
-                }
-            }
-            return Routed {
-                route_label: String::new(),
-                params: HashMap::new(),
-                handled: Handled::NotFound,
-                script_logs: Vec::new(),
-                upstream_calls: Vec::new(),
-                file_calls: files::CallLog::default(),
-                script_duration_ms: None,
-                request_body_bytes: None,
-                upload: upload_log(0, 0, None),
+            // No normal Route matched method + path. A known path with an
+            // unsupported method classifies as `method_not_allowed`; an
+            // unknown path as `not_found`. Both run the fallback when one is
+            // configured and keep the engine 404 otherwise. Classification
+            // happens before any Body handling: the fallback never reads it.
+            let allowed = allowed_methods(&self.config.routes, &path);
+            let Some(fallback) = &self.config.fallback else {
+                return Routed {
+                    route_label: String::new(),
+                    params: HashMap::new(),
+                    handled: Handled::NotFound,
+                    script_logs: Vec::new(),
+                    upstream_calls: Vec::new(),
+                    file_calls: files::CallLog::default(),
+                    script_duration_ms: None,
+                    request_body_bytes: None,
+                    upload: upload_log(0, 0, None),
+                };
             };
+            let kind = if allowed.is_empty() {
+                "not_found"
+            } else {
+                "method_not_allowed"
+            };
+            return self
+                .run_fallback(fallback, request, &path, &headers, kind, &allowed)
+                .await;
         };
         let route_index = found.route_index;
         let route = &self.config.routes[route_index];
@@ -226,6 +232,7 @@ impl AppState {
                         uploads: Some(store),
                         upload: upload_log(file_count, total_bytes, None),
                         request_body_bytes: content_length.or(Some(total_bytes)),
+                        match_allowed_methods: Vec::new(),
                     })
                 }
                 Err(failure) => Err(PrepareError::Upload {
@@ -251,6 +258,7 @@ impl AppState {
                         uploads: None,
                         upload: upload_log(0, 0, None),
                         request_body_bytes: u64::try_from(bytes.len()).ok(),
+                        match_allowed_methods: Vec::new(),
                     })
                 }
                 Err(_) => Err(PrepareError::BodyTooLarge {
@@ -274,6 +282,7 @@ impl AppState {
             uploads,
             upload,
             request_body_bytes,
+            match_allowed_methods,
         } = prepared;
         let params = snapshot.params.clone();
         let script_started = Instant::now();
@@ -293,6 +302,7 @@ impl AppState {
                                 uploads,
                                 shared_state: Arc::clone(&self.shared_state),
                                 worker_slot: slot,
+                                match_allowed_methods,
                             },
                         )
                         .await
@@ -333,18 +343,25 @@ impl AppState {
         }
     }
 
-    /// Run the optional `[fallback]` script for an unknown path.
+    /// Run the optional `[fallback]` script for an unknown path
+    /// (`not_found`) or a known path with an unsupported method
+    /// (`method_not_allowed`).
     ///
-    /// The fallback never reads or parses the request Body. It must answer 404
-    /// with a buffered body; any other status, a streaming/file/upload stream
-    /// body, or a script failure is fail-closed to the existing script error
-    /// mapping.
+    /// The fallback never reads or parses the request Body. It must answer
+    /// 404 for `not_found` and 405 for `method_not_allowed`, with a buffered
+    /// body; any other status, a streaming/file/upload stream body, or a
+    /// script failure is fail-closed to the existing script error mapping.
+    /// On a valid 405 the host injects `Allow` from `allowed_methods`; the
+    /// prelude already rejected a script that set `Allow` itself, so the
+    /// header cannot be spoofed.
     async fn run_fallback(
         &self,
         fallback: &crate::config::Fallback,
         request: Request,
         path: &str,
         headers: &HeaderMap,
+        match_kind: &'static str,
+        allowed_methods: &[String],
     ) -> Routed {
         // Fallback never reads or parses the request Body; absent Body values
         // remain distinguishable from an empty Body.
@@ -356,13 +373,14 @@ impl AppState {
             headers,
             None,
             Vec::new(),
-            "not_found",
+            match_kind,
         );
         let prepared = PreparedRequest {
             snapshot,
             uploads: None,
             upload: upload_log(0, 0, None),
             request_body_bytes: None,
+            match_allowed_methods: allowed_methods.to_vec(),
         };
         // ADR 0020: when the fallback has no name, the log `route` field is the
         // fixed label `fallback`, not the script path.
@@ -374,17 +392,39 @@ impl AppState {
             .run_script_inner(label, &fallback.script, prepared)
             .await;
 
-        // Fail closed: the fallback must return status 404 with a buffered body.
-        if let Handled::Responded(response) = &routed.handled {
-            let invalid = response.status != 404
-                || matches!(
-                    response.body,
-                    ResponseBody::Stream(_) | ResponseBody::File(_)
-                );
-            if invalid {
+        // Fail closed on the status the match category requires, a streamed
+        // body, or a script that re-added the host-owned `Allow` header. The
+        // `Allow` value is rebuilt here from the collected methods, never
+        // copied from the script.
+        let required_status = if match_kind == "method_not_allowed" {
+            debug_assert!(
+                !allowed_methods.is_empty(),
+                "method_not_allowed needs a method"
+            );
+            405
+        } else {
+            404
+        };
+        if let Handled::Responded(response) = &mut routed.handled {
+            let streamed = matches!(
+                response.body,
+                ResponseBody::Stream(_) | ResponseBody::File(_)
+            );
+            if response.status != required_status || streamed {
                 routed.handled = Handled::Failed(script::Error::Failed(
-                    "fallback script must respond with status 404 and a buffered body".to_string(),
+                    "fallback script produced an invalid response".to_string(),
                 ));
+            } else if match_kind == "method_not_allowed" {
+                // Host owns `Allow`; the script body and other headers stay.
+                // The prelude already rejected a script-supplied `Allow`, so
+                // dropping any here is a fail-closed backstop, not the primary
+                // contract.
+                response
+                    .headers
+                    .retain(|(name, _)| !name.eq_ignore_ascii_case("allow"));
+                response
+                    .headers
+                    .push(("Allow".to_string(), allowed_methods.join(", ")));
             }
         }
         routed
@@ -397,6 +437,7 @@ struct PreparedRequest {
     uploads: Option<Arc<files::UploadStore>>,
     upload: Value,
     request_body_bytes: Option<u64>,
+    match_allowed_methods: Vec<String>,
 }
 
 /// Pre-script preparation failure, mapped by `route_request` onto `Handled`.

@@ -27,16 +27,37 @@ pub fn match_route(routes: &[Route], method: &str, path: &str) -> Option<Match> 
     None
 }
 
-/// Returns true if any route's path matches `path`, ignoring method.
-///
-/// Used to distinguish an unknown path (`not_found`) from a method mismatch
-/// on an existing path (`method_not_allowed`, handled by a later slice).
+/// Whether any route's path matches `path`, ignoring method. Used to
+/// distinguish an unknown path (`not_found`) from a method mismatch
+/// (`method_not_allowed`).
 #[must_use]
 pub fn has_path_match(routes: &[Route], path: &str) -> bool {
+    // Delegate to `allowed_methods` so path-matching traversal lives in one
+    // place; a non-empty method list means some route's path matches.
+    !allowed_methods(routes, path).is_empty()
+}
+
+/// Allowed methods for a path that no declared route answers.
+///
+/// Every method of every Route whose path matches `path`, uppercase,
+/// deduplicated, in first Route declaration order. Empty when no Route path
+/// matches (`not_found`). A non-empty result means `method_not_allowed`: the
+/// fallback runs and the host answers 405 with these methods in `Allow`.
+#[must_use]
+pub fn allowed_methods(routes: &[Route], path: &str) -> Vec<String> {
     let segments = split(path);
-    routes
-        .iter()
-        .any(|route| match_segments(&route.path, &segments).is_some())
+    let mut seen = std::collections::HashSet::new();
+    let mut methods = Vec::new();
+    for route in routes {
+        if match_segments(&route.path, &segments).is_none() {
+            continue;
+        }
+        let method = route.method.to_ascii_uppercase();
+        if seen.insert(method.clone()) {
+            methods.push(method);
+        }
+    }
+    methods
 }
 
 fn split(value: &str) -> Vec<&str> {
@@ -170,10 +191,50 @@ mod tests {
     }
 
     #[test]
-    fn path_match_ignores_method() {
-        let routes = vec![route("GET", "/x")];
-        assert!(has_path_match(&routes, "/x"));
-        assert!(has_path_match(&routes, "/x"));
-        assert!(!has_path_match(&routes, "/other"));
+    // MSRV-compatible allow: newer clippy rejects assert!(x.is_empty()) under
+    // pedantic; see docs/solutions/ci/stable-199-clippy-assert-is-empty-msrv-allow.md
+    #[allow(unknown_lints, clippy::assert_is_empty)]
+    fn allowed_methods_collects_path_routes_ignoring_method() {
+        let routes = vec![route("GET", "/x"), route("POST", "/y/:id")];
+        assert_eq!(allowed_methods(&routes, "/x"), vec!["GET".to_string()]);
+        assert_eq!(allowed_methods(&routes, "/y/7"), vec!["POST".to_string()]);
+        assert!(allowed_methods(&routes, "/z").is_empty());
+    }
+
+    #[test]
+    // MSRV-compatible allow: newer clippy rejects assert!(x.is_empty()) under
+    // pedantic; see docs/solutions/ci/stable-199-clippy-assert-is-empty-msrv-allow.md
+    #[allow(unknown_lints, clippy::assert_is_empty)]
+    fn allowed_methods_dedup_and_declaration_order() {
+        // Routes are normalized to uppercase at load time; duplicates collapse,
+        // and mixed paths keep first-declaration order per path.
+        let routes = vec![
+            route("POST", "/x"),
+            route("GET", "/x"),
+            route("POST", "/x"),
+            route("DELETE", "/x"),
+            route("GET", "/y"),
+        ];
+        assert_eq!(
+            allowed_methods(&routes, "/x"),
+            vec!["POST".to_string(), "GET".to_string(), "DELETE".to_string()]
+        );
+        assert_eq!(allowed_methods(&routes, "/y"), vec!["GET".to_string()]);
+        assert!(allowed_methods(&routes, "/other").is_empty());
+    }
+
+    #[test]
+    // MSRV-compatible allow: newer clippy rejects assert!(x.is_empty()) under
+    // pedantic; see docs/solutions/ci/stable-199-clippy-assert-is-empty-msrv-allow.md
+    #[allow(unknown_lints, clippy::assert_is_empty)]
+    fn allowed_methods_match_param_patterns_by_segment_count() {
+        // Different param names on the same shape both match, so both methods
+        // are collected; a longer path does not match.
+        let routes = vec![route("GET", "/x/:id"), route("POST", "/x/:code")];
+        assert_eq!(
+            allowed_methods(&routes, "/x/7"),
+            vec!["GET".to_string(), "POST".to_string()]
+        );
+        assert!(allowed_methods(&routes, "/x/7/8").is_empty());
     }
 }
