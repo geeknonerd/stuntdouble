@@ -191,6 +191,9 @@ mod tests {
     }
 
     #[test]
+    // MSRV-compatible allow: newer clippy rejects assert!(x.is_empty()) under
+    // pedantic; see docs/solutions/ci/stable-199-clippy-assert-is-empty-msrv-allow.md
+    #[allow(unknown_lints, clippy::assert_is_empty)]
     fn allowed_methods_collects_path_routes_ignoring_method() {
         let routes = vec![route("GET", "/x"), route("POST", "/y/:id")];
         assert_eq!(allowed_methods(&routes, "/x"), vec!["GET".to_string()]);
@@ -199,6 +202,9 @@ mod tests {
     }
 
     #[test]
+    // MSRV-compatible allow: newer clippy rejects assert!(x.is_empty()) under
+    // pedantic; see docs/solutions/ci/stable-199-clippy-assert-is-empty-msrv-allow.md
+    #[allow(unknown_lints, clippy::assert_is_empty)]
     fn allowed_methods_dedup_and_declaration_order() {
         // Routes are normalized to uppercase at load time; duplicates collapse,
         // and mixed paths keep first-declaration order per path.
@@ -218,6 +224,9 @@ mod tests {
     }
 
     #[test]
+    // MSRV-compatible allow: newer clippy rejects assert!(x.is_empty()) under
+    // pedantic; see docs/solutions/ci/stable-199-clippy-assert-is-empty-msrv-allow.md
+    #[allow(unknown_lints, clippy::assert_is_empty)]
     fn allowed_methods_match_param_patterns_by_segment_count() {
         // Different param names on the same shape both match, so both methods
         // are collected; a longer path does not match.
