@@ -7218,6 +7218,26 @@ fn known_path_wrong_method_runs_fallback_with_allow() {
     );
 }
 
+/// Fallback: with `[fallback]` configured, a normal route still wins
+/// (`GET /demo/documents/manifest/group-a` -> 200 `ok`); the fallback is not run.
+#[test]
+fn fallback_configured_normal_route_still_wins_200() {
+    let fallback_script = r#"ctx.respond(404, { "Content-Type": "text/plain; charset=utf-8" }, "fallback ran");
+"#;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (response, _) = serve_and_run(
+        |port| fallback_fixture(dir.path(), port, FALLBACK_CONFIG, fallback_script),
+        &[],
+        &[],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(
+        response.body, "ok",
+        "fallback must not run for a matching route+method"
+    );
+}
+
 /// Fallback: a method mismatch with no `[fallback]` keeps the engine 404 and
 /// no `Allow` header.
 #[test]

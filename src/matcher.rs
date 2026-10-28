@@ -32,10 +32,9 @@ pub fn match_route(routes: &[Route], method: &str, path: &str) -> Option<Match> 
 /// (`method_not_allowed`).
 #[must_use]
 pub fn has_path_match(routes: &[Route], path: &str) -> bool {
-    let segments = split(path);
-    routes
-        .iter()
-        .any(|route| match_segments(&route.path, &segments).is_some())
+    // Delegate to `allowed_methods` so path-matching traversal lives in one
+    // place; a non-empty method list means some route's path matches.
+    !allowed_methods(routes, path).is_empty()
 }
 
 /// Allowed methods for a path that no declared route answers.

@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `[fallback]` scripts now handle method mismatches as `ctx.match.kind = "method_not_allowed"`, receive the deduplicated, declaration-ordered `ctx.match.allowedMethods`, must return 405, and the host injects `Allow`; without a fallback the engine keeps its 404
 
+### Changed
+
+- `[fallback]` now answers known-path/wrong-method requests as `method_not_allowed`/405 instead of the previous engine 404. Existing `[fallback]` scripts that returned 404 for such paths now fail-closed to 500 `script_error`; update them to answer 405 (host injects `Allow`). No pub API removed.
+
 ## [1.5.1](https://github.com/geeknonerd/stuntdouble/compare/v1.5.0...v1.5.1) - 2026-10-27
 
 ### Fixed
