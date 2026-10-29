@@ -7771,7 +7771,13 @@ fn oauth_authorize_returns_redirect_for_valid_request() {
             port,
             "GET",
             "/oauth2/authorize?response_type=code&client_id=demo-client&redirect_uri=http%3A%2F%2F127.0.0.1%3A18081%2Fcallback&state=state-123",
-            &[],
+            &[
+                ("X-Sig-Key-Id", "mock-key-01"),
+                ("X-Sig-Request-Id", "abc123"),
+                ("X-Sig-Timestamp", "1700000000"),
+                ("X-Sig-Version", "1"),
+                ("X-Sig-Signature", "0000000000000000000000000000000000000000000000000000000000000000"),
+            ],
         )
     });
 
@@ -7965,6 +7971,102 @@ fn oauth_authorize_rejects_wrong_response_type() {
         response.body
     );
     assert!(response.header("location").is_none());
+}
+
+/// OAuth authorization mock: an empty state is rejected.
+#[test]
+fn oauth_authorize_rejects_empty_state() {
+    let (response, _) = with_demo(&[], |port| {
+        request(
+            port,
+            "GET",
+            "/oauth2/authorize?response_type=code&client_id=demo-client&redirect_uri=http%3A%2F%2F127.0.0.1%3A18081%2Fcallback&state=",
+            &[],
+        )
+    });
+
+    assert_eq!(response.status, 400, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("invalid_request"),
+        "body: {}",
+        response.body
+    );
+    assert!(response.header("location").is_none());
+}
+
+/// OAuth authorization mock: a state exceeding 128 characters is rejected.
+#[test]
+fn oauth_authorize_rejects_state_too_long() {
+    let long_state = "a".repeat(129);
+    let encoded = pct_encode(&long_state);
+    let (response, _) = with_demo(&[], |port| {
+        request(
+            port,
+            "GET",
+            &format!(
+                "/oauth2/authorize?response_type=code&client_id=demo-client&redirect_uri=http%3A%2F%2F127.0.0.1%3A18081%2Fcallback&state={encoded}"
+            ),
+            &[],
+        )
+    });
+
+    assert_eq!(response.status, 400, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("invalid_request"),
+        "body: {}",
+        response.body
+    );
+    assert!(response.header("location").is_none());
+}
+
+/// OAuth authorization mock: a state with non-visible ASCII characters is rejected.
+#[test]
+fn oauth_authorize_rejects_non_ascii_state() {
+    let (response, _) = with_demo(&[], |port| {
+        request(
+            port,
+            "GET",
+            "/oauth2/authorize?response_type=code&client_id=demo-client&redirect_uri=http%3A%2F%2F127.0.0.1%3A18081%2Fcallback&state=state%00null",
+            &[],
+        )
+    });
+
+    assert_eq!(response.status, 400, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("invalid_request"),
+        "body: {}",
+        response.body
+    );
+    assert!(response.header("location").is_none());
+}
+
+/// OAuth authorization mock: a state exactly at the 128-character limit is accepted.
+#[test]
+fn oauth_authorize_accepts_max_length_state() {
+    let max_state = "a".repeat(128);
+    let encoded = pct_encode(&max_state);
+    let (response, _) = with_demo(&[], |port| {
+        request(
+            port,
+            "GET",
+            &format!(
+                "/oauth2/authorize?response_type=code&client_id=demo-client&redirect_uri=http%3A%2F%2F127.0.0.1%3A18081%2Fcallback&state={encoded}"
+            ),
+            &[],
+        )
+    });
+
+    assert_eq!(response.status, 302, "body: {}", response.body);
+    let location = response
+        .header("location")
+        .expect("valid authorize must set Location");
+    assert!(
+        location.contains(&format!("&state={encoded}")),
+        "state must round-trip: {location}"
+    );
 }
 
 /// Percent-encode `text` for a query parameter value, matching the contract

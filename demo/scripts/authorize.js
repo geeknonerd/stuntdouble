@@ -11,7 +11,7 @@ function sendError(status, code) {
   ctx.respond(
     status,
     { "Content-Type": "application/json; charset=utf-8" },
-    JSON.stringify({ error: code, error_description: code })
+    JSON.stringify({ error: code, error_description: "missing or invalid parameter" })
   );
 }
 
