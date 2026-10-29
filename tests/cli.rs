@@ -5853,6 +5853,7 @@ fn demo_fixture(dir: &Path, port: u16) -> PathBuf {
         "local-manifest.js",
         "local-download.js",
         "upload.js",
+        "authorize.js",
     ] {
         std::fs::copy(
             source.join("scripts").join(script),
@@ -7759,4 +7760,331 @@ ctx.respond(405, { "Content-Type": "text/plain" }, "frozen=" + strict + " change
         "body: {}",
         response.body
     );
+}
+
+/// OAuth authorization mock: a valid authorize request redirects with a fresh
+/// one-time code and preserves the caller-supplied state.
+#[test]
+fn oauth_authorize_returns_redirect_for_valid_request() {
+    let (response, _) = with_demo(&[], |port| {
+        request(
+            port,
+            "GET",
+            "/oauth2/authorize?response_type=code&client_id=demo-client&redirect_uri=http%3A%2F%2F127.0.0.1%3A18081%2Fcallback&state=state-123",
+            &[
+                ("X-Sig-Key-Id", "mock-key-01"),
+                ("X-Sig-Request-Id", "abc123"),
+                ("X-Sig-Timestamp", "1700000000"),
+                ("X-Sig-Version", "1"),
+                ("X-Sig-Signature", "0000000000000000000000000000000000000000000000000000000000000000"),
+            ],
+        )
+    });
+
+    assert_eq!(response.status, 302, "body: {}", response.body);
+    assert_eq!(
+        response.header("cache-control"),
+        Some("no-store"),
+        "headers: {:?}",
+        response.headers
+    );
+    let location = response
+        .header("location")
+        .expect("valid authorize must set Location");
+    assert!(
+        location.starts_with("http://127.0.0.1:18081/callback?code="),
+        "location: {location}"
+    );
+    let code = location
+        .split("code=")
+        .nth(1)
+        .and_then(|rest| rest.split('&').next())
+        .expect("location must contain code");
+    assert_eq!(code.len(), 64, "code: {code}");
+    assert!(
+        code.bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "code must be lowercase hex: {code}"
+    );
+    assert!(
+        location.contains("&state=state-123"),
+        "state must round-trip: {location}"
+    );
+}
+
+/// OAuth authorization mock: two valid authorize requests must issue
+/// distinct one-time codes.
+#[test]
+fn oauth_authorize_issues_unique_codes_per_request() {
+    let (first, _) = with_demo(&[], |port| {
+        request(
+            port,
+            "GET",
+            "/oauth2/authorize?response_type=code&client_id=demo-client&redirect_uri=http%3A%2F%2F127.0.0.1%3A18081%2Fcallback&state=state-123",
+            &[],
+        )
+    });
+    let (second, _) = with_demo(&[], |port| {
+        request(
+            port,
+            "GET",
+            "/oauth2/authorize?response_type=code&client_id=demo-client&redirect_uri=http%3A%2F%2F127.0.0.1%3A18081%2Fcallback&state=state-123",
+            &[],
+        )
+    });
+
+    let first_code = first
+        .header("location")
+        .expect("first authorize must set Location")
+        .split("code=")
+        .nth(1)
+        .and_then(|rest| rest.split('&').next())
+        .expect("first location must contain code");
+    let second_code = second
+        .header("location")
+        .expect("second authorize must set Location")
+        .split("code=")
+        .nth(1)
+        .and_then(|rest| rest.split('&').next())
+        .expect("second location must contain code");
+    assert_ne!(first_code, second_code, "codes must be unique per request");
+}
+
+/// OAuth authorization mock: an unregistered `redirect_uri` is rejected and
+/// the response must never redirect to the caller-supplied URI.
+#[test]
+fn oauth_authorize_rejects_unregistered_redirect_uri() {
+    let (response, _) = with_demo(&[], |port| {
+        request(
+            port,
+            "GET",
+            "/oauth2/authorize?response_type=code&client_id=demo-client&redirect_uri=http%3A%2F%2Fevil.example.com%2Fcallback&state=state-123",
+            &[],
+        )
+    });
+
+    assert_eq!(response.status, 400, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("invalid_request"),
+        "body: {}",
+        response.body
+    );
+    assert!(
+        response.header("location").is_none(),
+        "an invalid redirect_uri must never be used in a Location header"
+    );
+    assert!(
+        !response.body.contains("evil.example.com"),
+        "the unregistered URI must not leak into the body: {}",
+        response.body
+    );
+}
+
+/// OAuth authorization mock: a wrong `client_id` is rejected.
+#[test]
+fn oauth_authorize_rejects_wrong_client_id() {
+    let (response, _) = with_demo(&[], |port| {
+        request(
+            port,
+            "GET",
+            "/oauth2/authorize?response_type=code&client_id=not-the-client&redirect_uri=http%3A%2F%2F127.0.0.1%3A18081%2Fcallback&state=state-123",
+            &[],
+        )
+    });
+
+    assert_eq!(response.status, 400, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("invalid_request"),
+        "body: {}",
+        response.body
+    );
+    assert!(response.header("location").is_none());
+}
+
+/// OAuth authorization mock: a missing state is rejected.
+#[test]
+fn oauth_authorize_rejects_missing_state() {
+    let (response, _) = with_demo(&[], |port| {
+        request(
+            port,
+            "GET",
+            "/oauth2/authorize?response_type=code&client_id=demo-client&redirect_uri=http%3A%2F%2F127.0.0.1%3A18081%2Fcallback",
+            &[],
+        )
+    });
+
+    assert_eq!(response.status, 400, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("invalid_request"),
+        "body: {}",
+        response.body
+    );
+    assert!(response.header("location").is_none());
+}
+
+/// OAuth authorization mock: the state value round-trips exactly through
+/// percent-encoding.
+#[test]
+fn oauth_authorize_preserves_state_round_trip() {
+    for &state in &["state-123", "a b&c=d", "test_state_42"] {
+        let encoded = pct_encode(state);
+        let path = format!(
+            "/oauth2/authorize?response_type=code&client_id=demo-client&redirect_uri=http%3A%2F%2F127.0.0.1%3A18081%2Fcallback&state={encoded}"
+        );
+        let (response, _) = with_demo(&[], |port| request(port, "GET", &path, &[]));
+
+        assert_eq!(
+            response.status, 302,
+            "state {state:?} body: {}",
+            response.body
+        );
+        let location = response
+            .header("location")
+            .expect("valid authorize must set Location");
+        assert!(
+            location.contains(&format!("&state={encoded}")),
+            "state must round-trip: {location}"
+        );
+    }
+}
+
+/// OAuth authorization mock: a wrong `response_type` is rejected.
+#[test]
+fn oauth_authorize_rejects_wrong_response_type() {
+    let (response, _) = with_demo(&[], |port| {
+        request(
+            port,
+            "GET",
+            "/oauth2/authorize?response_type=token&client_id=demo-client&redirect_uri=http%3A%2F%2F127.0.0.1%3A18081%2Fcallback&state=state-123",
+            &[],
+        )
+    });
+
+    assert_eq!(response.status, 400, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("invalid_request"),
+        "body: {}",
+        response.body
+    );
+    assert!(response.header("location").is_none());
+}
+
+/// OAuth authorization mock: an empty state is rejected.
+#[test]
+fn oauth_authorize_rejects_empty_state() {
+    let (response, _) = with_demo(&[], |port| {
+        request(
+            port,
+            "GET",
+            "/oauth2/authorize?response_type=code&client_id=demo-client&redirect_uri=http%3A%2F%2F127.0.0.1%3A18081%2Fcallback&state=",
+            &[],
+        )
+    });
+
+    assert_eq!(response.status, 400, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("invalid_request"),
+        "body: {}",
+        response.body
+    );
+    assert!(response.header("location").is_none());
+}
+
+/// OAuth authorization mock: a state exceeding 128 characters is rejected.
+#[test]
+fn oauth_authorize_rejects_state_too_long() {
+    let long_state = "a".repeat(129);
+    let encoded = pct_encode(&long_state);
+    let (response, _) = with_demo(&[], |port| {
+        request(
+            port,
+            "GET",
+            &format!(
+                "/oauth2/authorize?response_type=code&client_id=demo-client&redirect_uri=http%3A%2F%2F127.0.0.1%3A18081%2Fcallback&state={encoded}"
+            ),
+            &[],
+        )
+    });
+
+    assert_eq!(response.status, 400, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("invalid_request"),
+        "body: {}",
+        response.body
+    );
+    assert!(response.header("location").is_none());
+}
+
+/// OAuth authorization mock: a state with non-visible ASCII characters is rejected.
+#[test]
+fn oauth_authorize_rejects_non_ascii_state() {
+    let (response, _) = with_demo(&[], |port| {
+        request(
+            port,
+            "GET",
+            "/oauth2/authorize?response_type=code&client_id=demo-client&redirect_uri=http%3A%2F%2F127.0.0.1%3A18081%2Fcallback&state=state%00null",
+            &[],
+        )
+    });
+
+    assert_eq!(response.status, 400, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some("invalid_request"),
+        "body: {}",
+        response.body
+    );
+    assert!(response.header("location").is_none());
+}
+
+/// OAuth authorization mock: a state exactly at the 128-character limit is accepted.
+#[test]
+fn oauth_authorize_accepts_max_length_state() {
+    let max_state = "a".repeat(128);
+    let encoded = pct_encode(&max_state);
+    let (response, _) = with_demo(&[], |port| {
+        request(
+            port,
+            "GET",
+            &format!(
+                "/oauth2/authorize?response_type=code&client_id=demo-client&redirect_uri=http%3A%2F%2F127.0.0.1%3A18081%2Fcallback&state={encoded}"
+            ),
+            &[],
+        )
+    });
+
+    assert_eq!(response.status, 302, "body: {}", response.body);
+    let location = response
+        .header("location")
+        .expect("valid authorize must set Location");
+    assert!(
+        location.contains(&format!("&state={encoded}")),
+        "state must round-trip: {location}"
+    );
+}
+
+/// Percent-encode `text` for a query parameter value, matching the contract
+/// rule that spaces become `%20` and reserved characters are escaped.
+fn pct_encode(text: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric()
+            || byte == b'-'
+            || byte == b'_'
+            || byte == b'.'
+            || byte == b'~'
+        {
+            out.push(byte as char);
+        } else {
+            let _ = write!(out, "%{byte:02X}");
+        }
+    }
+    out
 }

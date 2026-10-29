@@ -52,3 +52,9 @@ name = "document-upload"
 method = "POST"
 path = "/demo/documents/upload"
 script = "scripts/upload.js"
+
+[[routes]]
+name = "oauth-authorize"
+method = "GET"
+path = "/oauth2/authorize"
+script = "scripts/authorize.js"
