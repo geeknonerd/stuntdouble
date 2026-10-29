@@ -201,6 +201,7 @@ See [plans/product-definition.md](plans/product-definition.md) for the full scop
 - [Public contracts](docs/contracts/) — configuration, `ctx` API, and CLI.
 - [`ctx` API type definitions](types/ctx-api-v1.d.ts) — apiVersion 1 source types.
 - [Demo fixture](demo/README.md) — runnable offline and upstream document scenarios.
+- [OAuth authorization mock](demo/oauth-authorization-mock/README.md) — minimal OAuth 2.0 authorization code flow mock.
 - [Documentation site](https://geeknonerd.github.io/stuntdouble/) — rendered contracts and demo entry points.
 - [Changelog](CHANGELOG.md) — release history.
 
