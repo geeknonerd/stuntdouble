@@ -203,6 +203,7 @@ cargo install --path .
 - [公开契约](docs/contracts/README.zh-CN.md)——配置、`ctx` API 与 CLI。
 - [`ctx` API 类型定义](types/ctx-api-v1.d.ts)——apiVersion 1 源码类型。
 - [演示夹具](demo/README.zh-CN.md)——可运行的离线与上游文档场景。
+- [OAuth 授权 mock](demo/oauth-authorization-mock/README.zh-CN.md)——最小化 OAuth 2.0 授权码流程 mock。
 - [文档站](https://geeknonerd.github.io/stuntdouble/)——渲染后的契约与 demo 入口。
 - [变更日志](CHANGELOG.md)——发布历史。
 
