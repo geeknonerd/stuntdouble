@@ -5854,6 +5854,7 @@ fn demo_fixture(dir: &Path, port: u16) -> PathBuf {
         "local-download.js",
         "upload.js",
         "authorize.js",
+        "token.js",
     ] {
         std::fs::copy(
             source.join("scripts").join(script),
@@ -8087,4 +8088,542 @@ fn pct_encode(text: &str) -> String {
         }
     }
     out
+}
+
+const OAUTH_TOKEN_PATH: &str = "/oauth2/token";
+const OAUTH_REDIRECT_URI: &str = "http://127.0.0.1:18081/callback";
+const OAUTH_SIGNING_SECRET: &str = "demo-signing-secret";
+
+/// Request `code` via the demo authorize endpoint and return the issued code.
+fn oauth_issue_code(port: u16) -> String {
+    let path = format!(
+        "/oauth2/authorize?response_type=code&client_id=demo-client&redirect_uri={}&state=state-123",
+        pct_encode(OAUTH_REDIRECT_URI)
+    );
+    let response = request(port, "GET", &path, &[]);
+    assert_eq!(response.status, 302, "body: {}", response.body);
+    response
+        .header("location")
+        .expect("authorize must set Location")
+        .split("code=")
+        .nth(1)
+        .and_then(|rest| rest.split('&').next())
+        .expect("location must contain code")
+        .to_string()
+}
+
+/// The token form for one exchange; `code` and `redirect_uri` are parameters
+/// only if the caller overrides them.
+fn oauth_form(code: &str, redirect_uri: &str) -> String {
+    format!(
+        "grant_type=authorization_code&client_id=demo-client&client_secret=demo-client-secret&code={code}&redirect_uri={}",
+        pct_encode(redirect_uri)
+    )
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    for byte in bytes {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+/// Independent HMAC-SHA256 signing of the contract canonical string.
+fn oauth_signature(timestamp: &str, request_id: &str, body: &[u8]) -> String {
+    use hmac::{Hmac, KeyInit, Mac};
+    use sha2::{Digest, Sha256};
+    let canonical = format!(
+        "POST\n{OAUTH_TOKEN_PATH}\n\n{timestamp}\n{request_id}\n{}",
+        hex_encode(&Sha256::digest(body))
+    );
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(OAUTH_SIGNING_SECRET.as_bytes()).expect("hmac key");
+    mac.update(canonical.as_bytes());
+    hex_encode(&mac.finalize().into_bytes())
+}
+
+fn oauth_request_id(seed: u32) -> String {
+    format!("{seed:032x}")
+}
+
+fn oauth_now() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_secs()
+        .to_string()
+}
+
+fn oauth_token_headers<'a>(
+    timestamp: &'a str,
+    request_id: &'a str,
+    signature: &'a str,
+) -> Vec<(&'a str, &'a str)> {
+    vec![
+        ("Content-Type", "application/x-www-form-urlencoded"),
+        ("X-Sig-Key-Id", "mock-key-01"),
+        ("X-Sig-Request-Id", request_id),
+        ("X-Sig-Timestamp", timestamp),
+        ("X-Sig-Version", "1"),
+        ("X-Sig-Signature", signature),
+    ]
+}
+
+/// Exchange with a freshly signed request; `body` is signed verbatim.
+fn oauth_exchange(port: u16, body: &str, request_id_seed: u32) -> Response {
+    let timestamp = oauth_now();
+    let request_id = oauth_request_id(request_id_seed);
+    let signature = oauth_signature(&timestamp, &request_id, body.as_bytes());
+    let headers = oauth_token_headers(&timestamp, &request_id, &signature);
+    request_with_body(port, "POST", OAUTH_TOKEN_PATH, &headers, body)
+}
+
+fn assert_oauth_error(response: &Response, status: u16, error: &str) {
+    assert_eq!(response.status, status, "body: {}", response.body);
+    assert_eq!(
+        error_class(&response.body).as_deref(),
+        Some(error),
+        "body: {}",
+        response.body
+    );
+    assert_eq!(
+        response.header("content-type"),
+        Some("application/json; charset=utf-8"),
+        "headers: {:?}",
+        response.headers
+    );
+}
+
+fn oauth_success_json(response: &Response) -> (String, serde_json::Value) {
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(
+        response.header("content-type"),
+        Some("application/json; charset=utf-8")
+    );
+    assert_eq!(response.header("cache-control"), Some("no-store"));
+    assert_eq!(response.header("pragma"), Some("no-cache"));
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    let token = json["access_token"]
+        .as_str()
+        .expect("access_token string")
+        .to_string();
+    (token, json)
+}
+
+fn assert_access_token_shape(token: &str) {
+    assert_eq!(token.len(), 35, "token: {token}");
+    assert!(token.starts_with("at-"), "token: {token}");
+    let hex = &token[3..];
+    assert!(
+        hex.bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "token suffix must be lowercase hex: {token}"
+    );
+}
+
+/// A05: a valid code is exchanged for a Bearer token with only the three
+/// contract fields, and records nothing secret in the request log.
+#[test]
+fn oauth_token_exchanges_valid_code() {
+    let (result, log) = with_demo(&[], |port| {
+        let code = oauth_issue_code(port);
+        let response = oauth_exchange(port, &oauth_form(&code, OAUTH_REDIRECT_URI), 1);
+        (code, response)
+    });
+    let (code, response) = result;
+    let (token, json) = oauth_success_json(&response);
+    assert_access_token_shape(&token);
+    assert_eq!(json["token_type"], "Bearer");
+    assert_eq!(json["expires_in"], 300);
+    assert_eq!(
+        json.as_object().expect("object").keys().collect::<Vec<_>>(),
+        vec!["access_token", "expires_in", "token_type"]
+    );
+    for secret in ["demo-client-secret", "demo-signing-secret", &code, &token] {
+        assert!(
+            !log.contains(secret),
+            "secret {secret:?} leaked into logs: {log}"
+        );
+    }
+}
+
+/// Every successful exchange issues a distinct access token.
+#[test]
+fn oauth_token_issues_unique_access_tokens() {
+    let (tokens, _) = with_demo(&[], |port| {
+        let mut tokens = Vec::new();
+        for seed in 10..13 {
+            let code = oauth_issue_code(port);
+            let response = oauth_exchange(port, &oauth_form(&code, OAUTH_REDIRECT_URI), seed);
+            tokens.push(oauth_success_json(&response).0);
+        }
+        tokens
+    });
+    assert_ne!(tokens[0], tokens[1]);
+    assert_ne!(tokens[1], tokens[2]);
+    assert_ne!(tokens[0], tokens[2]);
+}
+
+/// A06: a code is single use; the second exchange is `invalid_grant`.
+#[test]
+fn oauth_token_rejects_reused_code() {
+    let (result, _) = with_demo(&[], |port| {
+        let code = oauth_issue_code(port);
+        let form = oauth_form(&code, OAUTH_REDIRECT_URI);
+        let first = oauth_exchange(port, &form, 2);
+        let second = oauth_exchange(port, &form, 3);
+        (first, second)
+    });
+    oauth_success_json(&result.0);
+    assert_oauth_error(&result.1, 400, "invalid_grant");
+}
+
+/// A07: a code older than its 60-second TTL is `invalid_grant`.
+#[test]
+fn oauth_token_rejects_expired_code() {
+    let (response, _) = with_demo(&[], |port| {
+        let code = oauth_issue_code(port);
+        std::thread::sleep(Duration::from_secs(61));
+        oauth_exchange(port, &oauth_form(&code, OAUTH_REDIRECT_URI), 4)
+    });
+    assert_oauth_error(&response, 400, "invalid_grant");
+}
+
+/// A08: a redirect URI other than the one used during authorization is
+/// `invalid_grant`, and the code survives that failed attempt.
+#[test]
+fn oauth_token_rejects_wrong_redirect_uri() {
+    let (result, _) = with_demo(&[], |port| {
+        let code = oauth_issue_code(port);
+        let wrong = oauth_exchange(port, &oauth_form(&code, "http://127.0.0.1:18081/other"), 5);
+        let right = oauth_exchange(port, &oauth_form(&code, OAUTH_REDIRECT_URI), 6);
+        (wrong, right)
+    });
+    assert_oauth_error(&result.0, 400, "invalid_grant");
+    oauth_success_json(&result.1);
+}
+
+/// A09: a wrong client secret is `invalid_client`, and the code survives.
+#[test]
+fn oauth_token_rejects_wrong_client_secret() {
+    let (result, _) = with_demo(&[], |port| {
+        let code = oauth_issue_code(port);
+        let wrong_body = oauth_form(&code, OAUTH_REDIRECT_URI).replace(
+            "client_secret=demo-client-secret",
+            "client_secret=wrong-secret",
+        );
+        let wrong = oauth_exchange(port, &wrong_body, 7);
+        let wrong_id = oauth_form(&code, OAUTH_REDIRECT_URI)
+            .replace("client_id=demo-client&", "client_id=other-client&");
+        let wrong_id = oauth_exchange(port, &wrong_id, 8);
+        let right = oauth_exchange(port, &oauth_form(&code, OAUTH_REDIRECT_URI), 9);
+        (wrong, wrong_id, right)
+    });
+    assert_oauth_error(&result.0, 401, "invalid_client");
+    assert_oauth_error(&result.1, 401, "invalid_client");
+    oauth_success_json(&result.2);
+}
+
+/// A10: a correctly signed JSON body is rejected as `invalid_request`.
+#[test]
+fn oauth_token_rejects_json_body() {
+    let (result, _) = with_demo(&[], |port| {
+        let code = oauth_issue_code(port);
+        let json = serde_json::json!({
+            "grant_type": "authorization_code",
+            "client_id": "demo-client",
+            "client_secret": "demo-client-secret",
+            "code": code,
+            "redirect_uri": OAUTH_REDIRECT_URI,
+        })
+        .to_string();
+        let timestamp = oauth_now();
+        let request_id = oauth_request_id(11);
+        let signature = oauth_signature(&timestamp, &request_id, json.as_bytes());
+        let headers = vec![
+            ("Content-Type", "application/json"),
+            ("X-Sig-Key-Id", "mock-key-01"),
+            ("X-Sig-Request-Id", request_id.as_str()),
+            ("X-Sig-Timestamp", timestamp.as_str()),
+            ("X-Sig-Version", "1"),
+            ("X-Sig-Signature", signature.as_str()),
+        ];
+        request_with_body(port, "POST", OAUTH_TOKEN_PATH, &headers, &json)
+    });
+    assert_oauth_error(&result, 400, "invalid_request");
+}
+
+/// A05 support: duplicate form fields use the first value.
+#[test]
+fn oauth_token_uses_first_duplicate_field_value() {
+    let (response, _) = with_demo(&[], |port| {
+        let code = oauth_issue_code(port);
+        let first = oauth_form(&code, OAUTH_REDIRECT_URI);
+        let body = format!("{first}&client_secret=wrong-secret&code=bad");
+        oauth_exchange(port, &body, 12)
+    });
+    oauth_success_json(&response);
+}
+
+/// A11: a missing signature header is `invalid_signature`, even when the
+/// form itself is malformed (signature validation comes first).
+#[test]
+fn oauth_token_rejects_missing_signature_before_form_errors() {
+    let (response, _) = with_demo(&[], |port| {
+        request_with_body(
+            port,
+            "POST",
+            OAUTH_TOKEN_PATH,
+            &[("Content-Type", "application/json")],
+            "{}",
+        )
+    });
+    assert_oauth_error(&response, 401, "invalid_signature");
+}
+
+/// A12: a wrong signature is `invalid_signature` and does not consume the code.
+#[test]
+fn oauth_token_rejects_wrong_signature() {
+    let (result, _) = with_demo(&[], |port| {
+        let code = oauth_issue_code(port);
+        let body = oauth_form(&code, OAUTH_REDIRECT_URI);
+        let timestamp = oauth_now();
+        let request_id = oauth_request_id(13);
+        let mut signature = oauth_signature(&timestamp, &request_id, body.as_bytes());
+        signature.replace_range(0..1, if signature.starts_with('0') { "1" } else { "0" });
+        let headers = oauth_token_headers(&timestamp, &request_id, &signature);
+        let wrong = request_with_body(port, "POST", OAUTH_TOKEN_PATH, &headers, &body);
+        // Tampering with the body after signing must also fail.
+        let request_id = oauth_request_id(14);
+        let signature = oauth_signature(&timestamp, &request_id, body.as_bytes());
+        let headers = oauth_token_headers(&timestamp, &request_id, &signature);
+        let tampered = request_with_body(
+            port,
+            "POST",
+            OAUTH_TOKEN_PATH,
+            &headers,
+            &format!("{body} "),
+        );
+        let right = oauth_exchange(port, &body, 15);
+        (wrong, tampered, right)
+    });
+    assert_oauth_error(&result.0, 401, "invalid_signature");
+    assert_oauth_error(&result.1, 401, "invalid_signature");
+    oauth_success_json(&result.2);
+}
+
+/// A13: timestamps more than 300 seconds from server time fail.
+#[test]
+fn oauth_token_rejects_timestamp_outside_window() {
+    let (result, _) = with_demo(&[], |port| {
+        let code = oauth_issue_code(port);
+        let body = oauth_form(&code, OAUTH_REDIRECT_URI);
+        let now: i64 = oauth_now().parse().expect("timestamp");
+        let mut responses = Vec::new();
+        for (seed, offset) in [(16, -900_i64), (17, 900_i64), (18, -299_i64)] {
+            let timestamp = (now + offset).to_string();
+            let request_id = oauth_request_id(seed);
+            let signature = oauth_signature(&timestamp, &request_id, body.as_bytes());
+            let headers = oauth_token_headers(&timestamp, &request_id, &signature);
+            responses.push(request_with_body(
+                port,
+                "POST",
+                OAUTH_TOKEN_PATH,
+                &headers,
+                &body,
+            ));
+        }
+        responses
+    });
+    assert_oauth_error(&result[0], 401, "invalid_signature");
+    assert_oauth_error(&result[1], 401, "invalid_signature");
+    oauth_success_json(&result[2]);
+}
+
+/// A14: a correctly signed request ID cannot be reused within 10 minutes.
+#[test]
+fn oauth_token_rejects_replayed_request_id() {
+    let (result, _) = with_demo(&[], |port| {
+        let code = oauth_issue_code(port);
+        let body = oauth_form(&code, OAUTH_REDIRECT_URI);
+        let timestamp = oauth_now();
+        let request_id = oauth_request_id(19);
+        let signature = oauth_signature(&timestamp, &request_id, body.as_bytes());
+        let headers = oauth_token_headers(&timestamp, &request_id, &signature);
+        let first = request_with_body(port, "POST", OAUTH_TOKEN_PATH, &headers, &body);
+        // Same ID, freshly signed on a different path context: still a replay.
+        let replay = request_with_body(port, "POST", OAUTH_TOKEN_PATH, &headers, &body);
+        (first, replay)
+    });
+    oauth_success_json(&result.0);
+    assert_oauth_error(&result.1, 401, "invalid_signature");
+}
+
+/// An unsigned request must not reserve its request ID, so the same ID works
+/// once the signature is fixed.
+#[test]
+fn oauth_token_does_not_reserve_rejected_request_ids() {
+    let (result, _) = with_demo(&[], |port| {
+        let code = oauth_issue_code(port);
+        let body = oauth_form(&code, OAUTH_REDIRECT_URI);
+        let timestamp = oauth_now();
+        let request_id = oauth_request_id(20);
+        let bad_signature = "0".repeat(64);
+        let bad = oauth_token_headers(&timestamp, &request_id, &bad_signature);
+        let rejected = request_with_body(port, "POST", OAUTH_TOKEN_PATH, &bad, &body);
+        let signature = oauth_signature(&timestamp, &request_id, body.as_bytes());
+        let good = oauth_token_headers(&timestamp, &request_id, &signature);
+        let accepted = request_with_body(port, "POST", OAUTH_TOKEN_PATH, &good, &body);
+        (rejected, accepted)
+    });
+    assert_oauth_error(&result.0, 401, "invalid_signature");
+    oauth_success_json(&result.1);
+}
+
+/// §6.5 pins the sample signature for its fixed request.
+#[test]
+fn oauth_token_matches_contract_signature_vector() {
+    assert_eq!(
+        oauth_signature(
+            "1700000000",
+            "11111111111111111111111111111111",
+            b"grant_type=authorization_code&client_id=demo-client&client_secret=demo-client-secret&code=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef&redirect_uri=http%3A%2F%2F127.0.0.1%3A18081%2Fcallback"
+        ),
+        "0f9053612f617b27e91b1343746156654a3922917ee08b4700b7346eb445aa29"
+    );
+}
+
+/// Canonical-query signing: a query with `+`, lowercase percent escapes and
+/// duplicate names verifies against the canonical form, while the same query
+/// signed in wire order does not.
+#[test]
+fn oauth_token_signs_canonical_queries() {
+    let (result, _) = with_demo(&[], |port| {
+        let code = oauth_issue_code(port);
+        let body = oauth_form(&code, OAUTH_REDIRECT_URI);
+        let timestamp = oauth_now();
+        let request_id = oauth_request_id(21);
+        // Sorted: a%20b=1&a%20b=2&b=x; wire order differs.
+        let canonical_query = "a%20b=1&a%20b=2&b=x";
+        let wire_query = "b=x&a%20b=2&a+b=1";
+        let signature = oauth_token_canonical_signature(
+            &timestamp,
+            &request_id,
+            canonical_query,
+            body.as_bytes(),
+        );
+        let headers = oauth_token_headers(&timestamp, &request_id, &signature);
+        let path = format!("{OAUTH_TOKEN_PATH}?{wire_query}");
+        let accepted = request_with_body(port, "POST", &path, &headers, &body);
+        // A stale request ID reuses the reservation, but the unsigned-body
+        // variant proves the canonical form is what the host computed.
+        let second_id = oauth_request_id(22);
+        let unsigned_signature =
+            oauth_token_canonical_signature(&timestamp, &second_id, wire_query, body.as_bytes());
+        let headers = oauth_token_headers(&timestamp, &second_id, &unsigned_signature);
+        let rejected = request_with_body(port, "POST", &path, &headers, &body);
+        (accepted, rejected)
+    });
+    oauth_success_json(&result.0);
+    assert_oauth_error(&result.1, 401, "invalid_signature");
+}
+
+/// Sign the token canonical string with an explicit canonical query.
+fn oauth_token_canonical_signature(
+    timestamp: &str,
+    request_id: &str,
+    canonical_query: &str,
+    body: &[u8],
+) -> String {
+    use hmac::{Hmac, KeyInit, Mac};
+    use sha2::{Digest, Sha256};
+    let canonical = format!(
+        "POST\n{OAUTH_TOKEN_PATH}\n{canonical_query}\n{timestamp}\n{request_id}\n{}",
+        hex_encode(&Sha256::digest(body))
+    );
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(OAUTH_SIGNING_SECRET.as_bytes()).expect("hmac key");
+    mac.update(canonical.as_bytes());
+    hex_encode(&mac.finalize().into_bytes())
+}
+
+/// Concurrent exchanges of one code: exactly one 200 and the rest
+/// `invalid_grant`.
+#[test]
+fn oauth_token_concurrent_exchange_yields_one_success() {
+    let (statuses, _) = with_demo(&[], |port| {
+        let code = oauth_issue_code(port);
+        let body = Arc::new(oauth_form(&code, OAUTH_REDIRECT_URI));
+        let barrier = Arc::new(Barrier::new(3));
+        let mut handles: Vec<_> = Vec::new();
+        for seed in 0..3 {
+            let body = Arc::clone(&body);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                let timestamp = oauth_now();
+                let request_id = oauth_request_id(40 + seed);
+                let signature = oauth_signature(&timestamp, &request_id, body.as_bytes());
+                let headers = oauth_token_headers(&timestamp, &request_id, &signature);
+                barrier.wait();
+                let response = request_with_body(port, "POST", OAUTH_TOKEN_PATH, &headers, &body);
+                (response.status, error_class(&response.body))
+            }));
+        }
+        let statuses: Vec<(u16, Option<String>)> = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("exchange thread"))
+            .collect();
+        statuses
+    });
+    let successes = statuses.iter().filter(|(status, _)| *status == 200).count();
+    assert_eq!(successes, 1, "statuses: {statuses:?}");
+    for (status, error) in &statuses {
+        if *status != 200 {
+            assert_eq!(*status, 400, "statuses: {statuses:?}");
+            assert_eq!(
+                error.as_deref(),
+                Some("invalid_grant"),
+                "statuses: {statuses:?}"
+            );
+        }
+    }
+}
+
+/// Error precedence: a bad client is reported before a bad code, and a bad
+/// signature before either.
+#[test]
+fn oauth_token_error_ordering() {
+    let (result, _) = with_demo(&[], |port| {
+        let unknown = "a".repeat(64);
+        let body = oauth_form(&unknown, OAUTH_REDIRECT_URI)
+            .replace("client_secret=demo-client-secret", "client_secret=wrong");
+        let wrong_client_first = oauth_exchange(port, &body, 60);
+        let bad_code = oauth_exchange(port, &oauth_form("not-hex", OAUTH_REDIRECT_URI), 61);
+        let missing_grant = oauth_exchange(
+            port,
+            &oauth_form(&unknown, OAUTH_REDIRECT_URI).replace("grant_type=authorization_code&", ""),
+            62,
+        );
+        let unsigned = request_with_body(
+            port,
+            "POST",
+            OAUTH_TOKEN_PATH,
+            &[("Content-Type", "application/x-www-form-urlencoded")],
+            &body,
+        );
+        (wrong_client_first, bad_code, missing_grant, unsigned)
+    });
+    assert_oauth_error(&result.0, 401, "invalid_client");
+    assert_oauth_error(&result.1, 400, "invalid_request");
+    assert_oauth_error(&result.2, 400, "invalid_request");
+    assert_oauth_error(&result.3, 401, "invalid_signature");
+}
+
+/// Unknown methods keep the engine's method-mismatch answer, ahead of any
+/// signature check.
+#[test]
+fn oauth_token_rejects_other_methods() {
+    let (response, _) = with_demo(&[], |port| request(port, "GET", OAUTH_TOKEN_PATH, &[]));
+    assert_eq!(response.status, 404, "body: {}", response.body);
 }

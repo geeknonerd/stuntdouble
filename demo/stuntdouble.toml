@@ -58,3 +58,9 @@ name = "oauth-authorize"
 method = "GET"
 path = "/oauth2/authorize"
 script = "scripts/authorize.js"
+
+[[routes]]
+name = "oauth-token"
+method = "POST"
+path = "/oauth2/token"
+script = "scripts/token.js"

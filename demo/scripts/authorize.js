@@ -65,9 +65,10 @@ function issueCode(state) {
     return ("0" + b.toString(16)).slice(-2);
   }).join("");
 
-  // Store with 60-second TTL; key prefix to avoid collisions
+  // Store with 60-second TTL; key prefix to avoid collisions. The exact
+  // redirect_uri is bound to the code so the token endpoint can compare it.
   var key = "oauth:code:" + code;
-  var value = { state: state };
+  var value = { state: state, redirect_uri: REDIRECT_URI };
   ctx.state.set(key, value, { ttl_ms: 60000 });
 
   // Build Location with code and percent-encoded state
