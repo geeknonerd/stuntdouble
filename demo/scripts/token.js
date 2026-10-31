@@ -57,7 +57,9 @@ function isLowerHex(text, length) {
 }
 
 function isDecimalSeconds(text) {
-  if (typeof text !== "string" || text.length === 0 || text.length > 20) {
+  // Keep the conversion exact for JavaScript numbers; Unix seconds fit in
+  // 10 digits until 2286, so longer values are malformed rather than useful.
+  if (typeof text !== "string" || text.length === 0 || text.length > 10) {
     return false;
   }
   for (var i = 0; i < text.length; i += 1) {
@@ -70,8 +72,12 @@ function isDecimalSeconds(text) {
 }
 
 // §6.2: percent-encode with uppercase hex, spaces as %20, sorted by encoded
-// name then encoded value.
+// name then encoded value. Returns null when the raw query cannot be decoded,
+// so the caller fails closed instead of signing a guessed value.
 function canonicalQuery(rawQuery) {
+  if (typeof rawQuery !== "string") {
+    return null;
+  }
   if (rawQuery === "") {
     return "";
   }
@@ -84,7 +90,12 @@ function canonicalQuery(rawQuery) {
     var eq = parts[i].indexOf("=");
     var rawName = eq < 0 ? parts[i] : parts[i].slice(0, eq);
     var rawValue = eq < 0 ? "" : parts[i].slice(eq + 1);
-    pairs.push([pctDecode(rawName), pctDecode(rawValue)]);
+    var name = pctDecode(rawName);
+    var value = pctDecode(rawValue);
+    if (name === null || value === null) {
+      return null;
+    }
+    pairs.push([name, value]);
   }
   var encoded = [];
   for (var j = 0; j < pairs.length; j += 1) {
@@ -107,18 +118,29 @@ function canonicalQuery(rawQuery) {
 }
 
 function pctEncode(text) {
-  // Uppercase only the hex digits inside percent-encoded sequences.
-  return encodeURIComponent(text).replace(/%[0-9a-f]{2}/gi, function (m) {
-    return m.toUpperCase();
-  });
+  // Escape `!'()*` too: §6.2 keeps only RFC 3986 unreserved characters, and
+  // uppercase the hex digits of every percent-encoded sequence.
+  return encodeURIComponent(text)
+    .replace(/[!'()*]/g, function (c) {
+      return "%" + c.charCodeAt(0).toString(16).toUpperCase();
+    })
+    .replace(/%[0-9a-f]{2}/gi, function (m) {
+      return m.toUpperCase();
+    });
 }
 
 function pctDecode(text) {
   try {
-    return decodeURIComponent(text.replace(/\+/g, "%20"));
+    return decodeURIComponent(text);
   } catch (e) {
-    return text;
+    return null;
   }
+}
+
+// application/x-www-form-urlencoded turns "+" into a space; percent escapes
+// keep their standard meaning.
+function formDecode(text) {
+  return pctDecode(text.replace(/\+/g, "%20"));
 }
 
 function sendError(status, code, description) {
@@ -133,8 +155,12 @@ function sendError(status, code, description) {
   );
 }
 
-function sigError() {
-  sendError(401, "invalid_signature", "missing or invalid request signature");
+function sigError(description) {
+  sendError(
+    401,
+    "invalid_signature",
+    description || "missing or invalid request signature"
+  );
 }
 
 // Returns true when the signature is valid and the request ID was reserved.
@@ -174,11 +200,11 @@ function verifySignature() {
   var now = Math.floor(Date.now() / 1000);
   // `timestamp` was validated as decimal digits; convert without `parseInt`.
   var sent = 0;
-  for (var _i = 0; _i < timestamp.length; _i += 1) {
-    sent = sent * 10 + (timestamp.charCodeAt(_i) - 0x30);
+  for (var i = 0; i < timestamp.length; i += 1) {
+    sent = sent * 10 + (timestamp.charCodeAt(i) - 0x30);
   }
   if (Math.abs(now - sent) > SIG_WINDOW_SECONDS) {
-    sigError();
+    sigError("signature timestamp is outside the allowed window");
     return false;
   }
   var replayKey = "oauth:sig:" + requestId;
@@ -188,10 +214,15 @@ function verifySignature() {
   }
   var body = ctx.request.bodyBytes;
   var bodyBytes = body === null ? new Uint8Array(0) : body;
+  var canonicalQueryValue = canonicalQuery(ctx.request.rawQuery);
+  if (canonicalQueryValue === null) {
+    sigError("request query has malformed percent-encoding");
+    return false;
+  }
   var canonical =
     "POST\n" +
     ctx.request.path + "\n" +
-    canonicalQuery(ctx.request.rawQuery) + "\n" +
+    canonicalQueryValue + "\n" +
     timestamp + "\n" +
     requestId + "\n" +
     toHex(ctx.crypto.sha256(bodyBytes));
@@ -205,7 +236,8 @@ function verifySignature() {
   return true;
 }
 
-// First value wins for a repeated field.
+// First value wins for a repeated field. Returns null when the body is not
+// readable as UTF-8, and false when percent-decoding fails; both map to 400.
 function parseForm() {
   var text = ctx.request.bodyText;
   if (text === null) {
@@ -218,8 +250,11 @@ function parseForm() {
       continue;
     }
     var eq = parts[i].indexOf("=");
-    var name = pctDecode(eq < 0 ? parts[i] : parts[i].slice(0, eq));
-    var value = eq < 0 ? "" : pctDecode(parts[i].slice(eq + 1));
+    var name = formDecode(eq < 0 ? parts[i] : parts[i].slice(0, eq));
+    var value = eq < 0 ? "" : formDecode(parts[i].slice(eq + 1));
+    if (name === null || value === null) {
+      return false;
+    }
     if (!Object.prototype.hasOwnProperty.call(form, name)) {
       form[name] = value;
     }
@@ -273,6 +308,8 @@ if (!verifySignature()) {
   var form = parseForm();
   if (form === null) {
     sendError(400, "invalid_request", "form body must be UTF-8");
+  } else if (form === false) {
+    sendError(400, "invalid_request", "form body has malformed percent-encoding");
   } else if (form.grant_type !== "authorization_code") {
     sendError(400, "invalid_request", "grant_type must be authorization_code");
   } else if (

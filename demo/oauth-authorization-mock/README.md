@@ -48,11 +48,12 @@ curl -i "http://127.0.0.1:18080/oauth2/authorize?response_type=code&client_id=de
 - `response_type` must be `code`
 - `client_id` must be `demo-client`
 - `redirect_uri` must exactly match `http://127.0.0.1:18081/callback`
-- `state` must be 1–128 visible ASCII characters (0x20–0x7e)
+- `state` must be 1–128 visible ASCII characters (0x21–0x7e)
 
 On success, the endpoint returns `302` with a `Location` header containing:
 - `code`: a 64-character lowercase hexadecimal authorization code generated from 32 random bytes via `ctx.crypto.randomBytes`
-- `state`: the original state value, percent-encoded via `encodeURIComponent`
+- `state`: the original state value, percent-encoded with uppercase hex; only
+  RFC 3986 unreserved characters stay literal
 
 The response includes `Cache-Control: no-store`.
 
@@ -68,12 +69,13 @@ The authorize endpoint does not require or read request-signature headers (`X-Si
 ## Files
 
 - `demo/scripts/authorize.js` — Authorization endpoint script
+- `demo/scripts/token.js` — Token endpoint script
 - `demo/stuntdouble.toml` — Route declarations for the demo fixture
 
 ## Tests
 
 ```bash
-cargo test --test cli oauth_authorize
+cargo test --test cli oauth_
 ```
 
-Covers valid requests, unique code generation, redirect URI validation, client ID validation, state round-tripping, state boundary conditions (empty, too long, non-ASCII, max length), and missing parameters.
+Covers authorize parameter validation and state boundaries, plus A05–A14 token exchange: form-only parsing, signature precedence and canonical queries, replay and code expiry, atomic single-use codes, client and redirect validation, and response shape.

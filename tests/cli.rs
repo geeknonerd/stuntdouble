@@ -7930,7 +7930,9 @@ fn oauth_authorize_rejects_missing_state() {
 /// percent-encoding.
 #[test]
 fn oauth_authorize_preserves_state_round_trip() {
-    for &state in &["state-123", "a b&c=d", "test_state_42"] {
+    // Space is not visible ASCII, so the encoded characters are `&`, `=`, `%`,
+    // `!`, and `~` instead.
+    for &state in &["state-123", "a&b=c%d!e~", "test_state_42"] {
         let encoded = pct_encode(state);
         let path = format!(
             "/oauth2/authorize?response_type=code&client_id=demo-client&redirect_uri=http%3A%2F%2F127.0.0.1%3A18081%2Fcallback&state={encoded}"
@@ -8042,6 +8044,39 @@ fn oauth_authorize_rejects_non_ascii_state() {
         response.body
     );
     assert!(response.header("location").is_none());
+}
+
+/// §7.1: "visible ASCII" is 0x21–0x7e, so space (0x20), DEL (0x7f), and any
+/// non-ASCII byte are rejected while the neighbouring bounds are accepted.
+#[test]
+fn oauth_authorize_state_visible_ascii_bounds() {
+    let path_for = |raw_state: &str| {
+        format!(
+            "/oauth2/authorize?response_type=code&client_id=demo-client&redirect_uri=http%3A%2F%2F127.0.0.1%3A18081%2Fcallback&state={raw_state}"
+        )
+    };
+    for raw_state in ["%20", "%7F", "%80", "%1F"] {
+        let (response, _) = with_demo(&[], |port| request(port, "GET", &path_for(raw_state), &[]));
+        assert_eq!(
+            response.status, 400,
+            "state {raw_state} body: {}",
+            response.body
+        );
+        assert_eq!(
+            error_class(&response.body).as_deref(),
+            Some("invalid_request"),
+            "state {raw_state} body: {}",
+            response.body
+        );
+    }
+    for raw_state in ["%21", "%7E", "a", "~"] {
+        let (response, _) = with_demo(&[], |port| request(port, "GET", &path_for(raw_state), &[]));
+        assert_eq!(
+            response.status, 302,
+            "state {raw_state} body: {}",
+            response.body
+        );
+    }
 }
 
 /// OAuth authorization mock: a state exactly at the 128-character limit is accepted.
@@ -8193,6 +8228,16 @@ fn assert_oauth_error(response: &Response, status: u16, error: &str) {
         "headers: {:?}",
         response.headers
     );
+    assert_eq!(response.header("cache-control"), Some("no-store"));
+    assert_eq!(response.header("pragma"), Some("no-cache"));
+}
+
+/// Exchange `body` signed with an explicit timestamp and an empty query.
+fn oauth_exchange_at(port: u16, body: &str, timestamp: &str, request_id_seed: u32) -> Response {
+    let request_id = oauth_request_id(request_id_seed);
+    let signature = oauth_signature(timestamp, &request_id, body.as_bytes());
+    let headers = oauth_token_headers(timestamp, &request_id, &signature);
+    request_with_body(port, "POST", OAUTH_TOKEN_PATH, &headers, body)
 }
 
 fn oauth_success_json(response: &Response) -> (String, serde_json::Value) {
@@ -8354,6 +8399,41 @@ fn oauth_token_rejects_json_body() {
     assert_oauth_error(&result, 400, "invalid_request");
 }
 
+/// Malformed percent escapes stay client errors: an unreadable query fails at
+/// signature canonicalization, and an otherwise validly signed malformed form
+/// fails at form parsing. Neither may escape as a script error (500).
+#[test]
+fn oauth_token_rejects_malformed_percent_escaping() {
+    let (result, _) = with_demo(&[], |port| {
+        let code = oauth_issue_code(port);
+        let body = oauth_form(&code, OAUTH_REDIRECT_URI);
+        let path = format!("{OAUTH_TOKEN_PATH}?bad=%ZZ");
+        let malformed_query = {
+            // Re-sign the path/query with the same helper used by the other
+            // canonical-query tests so the request reaches query decoding.
+            let timestamp = oauth_now();
+            let request_id = oauth_request_id(105);
+            let signature = oauth_token_canonical_signature(
+                &timestamp,
+                &request_id,
+                "bad=%25ZZ",
+                body.as_bytes(),
+            );
+            let headers = oauth_token_headers(&timestamp, &request_id, &signature);
+            request_with_body(port, "POST", &path, &headers, &body)
+        };
+        let malformed_form = oauth_exchange(
+            port,
+            &oauth_form(&code, OAUTH_REDIRECT_URI)
+                .replace("client_secret=demo-client-secret", "client_secret=%ZZ"),
+            106,
+        );
+        (malformed_query, malformed_form)
+    });
+    assert_oauth_error(&result.0, 401, "invalid_signature");
+    assert_oauth_error(&result.1, 400, "invalid_request");
+}
+
 /// A05 support: duplicate form fields use the first value.
 #[test]
 fn oauth_token_uses_first_duplicate_field_value() {
@@ -8364,6 +8444,32 @@ fn oauth_token_uses_first_duplicate_field_value() {
         oauth_exchange(port, &body, 12)
     });
     oauth_success_json(&response);
+}
+
+/// Form decoding is `application/x-www-form-urlencoded`: percent escapes
+/// decode to the delivered value, while `+` is a space and therefore can
+/// never equal a character of the fixed credentials.
+#[test]
+fn oauth_token_decodes_form_percent_escapes() {
+    let (result, _) = with_demo(&[], |port| {
+        let code = oauth_issue_code(port);
+        let escaped = oauth_form(&code, OAUTH_REDIRECT_URI)
+            .replace(
+                "client_secret=demo-client-secret",
+                "client_secret=demo%2Dclient%2Dsecret",
+            )
+            .replace("client_id=demo-client", "client%5Fid=demo-client");
+        let escaped = oauth_exchange(port, &escaped, 101);
+        let code = oauth_issue_code(port);
+        let plus = oauth_form(&code, OAUTH_REDIRECT_URI).replace(
+            "client_secret=demo-client-secret",
+            "client_secret=demo-client-secret+",
+        );
+        let plus = oauth_exchange(port, &plus, 102);
+        (escaped, plus)
+    });
+    oauth_success_json(&result.0);
+    assert_oauth_error(&result.1, 401, "invalid_client");
 }
 
 /// A11: a missing signature header is `invalid_signature`, even when the
@@ -8421,6 +8527,8 @@ fn oauth_token_rejects_timestamp_outside_window() {
         let body = oauth_form(&code, OAUTH_REDIRECT_URI);
         let now: i64 = oauth_now().parse().expect("timestamp");
         let mut responses = Vec::new();
+        // The window is inclusive, and the test clock may tick during the run,
+        // so only the far edges are asserted exactly.
         for (seed, offset) in [(16, -900_i64), (17, 900_i64), (18, -299_i64)] {
             let timestamp = (now + offset).to_string();
             let request_id = oauth_request_id(seed);
@@ -8439,6 +8547,66 @@ fn oauth_token_rejects_timestamp_outside_window() {
     assert_oauth_error(&result[0], 401, "invalid_signature");
     assert_oauth_error(&result[1], 401, "invalid_signature");
     oauth_success_json(&result[2]);
+}
+
+/// A13: the contract pins a distinct description for a timestamp outside the
+/// window, while other signature failures keep the generic one.
+#[test]
+fn oauth_token_reports_timestamp_window_description() {
+    let (result, _) = with_demo(&[], |port| {
+        let code = oauth_issue_code(port);
+        let body = oauth_form(&code, OAUTH_REDIRECT_URI);
+        let now: i64 = oauth_now().parse().expect("timestamp");
+        let stale = oauth_exchange_at(port, &body, &(now - 900).to_string(), 23);
+        let unsigned = request_with_body(
+            port,
+            "POST",
+            OAUTH_TOKEN_PATH,
+            &[("Content-Type", "application/x-www-form-urlencoded")],
+            &body,
+        );
+        (stale, unsigned)
+    });
+    assert_oauth_error(&result.0, 401, "invalid_signature");
+    assert!(
+        result
+            .0
+            .body
+            .contains("signature timestamp is outside the allowed window"),
+        "body: {}",
+        result.0.body
+    );
+    assert_oauth_error(&result.1, 401, "invalid_signature");
+    assert!(
+        result
+            .1
+            .body
+            .contains("missing or invalid request signature"),
+        "body: {}",
+        result.1.body
+    );
+}
+
+/// A13: a well-formed but oversized timestamp stays `invalid_signature` and
+/// never overflows into a script error or an accidental match.
+#[test]
+fn oauth_token_rejects_unrepresentable_timestamps() {
+    let (responses, _) = with_demo(&[], |port| {
+        let code = oauth_issue_code(port);
+        let body = oauth_form(&code, OAUTH_REDIRECT_URI);
+        let mut responses = Vec::new();
+        for (seed, timestamp) in [
+            (24, "9999999999"),
+            (25, "00001700000000"),
+            (26, "99999999999999999999"),
+        ] {
+            responses.push(oauth_exchange_at(port, &body, timestamp, seed));
+        }
+        responses
+    });
+    for response in &responses {
+        assert_oauth_error(response, 401, "invalid_signature");
+    }
 }
 
 /// A14: a correctly signed request ID cannot be reused within 10 minutes.
@@ -8494,9 +8662,9 @@ fn oauth_token_matches_contract_signature_vector() {
     );
 }
 
-/// Canonical-query signing: a query with `+`, lowercase percent escapes and
-/// duplicate names verifies against the canonical form, while the same query
-/// signed in wire order does not.
+/// Canonical-query signing: lowercase percent escapes and duplicate names
+/// verify against the canonical form, while the same query signed in wire
+/// order does not.
 #[test]
 fn oauth_token_signs_canonical_queries() {
     let (result, _) = with_demo(&[], |port| {
@@ -8504,9 +8672,11 @@ fn oauth_token_signs_canonical_queries() {
         let body = oauth_form(&code, OAUTH_REDIRECT_URI);
         let timestamp = oauth_now();
         let request_id = oauth_request_id(21);
-        // Sorted: a%20b=1&a%20b=2&b=x; wire order differs.
+        // Sorted: a%20b=1&a%20b=2&b=x; wire order differs. The raw "+" stays
+        // a literal plus for canonicalization; only form decoding maps it to a
+        // space.
         let canonical_query = "a%20b=1&a%20b=2&b=x";
-        let wire_query = "b=x&a%20b=2&a+b=1";
+        let wire_query = "b=x&a%20b=2&a%20b=1";
         let signature = oauth_token_canonical_signature(
             &timestamp,
             &request_id,
@@ -8522,6 +8692,41 @@ fn oauth_token_signs_canonical_queries() {
         let unsigned_signature =
             oauth_token_canonical_signature(&timestamp, &second_id, wire_query, body.as_bytes());
         let headers = oauth_token_headers(&timestamp, &second_id, &unsigned_signature);
+        let rejected = request_with_body(port, "POST", &path, &headers, &body);
+        (accepted, rejected)
+    });
+    oauth_success_json(&result.0);
+    assert_oauth_error(&result.1, 401, "invalid_signature");
+}
+
+/// §6.2: a raw `+` in the query is a literal plus, so it percent-encodes to
+/// `%2B` and sorts after `%20`; the same query signed as a space is rejected.
+#[test]
+fn oauth_token_canonical_query_keeps_plus_literal() {
+    let (result, _) = with_demo(&[], |port| {
+        let code = oauth_issue_code(port);
+        let body = oauth_form(&code, OAUTH_REDIRECT_URI);
+        let timestamp = oauth_now();
+        let wire_query = "a+b=1&a%20b=2";
+        let canonical_query = "a%20b=2&a%2Bb=1";
+        let request_id = oauth_request_id(23);
+        let signature = oauth_token_canonical_signature(
+            &timestamp,
+            &request_id,
+            canonical_query,
+            body.as_bytes(),
+        );
+        let headers = oauth_token_headers(&timestamp, &request_id, &signature);
+        let path = format!("{OAUTH_TOKEN_PATH}?{wire_query}");
+        let accepted = request_with_body(port, "POST", &path, &headers, &body);
+        let request_id = oauth_request_id(24);
+        let signature = oauth_token_canonical_signature(
+            &timestamp,
+            &request_id,
+            "a%20b=1&a%20b=2",
+            body.as_bytes(),
+        );
+        let headers = oauth_token_headers(&timestamp, &request_id, &signature);
         let rejected = request_with_body(port, "POST", &path, &headers, &body);
         (accepted, rejected)
     });
@@ -8620,10 +8825,18 @@ fn oauth_token_error_ordering() {
     assert_oauth_error(&result.3, 401, "invalid_signature");
 }
 
-/// Unknown methods keep the engine's method-mismatch answer, ahead of any
-/// signature check.
+/// Without `[fallback]` the engine answers 404 for a method mismatch, so the
+/// token endpoint never runs its signature check. This pins the current
+/// fixture; the contract's 405 `invalid_method` needs a fallback Route and is
+/// tracked separately.
 #[test]
 fn oauth_token_rejects_other_methods() {
     let (response, _) = with_demo(&[], |port| request(port, "GET", OAUTH_TOKEN_PATH, &[]));
     assert_eq!(response.status, 404, "body: {}", response.body);
+    assert_ne!(
+        error_class(&response.body).as_deref(),
+        Some("invalid_signature"),
+        "body: {}",
+        response.body
+    );
 }

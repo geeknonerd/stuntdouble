@@ -46,10 +46,10 @@ function validateParams() {
     sendError(400, "invalid_request");
     return false;
   }
-  // visible ASCII: 0x20 (space) to 0x7e (~)
+  // visible ASCII: 0x21 (!) to 0x7e (~)
   for (var i = 0; i < state.length; i += 1) {
     var c = state.charCodeAt(i);
-    if (c < 0x20 || c > 0x7e) {
+    if (c < 0x21 || c > 0x7e) {
       sendError(400, "invalid_request");
       return false;
     }
@@ -71,8 +71,14 @@ function issueCode(state) {
   var value = { state: state, redirect_uri: REDIRECT_URI };
   ctx.state.set(key, value, { ttl_ms: 60000 });
 
-  // Build Location with code and percent-encoded state
-  var encodedState = encodeURIComponent(state);
+  // Build Location with code and percent-encoded state. `encodeURIComponent`
+  // leaves `!'()*` alone, so escape RFC 3986 reserved characters explicitly.
+  var encodedState = encodeURIComponent(state).replace(
+    /[!'()*]/g,
+    function (c) {
+      return "%" + c.charCodeAt(0).toString(16).toUpperCase();
+    }
+  );
   var location = REDIRECT_URI + "?code=" + code + "&state=" + encodedState;
 
   ctx.respond(302, {
