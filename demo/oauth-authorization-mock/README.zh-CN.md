@@ -50,11 +50,12 @@ curl -i "http://127.0.0.1:18080/oauth2/authorize?response_type=code&client_id=de
 - `response_type` 必须为 `code`
 - `client_id` 必须为 `demo-client`
 - `redirect_uri` 必须精确匹配 `http://127.0.0.1:18081/callback`
-- `state` 必须是 1–128 个可见 ASCII 字符（0x20–0x7e）
+- `state` 必须是 1–128 个可见 ASCII 字符（0x21–0x7e）
 
 成功时，端点返回 `302`，`Location` 头包含：
 - `code`：通过 `ctx.crypto.randomBytes` 生成的 32 字节随机数转换而来的 64 位小写十六进制授权码
-- `state`：原始 state 值，经 `encodeURIComponent` 百分号编码
+- `state`：原始 state 值，使用大写十六进制百分号编码；仅 RFC 3986 unreserved
+  字符保持原样
 
 响应包含 `Cache-Control: no-store`。
 
@@ -70,12 +71,13 @@ curl -i "http://127.0.0.1:18080/oauth2/authorize?response_type=code&client_id=de
 ## 文件
 
 - `demo/scripts/authorize.js` —— 授权端点脚本
+- `demo/scripts/token.js` —— 令牌端点脚本
 - `demo/stuntdouble.toml` —— 演示夹具的路由声明
 
 ## 测试
 
 ```bash
-cargo test --test cli oauth_authorize
+cargo test --test cli oauth_
 ```
 
-覆盖有效请求、唯一码生成、回调地址验证、客户端 ID 验证、state 往返、state 边界条件（空值、超长、非 ASCII、最大长度）以及缺失参数。
+覆盖授权参数校验与 state 边界，以及 A05–A14 令牌兑换：仅接受表单、签名优先级与规范查询串、重放与授权码过期、原子单次消费、客户端与回调地址校验和响应结构。
