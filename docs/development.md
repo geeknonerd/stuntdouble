@@ -22,7 +22,7 @@
 - 与 `main` 保持同步
 - 每个 commit 带 DCO 签名（`git commit -s`）；release-plz 生成的 release PR 是唯一例外（见「发布流程」）
 
-CodeQL 不是 required status check，而是由仓库 ruleset「CodeQL merge protection」参与合并判定：CodeQL 对 PR 的分析尚未完成、工具未配置，或 PR 引入 high 及以上安全告警时都会阻止合并（`alerts_threshold = none`、`security_alerts_threshold = high_or_higher`，target 为默认分支）。误报在 Security 标签页 dismiss 并写明理由；需要临时绕过时调整或停用该 ruleset，不要把 CodeQL 加进 required checks。
+CodeQL 不是 required status check，而是由仓库 ruleset「CodeQL merge protection」参与合并判定：CodeQL 对 PR 的分析尚未完成、工具未配置，或 PR 引入 high 及以上安全告警时都会阻止合并（`alerts_threshold = none`、`security_alerts_threshold = high_or_higher`，target 为默认分支）。PR 告警属于 `refs/pull/<N>/merge` 分析，不带 `ref` 的查询不会显示它们；误报应在 Security 标签页 dismiss 并写明理由，但 dismiss 只改变告警状态，不会重跑已完成的分析，必须推送新提交或重新运行 CodeQL workflow，PR 检查才可能转绿。诊断与复核命令见 [solutions/ci/codeql-pr-alerts-live-on-merge-ref.md](solutions/ci/codeql-pr-alerts-live-on-merge-ref.md)。需要临时绕过时调整或停用该 ruleset，不要把 CodeQL 加进 required checks。
 
 项目只有一位维护者时，所需批准数为 0，CI 是硬门槛。第二位维护者加入后批准数变为 1，由 CODEOWNERS 负责评审路由。
 
