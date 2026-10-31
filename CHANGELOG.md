@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.0](https://github.com/geeknonerd/stuntdouble/compare/v1.6.0...v1.7.0) - 2026-10-31
+
+### Added
+
+- *(demo)* exchange OAuth codes for access tokens ([#212](https://github.com/geeknonerd/stuntdouble/pull/212))
+
+### Other
+
+- *(ci)* document CodeQL merge-ref alert handling ([#214](https://github.com/geeknonerd/stuntdouble/pull/214))
+- add OAuth authorization mock demo documentation ([#211](https://github.com/geeknonerd/stuntdouble/pull/211))
+- *(demo)* strengthen OAuth authorize with state boundary tests ([#210](https://github.com/geeknonerd/stuntdouble/pull/210))
+
 ## [1.6.0](https://github.com/geeknonerd/stuntdouble/compare/v1.5.1...v1.6.0) - 2026-10-28
 
 ### Added
