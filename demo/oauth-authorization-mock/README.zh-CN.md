@@ -72,6 +72,7 @@ curl -i "http://127.0.0.1:18080/oauth2/authorize?response_type=code&client_id=de
 
 - `demo/scripts/authorize.js` —— 授权端点脚本
 - `demo/scripts/token.js` —— 令牌端点脚本
+- `demo/scripts/userinfo.js` —— 用户信息端点脚本
 - `demo/stuntdouble.toml` —— 演示夹具的路由声明
 
 ## 测试
@@ -80,4 +81,4 @@ curl -i "http://127.0.0.1:18080/oauth2/authorize?response_type=code&client_id=de
 cargo test --test cli oauth_
 ```
 
-覆盖授权参数校验与 state 边界，以及 A05–A14 令牌兑换：仅接受表单、签名优先级与规范查询串、重放与授权码过期、原子单次消费、客户端与回调地址校验和响应结构。
+覆盖授权参数校验与 state 边界、A05–A14 令牌兑换，以及 A15–A18 用户信息：Bearer 校验、签名优先于令牌、令牌过期、精确响应结构、重放拒绝、规范查询串签名与日志卫生。

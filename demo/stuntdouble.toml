@@ -64,3 +64,9 @@ name = "oauth-token"
 method = "POST"
 path = "/oauth2/token"
 script = "scripts/token.js"
+
+[[routes]]
+name = "oauth-userinfo"
+method = "GET"
+path = "/oauth2/userinfo"
+script = "scripts/userinfo.js"
