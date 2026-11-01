@@ -8228,18 +8228,11 @@ fn oauth_exchange(port: u16, body: &str, request_id_seed: u32) -> Response {
 }
 
 fn assert_oauth_error(response: &Response, status: u16, error: &str) {
-    assert_eq!(response.status, status, "body: {}", response.body);
-    assert_eq!(
-        error_class(&response.body).as_deref(),
-        Some(error),
-        "body: {}",
-        response.body
-    );
+    assert_eq!(response.status, status);
+    assert_eq!(error_class(&response.body).as_deref(), Some(error),);
     assert_eq!(
         response.header("content-type"),
         Some("application/json; charset=utf-8"),
-        "headers: {:?}",
-        response.headers
     );
     assert_eq!(response.header("cache-control"), Some("no-store"));
     assert_eq!(response.header("pragma"), Some("no-cache"));
@@ -8254,7 +8247,7 @@ fn oauth_exchange_at(port: u16, body: &str, timestamp: &str, request_id_seed: u3
 }
 
 fn oauth_success_json(response: &Response) -> (String, serde_json::Value) {
-    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(response.status, 200);
     assert_eq!(
         response.header("content-type"),
         Some("application/json; charset=utf-8")
@@ -8270,13 +8263,13 @@ fn oauth_success_json(response: &Response) -> (String, serde_json::Value) {
 }
 
 fn assert_access_token_shape(token: &str) {
-    assert_eq!(token.len(), 35, "token: {token}");
-    assert!(token.starts_with("at-"), "token: {token}");
+    assert_eq!(token.len(), 35);
+    assert!(token.starts_with("at-"));
     let hex = &token[3..];
     assert!(
         hex.bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
-        "token suffix must be lowercase hex: {token}"
+        "token suffix must be lowercase hex"
     );
 }
 
@@ -8979,7 +8972,7 @@ fn oauth_userinfo_returns_fixed_user_for_live_token() {
     });
     let (token, signature, response) = result;
 
-    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(response.status, 200);
     assert_eq!(
         response.header("content-type"),
         Some("application/json; charset=utf-8")
@@ -8996,12 +8989,12 @@ fn oauth_userinfo_returns_fixed_user_for_live_token() {
         "the response must not contain extra fields"
     );
     for secret in [&token, &signature, &OAUTH_SIGNING_SECRET.to_string()] {
-        assert!(!log.contains(secret), "credential leaked into logs: {log}");
+        assert!(!log.contains(secret), "credential leaked into logs");
     }
     let line = log
         .lines()
         .find(|line| line.contains("\"route\":\"oauth-userinfo\""))
-        .unwrap_or_else(|| panic!("userinfo request log missing: {log}"));
+        .unwrap_or_else(|| panic!("userinfo request log missing"));
     let entry: serde_json::Value = serde_json::from_str(line).expect("structured log json");
     let headers = &entry["request_headers"];
     for name in [
@@ -9076,7 +9069,7 @@ fn oauth_userinfo_rejects_unknown_token() {
     assert_oauth_error(&responses.1, 401, "invalid_token");
     assert_oauth_error(&responses.2, 401, "invalid_token");
     assert_oauth_error(&responses.3, 401, "invalid_token");
-    assert_eq!(responses.4.status, 200, "body: {}", responses.4.body);
+    assert_eq!(responses.4.status, 200);
 }
 
 /// A17: an expired access token is `invalid_token`. The fixture copy halves
@@ -9104,7 +9097,7 @@ fn oauth_userinfo_rejects_expired_token() {
             (live, expired)
         },
     );
-    assert_eq!(result.0.status, 200, "body: {}", result.0.body);
+    assert_eq!(result.0.status, 200);
     assert_oauth_error(&result.1, 401, "invalid_token");
 }
 
@@ -9148,14 +9141,10 @@ fn oauth_userinfo_validates_signature_first() {
     assert_oauth_error(&result.0, 401, "invalid_signature");
     assert_oauth_error(&result.1, 401, "invalid_signature");
     assert_oauth_error(&result.2, 401, "invalid_signature");
-    assert!(
-        result
-            .2
-            .body
-            .contains("signature timestamp is outside the allowed window"),
-        "body: {}",
-        result.2.body
-    );
+    assert!(result
+        .2
+        .body
+        .contains("signature timestamp is outside the allowed window"),);
 }
 
 /// Replay: an accepted request ID cannot be reused on userinfo, including
@@ -9185,7 +9174,7 @@ fn oauth_userinfo_rejects_replayed_request_id() {
         let cross_endpoint = request(port, "GET", OAUTH_USERINFO_PATH, &headers);
         (first, replay, exchange, cross_endpoint)
     });
-    assert_eq!(result.0.status, 200, "body: {}", result.0.body);
+    assert_eq!(result.0.status, 200);
     assert_oauth_error(&result.1, 401, "invalid_signature");
     oauth_success_json(&result.2);
     assert_oauth_error(&result.3, 401, "invalid_signature");
@@ -9273,7 +9262,7 @@ fn oauth_userinfo_signs_canonical_query_without_using_it() {
         );
         (accepted, rejected)
     });
-    assert_eq!(result.0.status, 200, "body: {}", result.0.body);
+    assert_eq!(result.0.status, 200);
     assert_eq!(
         result.0.body,
         r#"{"sub":"u-10001","name":"Alice","org_id":"org-10","org_name":"Example Org"}"#
@@ -9341,7 +9330,7 @@ fn oauth_acceptance_happy_path() {
             "/oauth2/authorize?response_type=code&client_id=demo-client&redirect_uri=http%3A%2F%2F127.0.0.1%3A18081%2Fcallback&state={state}"
         );
         let auth_resp = request(port, "GET", &auth_path, &[]);
-        assert_eq!(auth_resp.status, 302, "body: {}", auth_resp.body);
+        assert_eq!(auth_resp.status, 302);
         assert_eq!(auth_resp.header("cache-control"), Some("no-store"));
         let location = auth_resp
             .header("location")
@@ -9380,7 +9369,7 @@ fn oauth_acceptance_happy_path() {
 
         // Step 3: Userinfo retrieval
         let userinfo_resp = oauth_userinfo_request(port, &token, "", 302);
-        assert_eq!(userinfo_resp.status, 200, "body: {}", userinfo_resp.body);
+        assert_eq!(userinfo_resp.status, 200);
         assert_eq!(
             userinfo_resp.header("content-type"),
             Some("application/json; charset=utf-8")
@@ -9528,36 +9517,20 @@ fn oauth_acceptance_all_error_responses_conform_to_contract_shape() {
         assert_eq!(
             response.header("content-type"),
             Some("application/json; charset=utf-8"),
-            "status: {}, body: {}",
-            response.status,
-            response.body
         );
-        assert_eq!(
-            response.header("cache-control"),
-            Some("no-store"),
-            "status: {}, body: {}",
-            response.status,
-            response.body
-        );
+        assert_eq!(response.header("cache-control"), Some("no-store"),);
         assert!(
             response.header("x-request-id").is_some(),
-            "X-Request-ID must be present in response headers: status {}",
-            response.status
+            "X-Request-ID must be present in response headers"
         );
         let json: serde_json::Value =
             serde_json::from_str(&response.body).expect("valid JSON error body");
         let obj = json.as_object().expect("JSON object");
         let keys: Vec<_> = obj.keys().cloned().collect();
-        assert_eq!(
-            keys,
-            vec!["error", "error_description"],
-            "error body must have exactly error and error_description: {}",
-            response.body
-        );
+        assert_eq!(keys, vec!["error", "error_description"],);
         assert!(
             obj.get("request_id").is_none(),
-            "request_id must not leak into error body: {}",
-            response.body
+            "request_id must not leak into error body"
         );
     }
 }
