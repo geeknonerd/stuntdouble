@@ -5856,6 +5856,7 @@ fn demo_fixture(dir: &Path, port: u16) -> PathBuf {
         "authorize.js",
         "token.js",
         "userinfo.js",
+        "http-errors.js",
     ] {
         std::fs::copy(
             source.join("scripts").join(script),
@@ -5871,6 +5872,17 @@ fn demo_fixture(dir: &Path, port: u16) -> PathBuf {
 /// Serve a copy of the repository demo fixture with `env` set.
 fn with_demo<T>(env: &[(&str, &str)], run_tests: impl FnOnce(u16) -> T) -> (T, String) {
     with_demo_prepared(env, |_| {}, |port, _| run_tests(port))
+}
+
+/// Serve a copy of the repository demo fixture with `env` and CLI `args` set.
+fn with_demo_args<T>(
+    env: &[(&str, &str)],
+    args: &[&str],
+    run_tests: impl FnOnce(u16) -> T,
+) -> (T, String) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().to_path_buf();
+    serve_and_run(|port| demo_fixture(&path, port), env, args, run_tests)
 }
 
 /// Serve a copy of the repository demo fixture with `env` set. `prepare` runs
@@ -8870,19 +8882,18 @@ fn oauth_token_error_ordering() {
     assert_oauth_error(&result.3, 401, "invalid_signature");
 }
 
-/// Without `[fallback]` the engine answers 404 for a method mismatch, so the
-/// token endpoint never runs its signature check. This pins the current
-/// fixture; the contract's 405 `invalid_method` needs a fallback Route and is
-/// tracked separately.
+/// A20: an unsupported method on a known route returns 405 `invalid_method`
+/// with the host-generated `Allow` header; the route's signature check never
+/// runs.
 #[test]
 fn oauth_token_rejects_other_methods() {
     let (response, _) = with_demo(&[], |port| request(port, "GET", OAUTH_TOKEN_PATH, &[]));
-    assert_eq!(response.status, 404, "body: {}", response.body);
+    assert_oauth_error(&response, 405, "invalid_method");
+    assert_eq!(response.header("allow"), Some("POST"));
     assert_ne!(
         error_class(&response.body).as_deref(),
         Some("invalid_signature"),
-        "body: {}",
-        response.body
+        "signature validation must not run for method mismatches"
     );
 }
 
@@ -9268,4 +9279,373 @@ fn oauth_userinfo_signs_canonical_query_without_using_it() {
         r#"{"sub":"u-10001","name":"Alice","org_id":"org-10","org_name":"Example Org"}"#
     );
     assert_oauth_error(&result.1, 401, "invalid_signature");
+}
+
+/// A19: an unknown path returns 404 `not_found` as JSON without leaking
+/// internal engine details or request IDs into the body.
+#[test]
+fn oauth_acceptance_a19_unknown_path_returns_not_found() {
+    let (responses, _) = with_demo(&[], |port| {
+        (
+            request(port, "GET", "/oauth2/nonexistent", &[]),
+            request(port, "POST", "/unknown/api/path", &[]),
+        )
+    });
+    for response in [&responses.0, &responses.1] {
+        assert_oauth_error(response, 404, "not_found");
+        let json: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+        assert!(json.get("request_id").is_none(), "no request_id in body");
+        assert!(
+            response.header("x-request-id").is_some(),
+            "x-request-id header present"
+        );
+    }
+}
+
+/// A20: unsupported HTTP methods return 405 `invalid_method` with the exact
+/// host-generated `Allow` header matching configured methods for the path.
+#[test]
+fn oauth_acceptance_a20_unsupported_methods_return_405_with_allow() {
+    let (responses, _) = with_demo(&[], |port| {
+        (
+            request(port, "POST", "/oauth2/authorize", &[]),
+            request(port, "DELETE", "/oauth2/authorize", &[]),
+            request(port, "GET", OAUTH_TOKEN_PATH, &[]),
+            request(port, "PUT", OAUTH_TOKEN_PATH, &[]),
+            request(port, "POST", OAUTH_USERINFO_PATH, &[]),
+            request(port, "DELETE", OAUTH_USERINFO_PATH, &[]),
+        )
+    });
+    for response in [&responses.0, &responses.1] {
+        assert_oauth_error(response, 405, "invalid_method");
+        assert_eq!(response.header("allow"), Some("GET"));
+    }
+    for response in [&responses.2, &responses.3] {
+        assert_oauth_error(response, 405, "invalid_method");
+        assert_eq!(response.header("allow"), Some("POST"));
+    }
+    for response in [&responses.4, &responses.5] {
+        assert_oauth_error(response, 405, "invalid_method");
+        assert_eq!(response.header("allow"), Some("GET"));
+    }
+}
+
+/// Scenario acceptance: complete end-to-end happy path:
+/// Authorize -> Callback -> Token Exchange -> Userinfo Retrieval.
+#[test]
+fn oauth_acceptance_happy_path() {
+    let (result, _) = with_demo(&[], |port| {
+        // Step 1: Authorize request
+        let state = "state-acceptance-42";
+        let auth_path = format!(
+            "/oauth2/authorize?response_type=code&client_id=demo-client&redirect_uri=http%3A%2F%2F127.0.0.1%3A18081%2Fcallback&state={state}"
+        );
+        let auth_resp = request(port, "GET", &auth_path, &[]);
+        assert_eq!(auth_resp.status, 302, "body: {}", auth_resp.body);
+        assert_eq!(auth_resp.header("cache-control"), Some("no-store"));
+        let location = auth_resp
+            .header("location")
+            .expect("authorize Location header");
+        assert!(location.starts_with("http://127.0.0.1:18081/callback?code="));
+        assert!(location.contains(&format!("&state={state}")));
+        let code = location
+            .split("code=")
+            .nth(1)
+            .and_then(|rest| rest.split('&').next())
+            .expect("code in callback location")
+            .to_string();
+        assert_eq!(code.len(), 64);
+        assert!(code
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+
+        // Step 2: Token exchange
+        let token_body = oauth_form(&code, OAUTH_REDIRECT_URI);
+        let token_resp = oauth_exchange(port, &token_body, 301);
+        let (token, token_json) = oauth_success_json(&token_resp);
+        assert_eq!(token_resp.header("cache-control"), Some("no-store"));
+        assert_eq!(token_json["token_type"], "Bearer");
+        assert_eq!(token_json["expires_in"], 300);
+        assert!(token.starts_with("at-"));
+        assert_eq!(token.len(), 35);
+        assert!(token[3..]
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        let token_keys: Vec<_> = token_json.as_object().unwrap().keys().cloned().collect();
+        assert_eq!(
+            token_keys,
+            vec!["access_token", "expires_in", "token_type"],
+            "no extra token response fields"
+        );
+
+        // Step 3: Userinfo retrieval
+        let userinfo_resp = oauth_userinfo_request(port, &token, "", 302);
+        assert_eq!(userinfo_resp.status, 200, "body: {}", userinfo_resp.body);
+        assert_eq!(
+            userinfo_resp.header("content-type"),
+            Some("application/json; charset=utf-8")
+        );
+        assert_eq!(userinfo_resp.header("cache-control"), Some("no-store"));
+        let user_json: serde_json::Value =
+            serde_json::from_str(&userinfo_resp.body).expect("userinfo json");
+        assert_eq!(user_json["sub"], "u-10001");
+        assert_eq!(user_json["name"], "Alice");
+        assert_eq!(user_json["org_id"], "org-10");
+        assert_eq!(user_json["org_name"], "Example Org");
+        let user_keys: Vec<_> = user_json.as_object().unwrap().keys().cloned().collect();
+        assert_eq!(
+            user_keys,
+            vec!["name", "org_id", "org_name", "sub"],
+            "no extra userinfo response fields"
+        );
+
+        // Single-use verification: code cannot be reused
+        let reexchange = oauth_exchange(port, &token_body, 303);
+        assert_oauth_error(&reexchange, 400, "invalid_grant");
+
+        (code, token)
+    });
+    assert!(!result.0.is_empty());
+    assert!(!result.1.is_empty());
+}
+
+/// Scenario acceptance: error precedence order per §8.3:
+/// 1. Route not found (404)
+/// 2. HTTP method invalid (405)
+/// 3. Request signature invalid (401 `invalid_signature`)
+/// 4. Request format / syntax (400 `invalid_request`)
+/// 5. Credentials / client (401 `invalid_client`)
+/// 6. Grant / authorization code (400 `invalid_grant`)
+/// 7. Bearer / token validation (401 `invalid_token`)
+#[test]
+fn oauth_acceptance_error_precedence_order() {
+    let (responses, _) = with_demo(&[], |port| {
+        // 1. Route > Method
+        // POST to unknown path -> 404 not_found (not 405)
+        let r1 = request(port, "POST", "/oauth2/unknown-route", &[]);
+
+        // 2. Method > Signature
+        // GET /oauth2/token without signature -> 405 invalid_method (not 401 invalid_signature)
+        let r2 = request(port, "GET", OAUTH_TOKEN_PATH, &[]);
+
+        // 3. Signature > Request format
+        // POST /oauth2/token with invalid signature and JSON body -> 401 invalid_signature (not 400 invalid_request)
+        let r3 = request_with_body(
+            port,
+            "POST",
+            OAUTH_TOKEN_PATH,
+            &[("Content-Type", "application/json")],
+            r#"{"bad":"json"}"#,
+        );
+
+        // 4. Request format > Credentials
+        // POST /oauth2/token with valid signature, JSON body, but wrong client secret -> 400 invalid_request (not 401 invalid_client)
+        let bad_json = r#"{"client_secret":"wrong"}"#;
+        let ts = oauth_now();
+        let req_id = oauth_request_id(310);
+        let sig = oauth_signature(&ts, &req_id, bad_json.as_bytes());
+        let headers = oauth_token_headers(&ts, &req_id, &sig);
+        let r4 = request_with_body(port, "POST", OAUTH_TOKEN_PATH, &headers, bad_json);
+
+        // 5. Credentials > Grant
+        // POST /oauth2/token with valid signature, form body, wrong client secret, unknown code -> 401 invalid_client (not 400 invalid_grant)
+        let form_wrong_client = oauth_form(&"a".repeat(64), OAUTH_REDIRECT_URI).replace(
+            "client_secret=demo-client-secret",
+            "client_secret=wrong-secret",
+        );
+        let r5 = oauth_exchange(port, &form_wrong_client, 311);
+
+        // 6. Grant check
+        // POST /oauth2/token with valid signature, valid client, but unknown code -> 400 invalid_grant
+        let form_unknown_code = oauth_form(&"f".repeat(64), OAUTH_REDIRECT_URI);
+        let r6 = oauth_exchange(port, &form_unknown_code, 312);
+
+        // Userinfo: Signature > Bearer token header
+        // GET /oauth2/userinfo with invalid signature and missing Bearer -> 401 invalid_signature
+        let r7 = request(port, "GET", OAUTH_USERINFO_PATH, &[]);
+
+        // Userinfo: Bearer format > token lookup
+        // GET /oauth2/userinfo with valid signature and malformed Bearer -> 401 invalid_token
+        let ts2 = oauth_now();
+        let req_id2 = oauth_request_id(313);
+        let sig2 = oauth_userinfo_signature(&ts2, &req_id2, "");
+        let headers2 = oauth_userinfo_headers(Some("not-bearer"), &ts2, &req_id2, &sig2);
+        let r8 = request(port, "GET", OAUTH_USERINFO_PATH, &headers2);
+
+        (r1, r2, r3, r4, r5, r6, r7, r8)
+    });
+
+    assert_oauth_error(&responses.0, 404, "not_found");
+    assert_oauth_error(&responses.1, 405, "invalid_method");
+    assert_oauth_error(&responses.2, 401, "invalid_signature");
+    assert_oauth_error(&responses.3, 400, "invalid_request");
+    assert_oauth_error(&responses.4, 401, "invalid_client");
+    assert_oauth_error(&responses.5, 400, "invalid_grant");
+    assert_oauth_error(&responses.6, 401, "invalid_signature");
+    assert_oauth_error(&responses.7, 401, "invalid_token");
+}
+
+/// Scenario acceptance: all error responses across authorize, token, userinfo,
+/// and fallback are JSON with strictly `error` and `error_description`, with no
+/// extra fields (such as `request_id`), while carrying `X-Request-ID` in headers.
+#[test]
+fn oauth_acceptance_all_error_responses_conform_to_contract_shape() {
+    let (responses, _) = with_demo(&[], |port| {
+        vec![
+            // 400 invalid_request from authorize
+            request(port, "GET", "/oauth2/authorize", &[]),
+            // 400 invalid_request from token (JSON body)
+            request_with_body(
+                port,
+                "POST",
+                OAUTH_TOKEN_PATH,
+                &[("Content-Type", "application/json")],
+                "{}",
+            ),
+            // 400 invalid_grant from token
+            oauth_exchange(port, &oauth_form(&"e".repeat(64), OAUTH_REDIRECT_URI), 320),
+            // 401 invalid_client from token
+            oauth_exchange(
+                port,
+                &oauth_form(&"e".repeat(64), OAUTH_REDIRECT_URI)
+                    .replace("client_secret=demo-client-secret", "client_secret=bad"),
+                321,
+            ),
+            // 401 invalid_signature from token
+            request_with_body(
+                port,
+                "POST",
+                OAUTH_TOKEN_PATH,
+                &[("Content-Type", "application/x-www-form-urlencoded")],
+                "grant_type=authorization_code",
+            ),
+            // 401 invalid_token from userinfo
+            oauth_userinfo_request(port, "not-a-token", "", 322),
+            // 404 not_found from fallback
+            request(port, "GET", "/oauth2/unmapped-endpoint", &[]),
+            // 405 invalid_method from fallback
+            request(port, "PUT", OAUTH_USERINFO_PATH, &[]),
+        ]
+    });
+
+    for response in &responses {
+        assert_eq!(
+            response.header("content-type"),
+            Some("application/json; charset=utf-8"),
+            "status: {}, body: {}",
+            response.status,
+            response.body
+        );
+        assert_eq!(
+            response.header("cache-control"),
+            Some("no-store"),
+            "status: {}, body: {}",
+            response.status,
+            response.body
+        );
+        assert!(
+            response.header("x-request-id").is_some(),
+            "X-Request-ID must be present in response headers: status {}",
+            response.status
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(&response.body).expect("valid JSON error body");
+        let obj = json.as_object().expect("JSON object");
+        let keys: Vec<_> = obj.keys().cloned().collect();
+        assert_eq!(
+            keys,
+            vec!["error", "error_description"],
+            "error body must have exactly error and error_description: {}",
+            response.body
+        );
+        assert!(
+            obj.get("request_id").is_none(),
+            "request_id must not leak into error body: {}",
+            response.body
+        );
+    }
+}
+
+/// Scenario acceptance: log and verbose diagnostics hygiene.
+/// Serving with `--verbose` must never leak client secret, signing secret,
+/// authorization code, access token, raw request body, internal addresses, or
+/// stack traces into logs or response bodies.
+#[test]
+fn oauth_acceptance_logs_and_verbose_hygiene() {
+    let (result, log) = with_demo_args(&[], &["--verbose"], |port| {
+        // Run full flow:
+        let auth_resp = request(
+            port,
+            "GET",
+            "/oauth2/authorize?response_type=code&client_id=demo-client&redirect_uri=http%3A%2F%2F127.0.0.1%3A18081%2Fcallback&state=sec-test",
+            &[],
+        );
+        let loc = auth_resp.header("location").expect("location");
+        let code = loc
+            .split("code=")
+            .nth(1)
+            .unwrap()
+            .split('&')
+            .next()
+            .unwrap()
+            .to_string();
+
+        let token_body = oauth_form(&code, OAUTH_REDIRECT_URI);
+        let token_resp = oauth_exchange(port, &token_body, 330);
+        let (token, _) = oauth_success_json(&token_resp);
+
+        let userinfo_resp = oauth_userinfo_request(port, &token, "", 331);
+        assert_eq!(userinfo_resp.status, 200);
+
+        // Also trigger error paths:
+        let err_token = oauth_exchange(port, &oauth_form("bad-code", OAUTH_REDIRECT_URI), 332);
+        let err_userinfo = oauth_userinfo_request(port, "bad-token", "", 333);
+
+        (
+            code,
+            token,
+            token_resp,
+            userinfo_resp,
+            err_token,
+            err_userinfo,
+        )
+    });
+    let (code, token, token_resp, userinfo_resp, err_token, err_userinfo) = result;
+
+    for secret in ["demo-client-secret", OAUTH_SIGNING_SECRET, &code, &token] {
+        assert!(
+            !log.contains(secret),
+            "credential must not appear in server logs"
+        );
+    }
+    for resp in [&token_resp, &userinfo_resp, &err_token, &err_userinfo] {
+        for secret in ["demo-client-secret", OAUTH_SIGNING_SECRET, &code] {
+            assert!(
+                !resp.body.contains(secret),
+                "secret must not appear in response body"
+            );
+        }
+        assert!(
+            !resp.body.contains("stack"),
+            "stack traces must not leak into response body"
+        );
+    }
+
+    // Verify structured log request_headers sanitize sensitive headers:
+    for line in log.lines() {
+        if line.contains("\"route\":\"oauth-") {
+            if let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) {
+                if let Some(headers) = entry.get("request_headers") {
+                    assert!(
+                        headers.get("authorization").is_none(),
+                        "authorization header must not be logged"
+                    );
+                    assert!(
+                        headers.get("x-sig-signature").is_none(),
+                        "x-sig-signature header must not be logged"
+                    );
+                }
+            }
+        }
+    }
 }

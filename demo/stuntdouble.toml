@@ -70,3 +70,7 @@ name = "oauth-userinfo"
 method = "GET"
 path = "/oauth2/userinfo"
 script = "scripts/userinfo.js"
+
+[fallback]
+name = "http-errors"
+script = "scripts/http-errors.js"
