@@ -73,7 +73,7 @@ curl -i "http://127.0.0.1:18080/oauth2/authorize?response_type=code&client_id=de
 - `demo/scripts/authorize.js` —— 授权端点脚本
 - `demo/scripts/token.js` —— 令牌端点脚本
 - `demo/scripts/userinfo.js` —— 用户信息端点脚本
- - `demo/scripts/http-errors.js` —— 兜底路由脚本，处理未映射路径（404）与不支持的方法（405）
+- `demo/scripts/http-errors.js` —— 兜底路由脚本，处理未映射路径（404）与不支持的方法（405）
 - `demo/stuntdouble.toml` —— 演示夹具的路由声明
 
 ## 测试

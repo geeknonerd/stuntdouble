@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(demo)* serve OAuth userinfo ([#216](https://github.com/geeknonerd/stuntdouble/pull/216))
+- *(demo)* prove OAuth authorization mock acceptance ([#221](https://github.com/geeknonerd/stuntdouble/pull/221))
+
 ## [1.7.0](https://github.com/geeknonerd/stuntdouble/compare/v1.6.0...v1.7.0) - 2026-10-31
 
 ### Added
