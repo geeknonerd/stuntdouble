@@ -231,8 +231,12 @@ function verifySignature() {
     sigError();
     return false;
   }
-  // Only a verified request ID is reserved; a replay then fails here.
-  ctx.state.set(replayKey, true, { ttl_ms: REPLAY_TTL_MS });
+  // Reserve only after verification. `setIfAbsent` makes concurrent requests
+  // with the same ID race atomically: exactly one is accepted.
+  if (!ctx.state.setIfAbsent(replayKey, true, { ttl_ms: REPLAY_TTL_MS })) {
+    sigError();
+    return false;
+  }
   return true;
 }
 

@@ -5855,6 +5855,7 @@ fn demo_fixture(dir: &Path, port: u16) -> PathBuf {
         "upload.js",
         "authorize.js",
         "token.js",
+        "userinfo.js",
     ] {
         std::fs::copy(
             source.join("scripts").join(script),
@@ -8628,6 +8629,50 @@ fn oauth_token_rejects_replayed_request_id() {
     assert_oauth_error(&result.1, 401, "invalid_signature");
 }
 
+/// A14: concurrent requests reusing one request ID are accepted exactly once.
+#[test]
+fn oauth_token_concurrent_replay_yields_one_success() {
+    let (statuses, _) = with_demo(&[], |port| {
+        let code = oauth_issue_code(port);
+        let body = Arc::new(oauth_form(&code, OAUTH_REDIRECT_URI));
+        let timestamp = oauth_now();
+        let request_id = oauth_request_id(27);
+        let signature =
+            oauth_token_canonical_signature(&timestamp, &request_id, "", body.as_bytes());
+        let barrier = Arc::new(Barrier::new(3));
+        let mut handles: Vec<_> = Vec::new();
+        for _ in 0..3 {
+            let body = Arc::clone(&body);
+            let barrier = Arc::clone(&barrier);
+            let timestamp = timestamp.clone();
+            let request_id = request_id.clone();
+            let signature = signature.clone();
+            handles.push(std::thread::spawn(move || {
+                let headers = oauth_token_headers(&timestamp, &request_id, &signature);
+                barrier.wait();
+                let response = request_with_body(port, "POST", OAUTH_TOKEN_PATH, &headers, &body);
+                (response.status, error_class(&response.body))
+            }));
+        }
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("replay thread"))
+            .collect::<Vec<_>>()
+    });
+    let successes = statuses.iter().filter(|(status, _)| *status == 200).count();
+    assert_eq!(successes, 1, "statuses: {statuses:?}");
+    for (status, error) in &statuses {
+        if *status != 200 {
+            assert_eq!(*status, 401, "statuses: {statuses:?}");
+            assert_eq!(
+                error.as_deref(),
+                Some("invalid_signature"),
+                "statuses: {statuses:?}"
+            );
+        }
+    }
+}
+
 /// An unsigned request must not reserve its request ID, so the same ID works
 /// once the signature is fixed.
 #[test]
@@ -8839,4 +8884,388 @@ fn oauth_token_rejects_other_methods() {
         "body: {}",
         response.body
     );
+}
+
+const OAUTH_USERINFO_PATH: &str = "/oauth2/userinfo";
+
+/// Independent HMAC-SHA256 signing of the userinfo canonical string. GET
+/// requests have no body, so the body hash is SHA-256 over the empty input.
+fn oauth_userinfo_signature(timestamp: &str, request_id: &str, canonical_query: &str) -> String {
+    use hmac::{Hmac, KeyInit, Mac};
+    use sha2::{Digest, Sha256};
+    let canonical = format!(
+        "GET\n{OAUTH_USERINFO_PATH}\n{canonical_query}\n{timestamp}\n{request_id}\n{}",
+        hex_encode(&Sha256::digest([]))
+    );
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(OAUTH_SIGNING_SECRET.as_bytes()).expect("hmac key");
+    mac.update(canonical.as_bytes());
+    hex_encode(&mac.finalize().into_bytes())
+}
+
+fn oauth_userinfo_headers<'a>(
+    authorization: Option<&'a str>,
+    timestamp: &'a str,
+    request_id: &'a str,
+    signature: &'a str,
+) -> Vec<(&'a str, &'a str)> {
+    let mut headers = vec![
+        ("X-Sig-Key-Id", "mock-key-01"),
+        ("X-Sig-Request-Id", request_id),
+        ("X-Sig-Timestamp", timestamp),
+        ("X-Sig-Version", "1"),
+        ("X-Sig-Signature", signature),
+    ];
+    if let Some(authorization) = authorization {
+        headers.push(("Authorization", authorization));
+    }
+    headers
+}
+
+fn oauth_userinfo_request(
+    port: u16,
+    token: &str,
+    canonical_query: &str,
+    request_id_seed: u32,
+) -> Response {
+    let timestamp = oauth_now();
+    let request_id = oauth_request_id(request_id_seed);
+    let signature = oauth_userinfo_signature(&timestamp, &request_id, canonical_query);
+    let authorization = format!("Bearer {token}");
+    let headers = oauth_userinfo_headers(Some(&authorization), &timestamp, &request_id, &signature);
+    let path = if canonical_query.is_empty() {
+        OAUTH_USERINFO_PATH.to_string()
+    } else {
+        format!("{OAUTH_USERINFO_PATH}?{canonical_query}")
+    };
+    request(port, "GET", &path, &headers)
+}
+
+fn oauth_access_token(port: u16, request_id_seed: u32) -> String {
+    let code = oauth_issue_code(port);
+    let response = oauth_exchange(
+        port,
+        &oauth_form(&code, OAUTH_REDIRECT_URI),
+        request_id_seed,
+    );
+    oauth_success_json(&response).0
+}
+
+/// A15: a live access token returns exactly the fixed test user with the
+/// userinfo response headers.
+#[test]
+fn oauth_userinfo_returns_fixed_user_for_live_token() {
+    let (result, log) = with_demo(&[], |port| {
+        let token = oauth_access_token(port, 200);
+        let timestamp = oauth_now();
+        let request_id = oauth_request_id(201);
+        let signature = oauth_userinfo_signature(&timestamp, &request_id, "");
+        let authorization = format!("Bearer {token}");
+        let headers =
+            oauth_userinfo_headers(Some(&authorization), &timestamp, &request_id, &signature);
+        let response = request(port, "GET", OAUTH_USERINFO_PATH, &headers);
+        (token, signature, response)
+    });
+    let (token, signature, response) = result;
+
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(
+        response.header("content-type"),
+        Some("application/json; charset=utf-8")
+    );
+    assert_eq!(response.header("cache-control"), Some("no-store"));
+    assert_eq!(
+        response.body,
+        r#"{"sub":"u-10001","name":"Alice","org_id":"org-10","org_name":"Example Org"}"#
+    );
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(
+        json.as_object().expect("object").keys().collect::<Vec<_>>(),
+        vec!["name", "org_id", "org_name", "sub"],
+        "the response must not contain extra fields"
+    );
+    for secret in [&token, &signature, &OAUTH_SIGNING_SECRET.to_string()] {
+        assert!(!log.contains(secret), "credential leaked into logs: {log}");
+    }
+    let line = log
+        .lines()
+        .find(|line| line.contains("\"route\":\"oauth-userinfo\""))
+        .unwrap_or_else(|| panic!("userinfo request log missing: {log}"));
+    let entry: serde_json::Value = serde_json::from_str(line).expect("structured log json");
+    let headers = &entry["request_headers"];
+    for name in [
+        "authorization",
+        "x-sig-key-id",
+        "x-sig-request-id",
+        "x-sig-timestamp",
+        "x-sig-version",
+        "x-sig-signature",
+    ] {
+        assert!(
+            headers.get(name).is_none(),
+            "sensitive request header {name} logged: {line}"
+        );
+    }
+}
+
+/// A16: a missing or malformed Bearer header is `invalid_token`, and the
+/// signature is still checked first.
+#[test]
+fn oauth_userinfo_rejects_missing_or_malformed_bearer() {
+    let (result, log) = with_demo(&[], |port| {
+        let token = oauth_access_token(port, 210);
+        let mut responses = Vec::new();
+        for (seed, authorization) in [
+            (211, None),
+            (212, Some("")),
+            (213, Some("Bearer")),
+            (214, Some("Bearer ")),
+            (215, Some("Basic dXNlcjpwYXNz")),
+            (216, Some(&format!("Bearer {token} extra")[..])),
+        ] {
+            let timestamp = oauth_now();
+            let request_id = oauth_request_id(seed);
+            let signature = oauth_userinfo_signature(&timestamp, &request_id, "");
+            let headers =
+                oauth_userinfo_headers(authorization, &timestamp, &request_id, &signature);
+            responses.push(request(port, "GET", OAUTH_USERINFO_PATH, &headers));
+        }
+        let unsigned = request(
+            port,
+            "GET",
+            OAUTH_USERINFO_PATH,
+            &[("Authorization", "Bearer unknown-token")],
+        );
+        (responses, unsigned, token)
+    });
+    let (responses, unsigned, token) = result;
+    for response in &responses {
+        assert_oauth_error(response, 401, "invalid_token");
+    }
+    assert_oauth_error(&unsigned, 401, "invalid_signature");
+    assert!(
+        !log.contains(&token),
+        "access token leaked into logs: {log}"
+    );
+}
+
+/// A16: an unknown or expired token is `invalid_token`.
+#[test]
+fn oauth_userinfo_rejects_unknown_token() {
+    let (responses, _) = with_demo(&[], |port| {
+        let unknown = oauth_userinfo_request(port, "at-ffffffffffffffffffffffffffffffff", "", 220);
+        let wrong_shape = oauth_userinfo_request(port, "not-a-token", "", 221);
+        let oversized = oauth_userinfo_request(port, &"a".repeat(300), "", 224);
+        let uppercase = oauth_userinfo_request(port, &format!("at-{}", "A".repeat(32)), "", 225);
+        let issued = oauth_access_token(port, 222);
+        let good = oauth_userinfo_request(port, &issued, "", 223);
+        (unknown, wrong_shape, oversized, uppercase, good)
+    });
+    assert_oauth_error(&responses.0, 401, "invalid_token");
+    assert_oauth_error(&responses.1, 401, "invalid_token");
+    assert_oauth_error(&responses.2, 401, "invalid_token");
+    assert_oauth_error(&responses.3, 401, "invalid_token");
+    assert_eq!(responses.4.status, 200, "body: {}", responses.4.body);
+}
+
+/// A17: an expired access token is `invalid_token`. The fixture copy halves
+/// the token TTL so the boundary is observable without a five-minute sleep;
+/// the production fixture keeps the contract's 300 seconds.
+#[test]
+fn oauth_userinfo_rejects_expired_token() {
+    let (result, _) = with_demo_prepared(
+        &[],
+        |dir| {
+            let path = dir.join("scripts/token.js");
+            let script = std::fs::read_to_string(&path).expect("read token script");
+            assert!(script.contains("const TOKEN_TTL_MS = 300000;"));
+            std::fs::write(
+                &path,
+                script.replace("const TOKEN_TTL_MS = 300000;", "const TOKEN_TTL_MS = 1000;"),
+            )
+            .expect("write short-ttl token script");
+        },
+        |port, _| {
+            let token = oauth_access_token(port, 230);
+            let live = oauth_userinfo_request(port, &token, "", 231);
+            std::thread::sleep(Duration::from_millis(1200));
+            let expired = oauth_userinfo_request(port, &token, "", 232);
+            (live, expired)
+        },
+    );
+    assert_eq!(result.0.status, 200, "body: {}", result.0.body);
+    assert_oauth_error(&result.1, 401, "invalid_token");
+}
+
+/// A18: a wrong signature is `invalid_signature` even when the Bearer token is
+/// missing or unknown, so signature validation precedes token handling.
+#[test]
+fn oauth_userinfo_validates_signature_first() {
+    let (result, _) = with_demo(&[], |port| {
+        let token = oauth_access_token(port, 240);
+        let timestamp = oauth_now();
+        let request_id = oauth_request_id(241);
+        let mut signature = oauth_userinfo_signature(&timestamp, &request_id, "");
+        signature.replace_range(0..1, if signature.starts_with('0') { "1" } else { "0" });
+
+        let authorization = format!("Bearer {token}");
+        let headers =
+            oauth_userinfo_headers(Some(&authorization), &timestamp, &request_id, &signature);
+        let wrong_signature = request(port, "GET", OAUTH_USERINFO_PATH, &headers);
+
+        let headers = oauth_userinfo_headers(
+            Some("Bearer unknown-token"),
+            &timestamp,
+            &request_id,
+            &signature,
+        );
+        let wrong_signature_unknown_token = request(port, "GET", OAUTH_USERINFO_PATH, &headers);
+
+        let now: i64 = oauth_now().parse().expect("timestamp");
+        let stale_timestamp = (now - 900).to_string();
+        let request_id = oauth_request_id(242);
+        let signature = oauth_userinfo_signature(&stale_timestamp, &request_id, "");
+        let headers = oauth_userinfo_headers(
+            Some(&authorization),
+            &stale_timestamp,
+            &request_id,
+            &signature,
+        );
+        let stale = request(port, "GET", OAUTH_USERINFO_PATH, &headers);
+        (wrong_signature, wrong_signature_unknown_token, stale)
+    });
+    assert_oauth_error(&result.0, 401, "invalid_signature");
+    assert_oauth_error(&result.1, 401, "invalid_signature");
+    assert_oauth_error(&result.2, 401, "invalid_signature");
+    assert!(
+        result
+            .2
+            .body
+            .contains("signature timestamp is outside the allowed window"),
+        "body: {}",
+        result.2.body
+    );
+}
+
+/// Replay: an accepted request ID cannot be reused on userinfo, including
+/// reuse of an ID that the token endpoint already consumed.
+#[test]
+fn oauth_userinfo_rejects_replayed_request_id() {
+    let (result, _) = with_demo(&[], |port| {
+        let token = oauth_access_token(port, 250);
+        let timestamp = oauth_now();
+        let request_id = oauth_request_id(251);
+        let signature = oauth_userinfo_signature(&timestamp, &request_id, "");
+        let authorization = format!("Bearer {token}");
+        let headers =
+            oauth_userinfo_headers(Some(&authorization), &timestamp, &request_id, &signature);
+        let first = request(port, "GET", OAUTH_USERINFO_PATH, &headers);
+        let replay = request(port, "GET", OAUTH_USERINFO_PATH, &headers);
+
+        // A request ID consumed by the token endpoint is also spent here.
+        let shared_id = oauth_request_id(252);
+        let body = oauth_form(&oauth_issue_code(port), OAUTH_REDIRECT_URI);
+        let signature = oauth_signature(&timestamp, &shared_id, body.as_bytes());
+        let headers = oauth_token_headers(&timestamp, &shared_id, &signature);
+        let exchange = request_with_body(port, "POST", OAUTH_TOKEN_PATH, &headers, &body);
+        let signature = oauth_userinfo_signature(&timestamp, &shared_id, "");
+        let headers =
+            oauth_userinfo_headers(Some(&authorization), &timestamp, &shared_id, &signature);
+        let cross_endpoint = request(port, "GET", OAUTH_USERINFO_PATH, &headers);
+        (first, replay, exchange, cross_endpoint)
+    });
+    assert_eq!(result.0.status, 200, "body: {}", result.0.body);
+    assert_oauth_error(&result.1, 401, "invalid_signature");
+    oauth_success_json(&result.2);
+    assert_oauth_error(&result.3, 401, "invalid_signature");
+}
+
+/// Concurrent requests reusing one userinfo request ID are accepted once.
+#[test]
+fn oauth_userinfo_concurrent_replay_yields_one_success() {
+    let (statuses, _) = with_demo(&[], |port| {
+        let token = oauth_access_token(port, 253);
+        let timestamp = oauth_now();
+        let request_id = oauth_request_id(254);
+        let signature = oauth_userinfo_signature(&timestamp, &request_id, "");
+        let authorization = Arc::new(format!("Bearer {token}"));
+        let barrier = Arc::new(Barrier::new(3));
+        let mut handles: Vec<_> = Vec::new();
+        for _ in 0..3 {
+            let authorization = Arc::clone(&authorization);
+            let barrier = Arc::clone(&barrier);
+            let timestamp = timestamp.clone();
+            let request_id = request_id.clone();
+            let signature = signature.clone();
+            handles.push(std::thread::spawn(move || {
+                let headers = oauth_userinfo_headers(
+                    Some(authorization.as_str()),
+                    &timestamp,
+                    &request_id,
+                    &signature,
+                );
+                barrier.wait();
+                let response = request(port, "GET", OAUTH_USERINFO_PATH, &headers);
+                (response.status, error_class(&response.body))
+            }));
+        }
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("replay thread"))
+            .collect::<Vec<_>>()
+    });
+    let successes = statuses.iter().filter(|(status, _)| *status == 200).count();
+    assert_eq!(successes, 1, "statuses: {statuses:?}");
+    for (status, error) in &statuses {
+        if *status != 200 {
+            assert_eq!(*status, 401, "statuses: {statuses:?}");
+            assert_eq!(
+                error.as_deref(),
+                Some("invalid_signature"),
+                "statuses: {statuses:?}"
+            );
+        }
+    }
+}
+
+/// Query parameters never change the user payload, but they are part of the
+/// canonical string: a request signed over a different query is rejected.
+#[test]
+fn oauth_userinfo_signs_canonical_query_without_using_it() {
+    let (result, _) = with_demo(&[], |port| {
+        let token = oauth_access_token(port, 260);
+        let canonical = "a%20b=1&a%20b=2&b=x";
+        let wire = "b=x&a%20b=2&a%20b=1";
+
+        let timestamp = oauth_now();
+        let request_id = oauth_request_id(261);
+        let signature = oauth_userinfo_signature(&timestamp, &request_id, canonical);
+        let authorization = format!("Bearer {token}");
+        let headers =
+            oauth_userinfo_headers(Some(&authorization), &timestamp, &request_id, &signature);
+        let accepted = request(
+            port,
+            "GET",
+            &format!("{OAUTH_USERINFO_PATH}?{wire}"),
+            &headers,
+        );
+
+        let request_id = oauth_request_id(262);
+        let signature = oauth_userinfo_signature(&timestamp, &request_id, wire);
+        let headers =
+            oauth_userinfo_headers(Some(&authorization), &timestamp, &request_id, &signature);
+        let rejected = request(
+            port,
+            "GET",
+            &format!("{OAUTH_USERINFO_PATH}?{wire}"),
+            &headers,
+        );
+        (accepted, rejected)
+    });
+    assert_eq!(result.0.status, 200, "body: {}", result.0.body);
+    assert_eq!(
+        result.0.body,
+        r#"{"sub":"u-10001","name":"Alice","org_id":"org-10","org_name":"Example Org"}"#
+    );
+    assert_oauth_error(&result.1, 401, "invalid_signature");
 }

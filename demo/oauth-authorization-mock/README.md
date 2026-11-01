@@ -70,6 +70,7 @@ The authorize endpoint does not require or read request-signature headers (`X-Si
 
 - `demo/scripts/authorize.js` — Authorization endpoint script
 - `demo/scripts/token.js` — Token endpoint script
+- `demo/scripts/userinfo.js` — Userinfo endpoint script
 - `demo/stuntdouble.toml` — Route declarations for the demo fixture
 
 ## Tests
@@ -78,4 +79,4 @@ The authorize endpoint does not require or read request-signature headers (`X-Si
 cargo test --test cli oauth_
 ```
 
-Covers authorize parameter validation and state boundaries, plus A05–A14 token exchange: form-only parsing, signature precedence and canonical queries, replay and code expiry, atomic single-use codes, client and redirect validation, and response shape.
+Covers authorize parameter validation and state boundaries, A05–A14 token exchange, and A15–A18 userinfo: Bearer validation, signature-before-token precedence, token expiry, exact response shape, replay rejection, canonical-query signing, and log hygiene.
