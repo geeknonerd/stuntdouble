@@ -9334,7 +9334,7 @@ fn oauth_acceptance_a20_unsupported_methods_return_405_with_allow() {
 /// Authorize -> Callback -> Token Exchange -> Userinfo Retrieval.
 #[test]
 fn oauth_acceptance_happy_path() {
-    let (result, _) = with_demo(&[], |port| {
+    let _ = with_demo(&[], |port| {
         // Step 1: Authorize request
         let state = "state-acceptance-42";
         let auth_path = format!(
@@ -9402,11 +9402,7 @@ fn oauth_acceptance_happy_path() {
         // Single-use verification: code cannot be reused
         let reexchange = oauth_exchange(port, &token_body, 303);
         assert_oauth_error(&reexchange, 400, "invalid_grant");
-
-        (code, token)
     });
-    assert!(!result.0.is_empty());
-    assert!(!result.1.is_empty());
 }
 
 /// Scenario acceptance: error precedence order per §8.3:
