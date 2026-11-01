@@ -51,7 +51,7 @@ curl -i -F document=@DOC-0001.pdf \
 - `scripts/local-manifest.js` —— 读取 `files/metadata.json` 的 CSV 变换。
 - `scripts/local-download.js` —— 夹具文档查找与本地 PDF 流。
 - `scripts/upload.js` —— multipart 上传回显。
- - `scripts/http-errors.js` —— 未映射路由（404）与不支持方法（405）的兜底错误处理。
+- `scripts/http-errors.js` —— 未映射路由（404）与不支持方法（405）的兜底错误处理。
 - `files/metadata.json` —— 公开文档夹具记录（`code`、`title`、`system_code` 与根内相对路径 `file`）。
 - `files/DOC-0001.pdf`、`files/DOC-0002.pdf` —— 最小公开 PDF 夹具。
 - `files/` 是唯一静态文件根；上传使用独立的请求级临时存储，绝不写入这里。

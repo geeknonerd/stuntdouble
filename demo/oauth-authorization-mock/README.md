@@ -71,7 +71,7 @@ The authorize endpoint does not require or read request-signature headers (`X-Si
 - `demo/scripts/authorize.js` — Authorization endpoint script
 - `demo/scripts/token.js` — Token endpoint script
 - `demo/scripts/userinfo.js` — Userinfo endpoint script
- - `demo/scripts/http-errors.js` — Fallback route script for unmapped paths (404) and unsupported methods (405)
+- `demo/scripts/http-errors.js` — Fallback route script for unmapped paths (404) and unsupported methods (405)
 - `demo/stuntdouble.toml` — Route declarations for the demo fixture
 
 ## Tests

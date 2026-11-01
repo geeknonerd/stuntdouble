@@ -67,7 +67,7 @@
 - 已用签名规范化、原始 Body 哈希（2048 零字节的 SHA-256，非 FIPS 180-4 官方向量）和重复查询参数端到端测试验证。
 - tradeoff: 快照保真 e2e 测试逐例手写 config 与 fixture（3 例），与既有测试风格一致；业内经验以 4 例以上近似重复变体为提取 helper 门槛。升级触发：第 4 个快照测试落地时提取 `snapshot_config(route, path)` 小 helper。
 
-**M1.2 Host crypto API**
+**M1.2 Host crypto API（已完成，#172）**
 
 - 按 [ADR 0019](adr/0019-host-crypto-api.md) 提供 `randomBytes`、`sha256`、`hmacSha256` 和 `timingSafeEqual`。
 - 使用 RustCrypto 与 OS CSPRNG，不提供 JavaScript 或 `Math.random()` 降级路径。
@@ -75,13 +75,13 @@
 - 使用公开测试向量做已知答案测试，并覆盖非法长度与空输入。
 - 不把密钥、请求 Body 或签名原文写入日志。
 
-**M1.3 Fallback Route 与错误响应（not_found 已完成 #173，method_not_allowed 留待 #174）**
+**M1.3 Fallback Route 与错误响应（已完成，#173、#174）**
 
 - 按 [ADR 0020](adr/0020-fallback-route-and-method-mismatch.md) 增加可选的 `[fallback]` Route 与只读 `ctx.match`。（已完成 #173：支持可选 `[fallback]` 表与只读 `ctx.match.kind = "not_found"`）
-- 在 Body 解析前区分 `not_found` 与 `method_not_allowed`，使脚本返回精确 JSON；405 的 `Allow` 由宿主注入。（`not_found` 早期判定已完成 #173；`method_not_allowed` 与 `Allow` 注入留待 #174）
+- 在 Body 解析前区分 `not_found` 与 `method_not_allowed`，使脚本返回精确 JSON；405 的 `Allow` 由宿主注入。（已完成 #173、#174）
 - 未配置 `[fallback]` 时保持现有 404 行为；不引入通配方法或通配路径。（已完成 #173）
 - 保持路由声明、脚本 worker、`ctx.respond` 和日志链路不变，Fallback 禁止流式 Body。（已完成 #173）
-- 用未知路径、方法错误和错误优先级测试验证。（未知路径、body 不读取、非法 fallback 响应、无响应与方法错误隔离已由 #173 覆盖；`method_not_allowed` 与 `Allow` 留待 #174）
+- 用未知路径、方法错误和错误优先级测试验证。（未知路径、body 不读取、非法 fallback 响应、无响应与方法错误隔离已由 #173 覆盖；`method_not_allowed` 与 `Allow` 已由 #174 覆盖）
 
 **退出条件**
 
@@ -123,14 +123,16 @@
 
 **目的**：用真实脚本组合 M1 与 M2 的能力，完成 A01–A20。
 
+**状态**：已完成（2026-11-01，#177、#178、#179、#180 / PR #221）。
+
 **交付**
 
-- 新增 `demo/oauth-authorization-mock/`，包含 TOML、脚本、固定 fixture 与运行说明。
-- 实现 authorize、token、userinfo 三条 Route。
-- 实现 code 一次性、60 秒过期，access token 300 秒过期，签名 request ID 10 分钟防重放。
-- 实现 404 `not_found`、405 `invalid_method` 与 `Allow`，错误体只包含契约字段。
-- 增加端到端测试，覆盖 A01–A20、错误优先级、日志脱敏和离线约束。
-- 验证不访问外部网络、不读取真实密钥、不持久化 code 或 token。
+- 新增 `demo/oauth-authorization-mock/`，包含 TOML、脚本、固定 fixture 与运行说明（已完成 #211）。
+- 实现 authorize、token、userinfo 三条 Route（已完成 #210、#212、#216）。
+- 实现 code 一次性、60 秒过期，access token 300 秒过期，签名 request ID 10 分钟防重放（已完成）。
+- 实现 404 `not_found`、405 `invalid_method` 与 `Allow`，错误体只包含契约字段（已完成 #221）。
+- 增加端到端测试，覆盖 A01–A20、错误优先级、日志脱敏和离线约束（已完成 #221）。
+- 验证不访问外部网络、不读取真实密钥、不持久化 code 或 token（已完成）。
 
 **退出条件**
 
@@ -159,8 +161,8 @@
 - M0 是所有后续里程碑的前置。
 - M1.1、M1.2、M1.3 可在 M0 完成后并行。
 - M2 原型与正式实现均已完成（#175、#176）。
-- M3 依赖 M1 全部完成与 M2 发布。
-- M4 依赖 M3 验收完成。
+- M3 已完成（#177–#180 / PR #210、#212、#216、#221）。
+- M4 依赖 M3 验收完成（前置已就绪）。
 
 ## 明确不做
 

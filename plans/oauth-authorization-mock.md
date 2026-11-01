@@ -1,7 +1,7 @@
 # OAuth authorization mock 场景契约
 
-- 状态：`提议中`
-- 日期：2026-10-22
+- 状态：`已验收`
+- 日期：2026-11-01（初版 2026-10-22，验收完成见 PR #221）
 - 关联：[Post-v1 开发路线](post-v1-roadmap.md)、[`ctx` API 契约](../docs/contracts/ctx-api.md)、[ADR 0001](adr/0001-no-shared-state-in-v1.md)、[ADR 0016](adr/0016-v1-ctx-pending-capabilities-deferred.md)、[ADR 0019](adr/0019-host-crypto-api.md)、[ADR 0020](adr/0020-fallback-route-and-method-mismatch.md)、[ADR 0021](adr/0021-v2-shared-state.md)
 
 本文是维护者使用的场景契约，不属于 `docs/contracts/` 中的 Stunt Double 公开契约。实现完成后的公开运行说明放在 `demo/oauth-authorization-mock/README.md`。
@@ -623,22 +623,22 @@ curl -i \
 
 ## 13. 验收清单
 
-- [ ] `/oauth2/authorize` 能签发一次性 code 并保留 `state`。
-- [ ] `/oauth2/token` 只接受表单 Body。
-- [ ] `/oauth2/token` 先校验签名，再处理 OAuth 参数。
-- [ ] `/oauth2/token` 成功响应只含 `access_token`、`token_type`、`expires_in`。
-- [ ] `/oauth2/userinfo` 只接受 `Authorization: Bearer <token>`。
-- [ ] `/oauth2/userinfo` 返回 `sub`、`name`、`org_id`、`org_name`。
-- [ ] 授权码 60 秒过期且只能使用一次。
-- [ ] access token 300 秒过期。
-- [ ] 时间戳容差为 300 秒。
-- [ ] 签名请求 ID 在 10 分钟内拒绝重放。
-- [ ] 所有错误均为 JSON，无 HTML。
-- [ ] 错误码只使用本文第 8 节定义的值。
-- [ ] 错误响应不包含 `request_id` 等契约外字段；`X-Request-ID` 只作为响应头用于诊断。
-- [ ] 日志不含密钥、code 和 access token。
-- [ ] 服务不读取外部生产配置、不访问外部网络。
-- [ ] 所有 Route 继续遵循 `match → source → transform → response`。
+- [x] `/oauth2/authorize` 能签发一次性 code 并保留 `state`。
+- [x] `/oauth2/token` 只接受表单 Body。
+- [x] `/oauth2/token` 先校验签名，再处理 OAuth 参数。
+- [x] `/oauth2/token` 成功响应只含 `access_token`、`token_type`、`expires_in`。
+- [x] `/oauth2/userinfo` 只接受 `Authorization: Bearer <token>`。
+- [x] `/oauth2/userinfo` 返回 `sub`、`name`、`org_id`、`org_name`。
+- [x] 授权码 60 秒过期且只能使用一次。
+- [x] access token 300 秒过期。
+- [x] 时间戳容差为 300 秒。
+- [x] 签名请求 ID 在 10 分钟内拒绝重放。
+- [x] 所有错误均为 JSON，无 HTML。
+- [x] 错误码只使用本文第 8 节定义的值。
+- [x] 错误响应不包含 `request_id` 等契约外字段；`X-Request-ID` 只作为响应头用于诊断。
+- [x] 日志不含密钥、code 和 access token。
+- [x] 服务不读取外部生产配置、不访问外部网络。
+- [x] 所有 Route 继续遵循 `match → source → transform → response`。
 
 ## 14. 一致性要求
 

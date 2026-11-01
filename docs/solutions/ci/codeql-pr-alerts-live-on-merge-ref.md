@@ -66,8 +66,11 @@ CodeQL 检查会一直保持失败，直到另一次扫描运行。
      --jq '.[] | {number,state,rule:.rule.id,path:.most_recent_instance.location.path,line:.most_recent_instance.location.start_line}'
    ```
 
-3. 根据证据逐个判断告警。测试向量、固定的 fixture 凭据、HMAC 校验，以及断言
-   敏感信息未出现在日志中的测试，都是常见误报。dismiss 时选择最接近的原因：
+3. 根据证据逐个判断告警。测试向量、固定的 fixture 凭据、HMAC 校验等可以是
+   误报；但 `rust/cleartext-logging` 若落在测试的 `assert!`/`assert_eq!` 上，
+   优先切断断言消息里的响应体插值，而不是 dismiss（见
+   [codeql-cleartext-logging-in-rust-test-assertions.md](codeql-cleartext-logging-in-rust-test-assertions.md)）。
+   dismiss 时选择最接近的原因：
 
    ```bash
    gh api -X PATCH "/repos/{owner}/{repo}/code-scanning/alerts/<number>" \
@@ -121,6 +124,8 @@ dismiss 已确认的误报是受支持的路径；停用 ruleset 不是。
 
 - [docs/development.md](../../development.md) — CodeQL merge-protection ruleset
   与误报 dismiss 策略。
+- [codeql-cleartext-logging-in-rust-test-assertions.md](codeql-cleartext-logging-in-rust-test-assertions.md)
+  — `rust/cleartext-logging` 命中测试断言时的根因与代码内修复。
 - [.github/workflows/codeql.yml](../../../.github/workflows/codeql.yml) — PR、
   push 与定时运行的 CodeQL 分析。
 - [node20-deprecation-annotations-only-cover-node20-actions.md](node20-deprecation-annotations-only-cover-node20-actions.md)
