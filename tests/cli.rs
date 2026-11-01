@@ -8904,19 +8904,22 @@ fn oauth_userinfo_signature(timestamp: &str, request_id: &str, canonical_query: 
 }
 
 fn oauth_userinfo_headers<'a>(
-    authorization: &'a str,
+    authorization: Option<&'a str>,
     timestamp: &'a str,
     request_id: &'a str,
     signature: &'a str,
 ) -> Vec<(&'a str, &'a str)> {
-    vec![
-        ("Authorization", authorization),
+    let mut headers = vec![
         ("X-Sig-Key-Id", "mock-key-01"),
         ("X-Sig-Request-Id", request_id),
         ("X-Sig-Timestamp", timestamp),
         ("X-Sig-Version", "1"),
         ("X-Sig-Signature", signature),
-    ]
+    ];
+    if let Some(authorization) = authorization {
+        headers.push(("Authorization", authorization));
+    }
+    headers
 }
 
 fn oauth_userinfo_request(
@@ -8929,7 +8932,7 @@ fn oauth_userinfo_request(
     let request_id = oauth_request_id(request_id_seed);
     let signature = oauth_userinfo_signature(&timestamp, &request_id, canonical_query);
     let authorization = format!("Bearer {token}");
-    let headers = oauth_userinfo_headers(&authorization, &timestamp, &request_id, &signature);
+    let headers = oauth_userinfo_headers(Some(&authorization), &timestamp, &request_id, &signature);
     let path = if canonical_query.is_empty() {
         OAUTH_USERINFO_PATH.to_string()
     } else {
@@ -8958,7 +8961,8 @@ fn oauth_userinfo_returns_fixed_user_for_live_token() {
         let request_id = oauth_request_id(201);
         let signature = oauth_userinfo_signature(&timestamp, &request_id, "");
         let authorization = format!("Bearer {token}");
-        let headers = oauth_userinfo_headers(&authorization, &timestamp, &request_id, &signature);
+        let headers =
+            oauth_userinfo_headers(Some(&authorization), &timestamp, &request_id, &signature);
         let response = request(port, "GET", OAUTH_USERINFO_PATH, &headers);
         (token, signature, response)
     });
@@ -9022,15 +9026,8 @@ fn oauth_userinfo_rejects_missing_or_malformed_bearer() {
             let timestamp = oauth_now();
             let request_id = oauth_request_id(seed);
             let signature = oauth_userinfo_signature(&timestamp, &request_id, "");
-            let mut headers = oauth_userinfo_headers(
-                authorization.unwrap_or(""),
-                &timestamp,
-                &request_id,
-                &signature,
-            );
-            if authorization.is_none() {
-                headers.remove(0);
-            }
+            let headers =
+                oauth_userinfo_headers(authorization, &timestamp, &request_id, &signature);
             responses.push(request(port, "GET", OAUTH_USERINFO_PATH, &headers));
         }
         let unsigned = request(
@@ -9112,19 +9109,28 @@ fn oauth_userinfo_validates_signature_first() {
         signature.replace_range(0..1, if signature.starts_with('0') { "1" } else { "0" });
 
         let authorization = format!("Bearer {token}");
-        let headers = oauth_userinfo_headers(&authorization, &timestamp, &request_id, &signature);
+        let headers =
+            oauth_userinfo_headers(Some(&authorization), &timestamp, &request_id, &signature);
         let wrong_signature = request(port, "GET", OAUTH_USERINFO_PATH, &headers);
 
-        let headers =
-            oauth_userinfo_headers("Bearer unknown-token", &timestamp, &request_id, &signature);
+        let headers = oauth_userinfo_headers(
+            Some("Bearer unknown-token"),
+            &timestamp,
+            &request_id,
+            &signature,
+        );
         let wrong_signature_unknown_token = request(port, "GET", OAUTH_USERINFO_PATH, &headers);
 
         let now: i64 = oauth_now().parse().expect("timestamp");
         let stale_timestamp = (now - 900).to_string();
         let request_id = oauth_request_id(242);
         let signature = oauth_userinfo_signature(&stale_timestamp, &request_id, "");
-        let headers =
-            oauth_userinfo_headers(&authorization, &stale_timestamp, &request_id, &signature);
+        let headers = oauth_userinfo_headers(
+            Some(&authorization),
+            &stale_timestamp,
+            &request_id,
+            &signature,
+        );
         let stale = request(port, "GET", OAUTH_USERINFO_PATH, &headers);
         (wrong_signature, wrong_signature_unknown_token, stale)
     });
@@ -9151,7 +9157,8 @@ fn oauth_userinfo_rejects_replayed_request_id() {
         let request_id = oauth_request_id(251);
         let signature = oauth_userinfo_signature(&timestamp, &request_id, "");
         let authorization = format!("Bearer {token}");
-        let headers = oauth_userinfo_headers(&authorization, &timestamp, &request_id, &signature);
+        let headers =
+            oauth_userinfo_headers(Some(&authorization), &timestamp, &request_id, &signature);
         let first = request(port, "GET", OAUTH_USERINFO_PATH, &headers);
         let replay = request(port, "GET", OAUTH_USERINFO_PATH, &headers);
 
@@ -9162,7 +9169,8 @@ fn oauth_userinfo_rejects_replayed_request_id() {
         let headers = oauth_token_headers(&timestamp, &shared_id, &signature);
         let exchange = request_with_body(port, "POST", OAUTH_TOKEN_PATH, &headers, &body);
         let signature = oauth_userinfo_signature(&timestamp, &shared_id, "");
-        let headers = oauth_userinfo_headers(&authorization, &timestamp, &shared_id, &signature);
+        let headers =
+            oauth_userinfo_headers(Some(&authorization), &timestamp, &shared_id, &signature);
         let cross_endpoint = request(port, "GET", OAUTH_USERINFO_PATH, &headers);
         (first, replay, exchange, cross_endpoint)
     });
@@ -9190,8 +9198,12 @@ fn oauth_userinfo_concurrent_replay_yields_one_success() {
             let request_id = request_id.clone();
             let signature = signature.clone();
             handles.push(std::thread::spawn(move || {
-                let headers =
-                    oauth_userinfo_headers(&authorization, &timestamp, &request_id, &signature);
+                let headers = oauth_userinfo_headers(
+                    Some(authorization.as_str()),
+                    &timestamp,
+                    &request_id,
+                    &signature,
+                );
                 barrier.wait();
                 let response = request(port, "GET", OAUTH_USERINFO_PATH, &headers);
                 (response.status, error_class(&response.body))
@@ -9229,7 +9241,8 @@ fn oauth_userinfo_signs_canonical_query_without_using_it() {
         let request_id = oauth_request_id(261);
         let signature = oauth_userinfo_signature(&timestamp, &request_id, canonical);
         let authorization = format!("Bearer {token}");
-        let headers = oauth_userinfo_headers(&authorization, &timestamp, &request_id, &signature);
+        let headers =
+            oauth_userinfo_headers(Some(&authorization), &timestamp, &request_id, &signature);
         let accepted = request(
             port,
             "GET",
@@ -9239,7 +9252,8 @@ fn oauth_userinfo_signs_canonical_query_without_using_it() {
 
         let request_id = oauth_request_id(262);
         let signature = oauth_userinfo_signature(&timestamp, &request_id, wire);
-        let headers = oauth_userinfo_headers(&authorization, &timestamp, &request_id, &signature);
+        let headers =
+            oauth_userinfo_headers(Some(&authorization), &timestamp, &request_id, &signature);
         let rejected = request(
             port,
             "GET",
