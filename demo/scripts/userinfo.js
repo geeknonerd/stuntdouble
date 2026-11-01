@@ -232,14 +232,19 @@ function verifySignature() {
     sigError();
     return false;
   }
-  // Only a verified request ID is reserved; a replay then fails here.
-  ctx.state.set(replayKey, true, { ttl_ms: REPLAY_TTL_MS });
+  // Reserve only after verification. `setIfAbsent` makes concurrent requests
+  // with the same ID race atomically: exactly one is accepted.
+  if (!ctx.state.setIfAbsent(replayKey, true, { ttl_ms: REPLAY_TTL_MS })) {
+    sigError();
+    return false;
+  }
   return true;
 }
 
 // `Authorization: Bearer <token>`; returns null for anything else. The scheme
-// is case-insensitive per RFC 7235; the token must be a single non-empty run
-// of visible characters.
+// is case-insensitive per RFC 7235. The mock only issues `at-` plus 32
+// lowercase hex characters; rejecting every other shape here keeps malformed
+// input from reaching the bounded state key namespace.
 function bearerToken() {
   var header = ctx.request.headers["authorization"];
   if (typeof header !== "string") {
@@ -250,14 +255,12 @@ function bearerToken() {
     return null;
   }
   var token = header.slice(space + 1);
-  if (token.length === 0) {
+  if (
+    token.length !== 35 ||
+    token.slice(0, 3) !== "at-" ||
+    !isLowerHex(token.slice(3), 32)
+  ) {
     return null;
-  }
-  for (var i = 0; i < token.length; i += 1) {
-    var c = token.charCodeAt(i);
-    if (c < 0x21 || c > 0x7e) {
-      return null;
-    }
   }
   return token;
 }

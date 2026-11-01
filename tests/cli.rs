@@ -8629,6 +8629,50 @@ fn oauth_token_rejects_replayed_request_id() {
     assert_oauth_error(&result.1, 401, "invalid_signature");
 }
 
+/// A14: concurrent requests reusing one request ID are accepted exactly once.
+#[test]
+fn oauth_token_concurrent_replay_yields_one_success() {
+    let (statuses, _) = with_demo(&[], |port| {
+        let code = oauth_issue_code(port);
+        let body = Arc::new(oauth_form(&code, OAUTH_REDIRECT_URI));
+        let timestamp = oauth_now();
+        let request_id = oauth_request_id(27);
+        let signature =
+            oauth_token_canonical_signature(&timestamp, &request_id, "", body.as_bytes());
+        let barrier = Arc::new(Barrier::new(3));
+        let mut handles: Vec<_> = Vec::new();
+        for _ in 0..3 {
+            let body = Arc::clone(&body);
+            let barrier = Arc::clone(&barrier);
+            let timestamp = timestamp.clone();
+            let request_id = request_id.clone();
+            let signature = signature.clone();
+            handles.push(std::thread::spawn(move || {
+                let headers = oauth_token_headers(&timestamp, &request_id, &signature);
+                barrier.wait();
+                let response = request_with_body(port, "POST", OAUTH_TOKEN_PATH, &headers, &body);
+                (response.status, error_class(&response.body))
+            }));
+        }
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("replay thread"))
+            .collect::<Vec<_>>()
+    });
+    let successes = statuses.iter().filter(|(status, _)| *status == 200).count();
+    assert_eq!(successes, 1, "statuses: {statuses:?}");
+    for (status, error) in &statuses {
+        if *status != 200 {
+            assert_eq!(*status, 401, "statuses: {statuses:?}");
+            assert_eq!(
+                error.as_deref(),
+                Some("invalid_signature"),
+                "statuses: {statuses:?}"
+            );
+        }
+    }
+}
+
 /// An unsigned request must not reserve its request ID, so the same ID works
 /// once the signature is fixed.
 #[test]
@@ -8910,10 +8954,15 @@ fn oauth_access_token(port: u16, request_id_seed: u32) -> String {
 fn oauth_userinfo_returns_fixed_user_for_live_token() {
     let (result, log) = with_demo(&[], |port| {
         let token = oauth_access_token(port, 200);
-        let response = oauth_userinfo_request(port, &token, "", 201);
-        (token, response)
+        let timestamp = oauth_now();
+        let request_id = oauth_request_id(201);
+        let signature = oauth_userinfo_signature(&timestamp, &request_id, "");
+        let authorization = format!("Bearer {token}");
+        let headers = oauth_userinfo_headers(&authorization, &timestamp, &request_id, &signature);
+        let response = request(port, "GET", OAUTH_USERINFO_PATH, &headers);
+        (token, signature, response)
     });
-    let (token, response) = result;
+    let (token, signature, response) = result;
 
     assert_eq!(response.status, 200, "body: {}", response.body);
     assert_eq!(
@@ -8931,10 +8980,28 @@ fn oauth_userinfo_returns_fixed_user_for_live_token() {
         vec!["name", "org_id", "org_name", "sub"],
         "the response must not contain extra fields"
     );
-    assert!(
-        !log.contains(&token),
-        "access token leaked into logs: {log}"
-    );
+    for secret in [&token, &signature, &OAUTH_SIGNING_SECRET.to_string()] {
+        assert!(!log.contains(secret), "credential leaked into logs: {log}");
+    }
+    let line = log
+        .lines()
+        .find(|line| line.contains("\"route\":\"oauth-userinfo\""))
+        .unwrap_or_else(|| panic!("userinfo request log missing: {log}"));
+    let entry: serde_json::Value = serde_json::from_str(line).expect("structured log json");
+    let headers = &entry["request_headers"];
+    for name in [
+        "authorization",
+        "x-sig-key-id",
+        "x-sig-request-id",
+        "x-sig-timestamp",
+        "x-sig-version",
+        "x-sig-signature",
+    ] {
+        assert!(
+            headers.get(name).is_none(),
+            "sensitive request header {name} logged: {line}"
+        );
+    }
 }
 
 /// A16: a missing or malformed Bearer header is `invalid_token`, and the
@@ -8991,13 +9058,17 @@ fn oauth_userinfo_rejects_unknown_token() {
     let (responses, _) = with_demo(&[], |port| {
         let unknown = oauth_userinfo_request(port, "at-ffffffffffffffffffffffffffffffff", "", 220);
         let wrong_shape = oauth_userinfo_request(port, "not-a-token", "", 221);
+        let oversized = oauth_userinfo_request(port, &"a".repeat(300), "", 224);
+        let uppercase = oauth_userinfo_request(port, &format!("at-{}", "A".repeat(32)), "", 225);
         let issued = oauth_access_token(port, 222);
         let good = oauth_userinfo_request(port, &issued, "", 223);
-        (unknown, wrong_shape, good)
+        (unknown, wrong_shape, oversized, uppercase, good)
     });
     assert_oauth_error(&responses.0, 401, "invalid_token");
     assert_oauth_error(&responses.1, 401, "invalid_token");
-    assert_eq!(responses.2.status, 200, "body: {}", responses.2.body);
+    assert_oauth_error(&responses.2, 401, "invalid_token");
+    assert_oauth_error(&responses.3, 401, "invalid_token");
+    assert_eq!(responses.4.status, 200, "body: {}", responses.4.body);
 }
 
 /// A17: an expired access token is `invalid_token`. The fixture copy halves
@@ -9099,6 +9170,50 @@ fn oauth_userinfo_rejects_replayed_request_id() {
     assert_oauth_error(&result.1, 401, "invalid_signature");
     oauth_success_json(&result.2);
     assert_oauth_error(&result.3, 401, "invalid_signature");
+}
+
+/// Concurrent requests reusing one userinfo request ID are accepted once.
+#[test]
+fn oauth_userinfo_concurrent_replay_yields_one_success() {
+    let (statuses, _) = with_demo(&[], |port| {
+        let token = oauth_access_token(port, 253);
+        let timestamp = oauth_now();
+        let request_id = oauth_request_id(254);
+        let signature = oauth_userinfo_signature(&timestamp, &request_id, "");
+        let authorization = Arc::new(format!("Bearer {token}"));
+        let barrier = Arc::new(Barrier::new(3));
+        let mut handles: Vec<_> = Vec::new();
+        for _ in 0..3 {
+            let authorization = Arc::clone(&authorization);
+            let barrier = Arc::clone(&barrier);
+            let timestamp = timestamp.clone();
+            let request_id = request_id.clone();
+            let signature = signature.clone();
+            handles.push(std::thread::spawn(move || {
+                let headers =
+                    oauth_userinfo_headers(&authorization, &timestamp, &request_id, &signature);
+                barrier.wait();
+                let response = request(port, "GET", OAUTH_USERINFO_PATH, &headers);
+                (response.status, error_class(&response.body))
+            }));
+        }
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("replay thread"))
+            .collect::<Vec<_>>()
+    });
+    let successes = statuses.iter().filter(|(status, _)| *status == 200).count();
+    assert_eq!(successes, 1, "statuses: {statuses:?}");
+    for (status, error) in &statuses {
+        if *status != 200 {
+            assert_eq!(*status, 401, "statuses: {statuses:?}");
+            assert_eq!(
+                error.as_deref(),
+                Some("invalid_signature"),
+                "statuses: {statuses:?}"
+            );
+        }
+    }
 }
 
 /// Query parameters never change the user payload, but they are part of the
