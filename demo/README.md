@@ -64,6 +64,7 @@ Files:
 - `scripts/local-manifest.js` — CSV transform over `files/metadata.json`.
 - `scripts/local-download.js` — fixture document lookup plus local PDF stream.
 - `scripts/upload.js` — multipart upload echo.
+ - `scripts/http-errors.js` — fallback error handler for unmapped routes (404) and unsupported methods (405).
 - `files/metadata.json` — public document fixture rows (`code`, `title`,
   `system_code`, and the root-relative `file`).
 - `files/DOC-0001.pdf`, `files/DOC-0002.pdf` — minimal public PDF fixtures.

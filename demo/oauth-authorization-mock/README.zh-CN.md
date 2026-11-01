@@ -73,6 +73,7 @@ curl -i "http://127.0.0.1:18080/oauth2/authorize?response_type=code&client_id=de
 - `demo/scripts/authorize.js` —— 授权端点脚本
 - `demo/scripts/token.js` —— 令牌端点脚本
 - `demo/scripts/userinfo.js` —— 用户信息端点脚本
+ - `demo/scripts/http-errors.js` —— 兜底路由脚本，处理未映射路径（404）与不支持的方法（405）
 - `demo/stuntdouble.toml` —— 演示夹具的路由声明
 
 ## 测试
@@ -81,4 +82,4 @@ curl -i "http://127.0.0.1:18080/oauth2/authorize?response_type=code&client_id=de
 cargo test --test cli oauth_
 ```
 
-覆盖授权参数校验与 state 边界、A05–A14 令牌兑换，以及 A15–A18 用户信息：Bearer 校验、签名优先于令牌、令牌过期、精确响应结构、重放拒绝、规范查询串签名与日志卫生。
+覆盖授权参数校验与 state 边界、A05–A14 令牌兑换、A15–A18 用户信息（Bearer 校验、签名优先于令牌、令牌过期、精确响应结构、重放拒绝、规范查询串签名、日志卫生），以及 A19–A20 兜底响应（404 `not_found`、405 `invalid_method` 携带 `Allow`）。

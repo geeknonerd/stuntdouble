@@ -10,7 +10,11 @@ const REDIRECT_URI = "http://127.0.0.1:18081/callback";
 function sendError(status, code) {
   ctx.respond(
     status,
-    { "Content-Type": "application/json; charset=utf-8" },
+    {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store",
+      Pragma: "no-cache",
+    },
     JSON.stringify({ error: code, error_description: "missing or invalid parameter" })
   );
 }

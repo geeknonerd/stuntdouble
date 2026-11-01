@@ -71,6 +71,7 @@ The authorize endpoint does not require or read request-signature headers (`X-Si
 - `demo/scripts/authorize.js` — Authorization endpoint script
 - `demo/scripts/token.js` — Token endpoint script
 - `demo/scripts/userinfo.js` — Userinfo endpoint script
+ - `demo/scripts/http-errors.js` — Fallback route script for unmapped paths (404) and unsupported methods (405)
 - `demo/stuntdouble.toml` — Route declarations for the demo fixture
 
 ## Tests
@@ -79,4 +80,4 @@ The authorize endpoint does not require or read request-signature headers (`X-Si
 cargo test --test cli oauth_
 ```
 
-Covers authorize parameter validation and state boundaries, A05–A14 token exchange, and A15–A18 userinfo: Bearer validation, signature-before-token precedence, token expiry, exact response shape, replay rejection, canonical-query signing, and log hygiene.
+Covers authorize parameter validation and state boundaries, A05–A14 token exchange, A15–A18 userinfo (Bearer validation, signature-before-token precedence, token expiry, exact response shape, replay rejection, canonical-query signing, log hygiene), and A19–A20 fallback responses (404 `not_found`, 405 `invalid_method` with `Allow`).
