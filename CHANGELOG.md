@@ -7,10 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.0](https://github.com/geeknonerd/stuntdouble/compare/v1.7.0...v1.8.0) - 2026-11-01
+
 ### Added
 
 - *(demo)* serve OAuth userinfo ([#216](https://github.com/geeknonerd/stuntdouble/pull/216))
 - *(demo)* prove OAuth authorization mock acceptance ([#221](https://github.com/geeknonerd/stuntdouble/pull/221))
+
+### Other
+
+- *(deps)* bump the actions group with 2 updates ([#219](https://github.com/geeknonerd/stuntdouble/pull/219))
+- *(deps)* bump debian from `7ff6ba3` to `99c0b25` ([#218](https://github.com/geeknonerd/stuntdouble/pull/218))
+- *(deps)* bump rust from `114c7a4` to `9181b56` ([#217](https://github.com/geeknonerd/stuntdouble/pull/217))
+- *(ci)* document test assertion cleartext-logging and sync OAuth acceptance status ([#222](https://github.com/geeknonerd/stuntdouble/pull/222))
 
 ## [1.7.0](https://github.com/geeknonerd/stuntdouble/compare/v1.6.0...v1.7.0) - 2026-10-31
 
