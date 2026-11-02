@@ -1,6 +1,6 @@
 # Post-v1 开发路线：OAuth authorization mock
 
-- 状态：`执行中（M4）`，2026-11-02 起发布 OAuth 授权码 mock 演示与公开路线图
+- 状态：`已完成（M0–M4，2026-11-02）`；OAuth authorization mock 与公开路线图均已交付，后续候选见[公开路线图](#公开路线图)
 - 日期：2026-10-22
 - 驱动场景：[OAuth authorization mock](oauth-authorization-mock.md)
 - 关联：[ADR 0001](adr/0001-no-shared-state-in-v1.md)、[ADR 0009](adr/0009-open-core-and-funding.md)、[ADR 0011](adr/0011-contract-compatibility.md)、[ADR 0015](adr/0015-python-runtime-deferred-to-v2.md)、[ADR 0016](adr/0016-v1-ctx-pending-capabilities-deferred.md)、[ADR 0019](adr/0019-host-crypto-api.md)、[ADR 0020](adr/0020-fallback-route-and-method-mismatch.md)、[ADR 0021](adr/0021-v2-shared-state.md)、[产品功能定义](product-definition.md)、[`ctx` API 契约](../docs/contracts/ctx-api.md)
@@ -27,11 +27,11 @@
 | 能力 | 当前状态 | 所属阶段 |
 | --- | --- | --- |
 | 显式 Route、`ctx.respond`、302、JSON、header | 已支持 | 直接使用 |
-| `ctx.request.bodyBytes`、原始查询串 | 已实现（M1.1，#171：`bodyBytes` 与 `rawQuery`） | v1.x |
-| 安全随机、SHA-256、HMAC-SHA256、常量时间比较 | 未实现；脚本层不能可靠提供安全语义 | v1.x |
-| 未知路径与错误方法的可控响应 | 未知路径已支持通过 `[fallback]` 脚本响应（#173）；已知路径方法错误仍返回引擎 404，405 与 `Allow` 留待 #174；拒绝响应的有界 lingering drain（413/408/5xx，防 TCP RST 吞掉已发错误信封）留待 #204 | v1.x |
-| 授权码生命周期、access token 生命周期、签名 request ID 防重放 | 需要跨请求数据，v1 明确不提供 | v2 |
-| OAuth 授权、令牌与 userinfo 流程 | 需要以上能力组合 | 场景验收 |
+| `ctx.request.bodyBytes`、原始查询串 | 已实现（M1.1，#171，v1.4.0） | v1.x |
+| 安全随机、SHA-256、HMAC-SHA256、常量时间比较 | 已实现（M1.2，#172，v1.3.0） | v1.x |
+| 未知路径与错误方法的可控响应 | 已支持：未知路径和错误方法都可运行 `[fallback]` 脚本，405 的 `Allow` 由宿主注入（#173、#174，v1.5.0/v1.6.0）；拒绝响应的有界 lingering drain 仍为受阻候选（#204，触发条件未满足） | v1.x |
+| 授权码生命周期、access token 生命周期、签名 request ID 防重放 | 已实现（M2，#176，v1.2.0） | v2 |
+| OAuth 授权、令牌与 userinfo 流程 | 已完成（M3，#177–#180 / PR #210、#212、#216、#221，v1.7.0/v1.8.0） | 场景验收 |
 
 ## 路线
 
@@ -59,6 +59,8 @@
 ### M1：v1.x 通用底座
 
 **目的**：先用兼容 `apiVersion` 1 的增量能力覆盖所有无状态部分。
+
+**状态**：已完成（M1.1–M1.3，v1.3.0–v1.6.0）。
 
 **M1.1 请求快照保真（已完成，#171）**
 
@@ -94,7 +96,7 @@
 
 **目的**：为 OAuth 的一次性授权码、access token 与签名防重放提供宿主状态。
 
-**状态**：原型已完成（#175，2026-10-22），正式实现已完成（#176）。
+**状态**：原型已完成（#175，2026-10-22），正式实现已完成（#176，v1.2.0）。
 
 **已完成原型**
 
@@ -123,7 +125,7 @@
 
 **目的**：用真实脚本组合 M1 与 M2 的能力，完成 A01–A20。
 
-**状态**：已完成（2026-11-01，#177、#178、#179、#180 / PR #221）。
+**状态**：已完成（2026-11-01，#177–#180 / PR #210、#212、#216、#221，v1.7.0–v1.8.0）。
 
 **交付**
 
@@ -144,9 +146,11 @@
 
 **目的**：把已实现的能力与未承诺方向公开，避免候选列表被误读为承诺。
 
+**状态**：已完成（2026-11-02，#181 / PR #226）；公开文档已发布，`CHANGELOG.md` 条目保留在 Unreleased，随下一个真实版本发布。
+
 **交付**
 
-- 发布 `Now / Next / Later` 路线图（见下文 `公开路线图`）：OAuth authorization mock 在 `Now`，Shared state 在 `Now/Next`，Python 明确留在 `Later`。
+- 发布 `Now / Next / Later` 路线图（见下文 `公开路线图`）：已交付能力在 `Now`，后续候选在 `Next`，Python 明确留在 `Later`。
 - `demo/oauth-authorization-mock/` 发布为可离线运行的用户向演示，附英文与中文用户指南。
 - 更新中文与英文文档索引、`CHANGELOG.md`、`types/ctx-api-v1.d.ts` 和发布说明。
 - 按 ADR 0009 区分开源核心工作与未来商业工作，不承诺日期或商业化功能。
@@ -159,17 +163,17 @@
 
 ## 公开路线图
 
-### Now（正在交付）
+### Now（当前可用）
 - OAuth authorization mock 演示：authorize → token → userinfo，签发一次性授权码、300 秒访问令牌、签名防重放，端到端测试 A01–A20 全部通过。
-- `ctx.state` 进程内共享状态：`get`/`set`/`take`/`setIfAbsent`，按 key TTL，原子 `take` 与 `setIfAbsent`，重启即清空。
+- `ctx.state` 进程内 Shared state：`get`/`set`/`take`/`setIfAbsent`，按 key TTL，原子 `take` 与 `setIfAbsent`，重启即清空。
 - `ctx.crypto` 宿主加密：`randomBytes`、`sha256`、`hmacSha256`、`timingSafeEqual`。
 - `ctx.request.bodyBytes` 与 `ctx.request.rawQuery` 请求快照保真。
 - `[fallback]` 路由与 `ctx.match`（`not_found` / `method_not_allowed`，宿主注入 `Allow`）。
 
 ### Next（近期考虑，未承诺）
-- `ctx.state` 独立发布为可单独选用的 v1.x 能力，OAuth 场景在未集成状态时标记为未验收。
 - 更多语言的客户端集成示例与 mock 食谱（见 `docs/guide/mock-recipes.md`）。
 - 针对 T6/T13 离线文档演示的持续回归与更多上游错误分支覆盖。
+- 拒绝响应的有界 lingering drain（#204）：仅在 issue 的任一触发条件成立后，先写 ADR 再实现。
 
 ### Later（远期 / 不在本路线中）
 - Python 运行时（ADR 0015，独立 v2 候选，不随本路线实现）。
@@ -183,7 +187,7 @@
 - M1.1、M1.2、M1.3 可在 M0 完成后并行。
 - M2 原型与正式实现均已完成（#175、#176）。
 - M3 已完成（#177–#180 / PR #210、#212、#216、#221）。
-- M4 依赖 M3 验收完成（前置已就绪）。
+- M4 已完成（#181 / PR #226）。
 
 ## 明确不做
 
