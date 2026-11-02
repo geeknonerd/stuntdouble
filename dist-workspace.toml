@@ -23,6 +23,9 @@ targets = [
 ]
 # Where to host releases
 hosting = "github"
+# macOS 14 runner images retire on 2026-11-02 (actions/runner-images#13518);
+# pin the moving macos-latest label so the build follows whatever image is current.
+github-custom-runners = { aarch64-apple-darwin = "macos-latest" }
 # Match the release contract's archive formats.
 unix-archive = ".tar.gz"
 windows-archive = ".zip"
