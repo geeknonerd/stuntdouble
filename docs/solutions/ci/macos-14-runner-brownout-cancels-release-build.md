@@ -103,3 +103,38 @@ v1.8.0 Release 于 2026-11-02T00:48:35Z 成功发布，包含以下资产：
 - SBOM (CycloneDX JSON)
 - SHA256SUMS
 - GitHub Artifact Attestations
+
+## 修复步骤（成功路径）
+
+1. 在 `dist-workspace.toml` 中添加 `github-custom-runners` 配置：
+   ```toml
+   github-custom-runners = { aarch64-apple-darwin = "macos-latest" }
+   ```
+2. 运行 `dist generate --check` 验证配置文件一致性。
+3. 运行 `.github/scripts/check-cargo-dist-bootstrap.sh` 验证 bootstrap 信任链。
+4. **关键步骤**：删除旧 tag 并在修复后的 main 上重建：
+   ```bash
+   git tag --delete v1.8.0
+   git push origin :refs/tags/v1.8.0
+   git tag -a v1.8.0 -m "chore: Release package stuntdouble version 1.8.0"
+   git push origin v1.8.0
+   ```
+5. 重新 dispatch Release 工作流：
+   ```bash
+   gh workflow run release.yml --ref v1.8.0 -f "tag=v1.8.0"
+   ```
+6. 等待所有 job 完成，确认 GitHub Release 成功发布。
+
+## 为什么需要重建 tag
+
+Release 工作流的 plan job 会从 tag 指向的 commit 读取 `dist-workspace.toml`。如果 tag 指向的是修复前的 commit，即使 main 上已有修复配置，plan 仍会生成旧的 `macos-14` runner，导致构建再次失败。因此必须删除旧 tag 并在新 commit 上重建。
+
+## 结果
+
+v1.8.0 Release 于 2026-11-02T00:48:35Z 成功发布，包含以下资产：
+- stuntdouble-aarch64-apple-darwin.tar.gz
+- stuntdouble-x86_64-pc-windows-msvc.zip
+- stuntdouble-x86_64-unknown-linux-gnu.tar.gz
+- SBOM (CycloneDX JSON)
+- SHA256SUMS
+- GitHub Artifact Attestations
