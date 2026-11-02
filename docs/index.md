@@ -21,6 +21,7 @@ Slices T1–T13 are implemented: T1–T7 implement the runtime, T8 freezes the v
 - [Mock recipes](https://github.com/geeknonerd/stuntdouble/blob/main/docs/guide/mock-recipes.md) — task-oriented JSON, upstream, file, upload, and CI examples.
 - [Public contracts](https://github.com/geeknonerd/stuntdouble/tree/main/docs/contracts) — configuration, `ctx` API, and CLI.
 - [Demo fixture](https://github.com/geeknonerd/stuntdouble/blob/main/demo/README.md) — runnable manifest and PDF download scenario.
+- [OAuth authorization mock demo](https://github.com/geeknonerd/stuntdouble/blob/main/demo/oauth-authorization-mock/README.md) — runnable authorize → token → userinfo OAuth mock scenario.
 - [`ctx` API type definitions](https://github.com/geeknonerd/stuntdouble/blob/main/types/ctx-api-v1.d.ts) — `apiVersion` 1 source types.
 - [Changelog](https://github.com/geeknonerd/stuntdouble/blob/main/CHANGELOG.md) — release history.
 - [Contributing](https://github.com/geeknonerd/stuntdouble/blob/main/CONTRIBUTING.md)

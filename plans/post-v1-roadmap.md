@@ -1,6 +1,6 @@
 # Post-v1 开发路线：OAuth authorization mock
 
-- 状态：`提议中`
+- 状态：`执行中（M4）`，2026-11-02 起发布 OAuth 授权码 mock 演示与公开路线图
 - 日期：2026-10-22
 - 驱动场景：[OAuth authorization mock](oauth-authorization-mock.md)
 - 关联：[ADR 0001](adr/0001-no-shared-state-in-v1.md)、[ADR 0009](adr/0009-open-core-and-funding.md)、[ADR 0011](adr/0011-contract-compatibility.md)、[ADR 0015](adr/0015-python-runtime-deferred-to-v2.md)、[ADR 0016](adr/0016-v1-ctx-pending-capabilities-deferred.md)、[ADR 0019](adr/0019-host-crypto-api.md)、[ADR 0020](adr/0020-fallback-route-and-method-mismatch.md)、[ADR 0021](adr/0021-v2-shared-state.md)、[产品功能定义](product-definition.md)、[`ctx` API 契约](../docs/contracts/ctx-api.md)
@@ -146,7 +146,8 @@
 
 **交付**
 
-- 发布 `Now / Next / Later` 路线图：OAuth authorization mock 在 `Now`，Shared state 在 `Now/Next`，Python 明确留在 `Later`。
+- 发布 `Now / Next / Later` 路线图（见下文 `公开路线图`）：OAuth authorization mock 在 `Now`，Shared state 在 `Now/Next`，Python 明确留在 `Later`。
+- `demo/oauth-authorization-mock/` 发布为可离线运行的用户向演示，附英文与中文用户指南。
 - 更新中文与英文文档索引、`CHANGELOG.md`、`types/ctx-api-v1.d.ts` 和发布说明。
 - 按 ADR 0009 区分开源核心工作与未来商业工作，不承诺日期或商业化功能。
 
@@ -155,6 +156,26 @@
 - 公开路线图可独立阅读。
 - 文档链接与双语配对检查通过。
 - 发布后复核场景和契约文档。
+
+## 公开路线图
+
+### Now（正在交付）
+- OAuth authorization mock 演示：authorize → token → userinfo，签发一次性授权码、300 秒访问令牌、签名防重放，端到端测试 A01–A20 全部通过。
+- `ctx.state` 进程内共享状态：`get`/`set`/`take`/`setIfAbsent`，按 key TTL，原子 `take` 与 `setIfAbsent`，重启即清空。
+- `ctx.crypto` 宿主加密：`randomBytes`、`sha256`、`hmacSha256`、`timingSafeEqual`。
+- `ctx.request.bodyBytes` 与 `ctx.request.rawQuery` 请求快照保真。
+- `[fallback]` 路由与 `ctx.match`（`not_found` / `method_not_allowed`，宿主注入 `Allow`）。
+
+### Next（近期考虑，未承诺）
+- `ctx.state` 独立发布为可单独选用的 v1.x 能力，OAuth 场景在未集成状态时标记为未验收。
+- 更多语言的客户端集成示例与 mock 食谱（见 `docs/guide/mock-recipes.md`）。
+- 针对 T6/T13 离线文档演示的持续回归与更多上游错误分支覆盖。
+
+### Later（远期 / 不在本路线中）
+- Python 运行时（ADR 0015，独立 v2 候选，不随本路线实现）。
+- SQLite、Admin API、热重载、定时器、响应序列。
+- 持久化存储、跨实例状态协调、多租户隔离、OIDC Discovery、JWKS、ID 令牌、刷新令牌、PKCE。
+- 由 ADR 0009 划分的未来商业工作，不承诺日期或功能。
 
 ## 依赖与并行度
 
