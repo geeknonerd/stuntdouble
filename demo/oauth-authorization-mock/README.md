@@ -39,7 +39,7 @@ curl -i "http://127.0.0.1:3000/oauth2/authorize?response_type=code&client_id=dem
 
 ### Signature calculation (token and userinfo)
 
-The token and userinfo endpoints require the mock request signature from §6 of the [contract](plans/oauth-authorization-mock.md). Compute it over the canonical string:
+The token and userinfo endpoints require the mock request signature from §6 of the [contract](../../plans/oauth-authorization-mock.md). Compute it over the canonical string:
 
 ```
 METHOD
@@ -206,4 +206,4 @@ The authorize endpoint does not require or read request-signature headers (`X-Si
 cargo test --test cli oauth_
 ```
 
-Covers A01–A20 from the [contract](plans/oauth-authorization-mock.md §12): authorize parameter validation and state boundaries, token exchange (A05–A14), userinfo (A15–A18: Bearer validation, signature-before-token precedence, token expiry, exact response shape, replay rejection, canonical-query signing, log hygiene), and fallback responses (A19–A20: 404 `not_found`, 405 `invalid_method` with `Allow`).
+Covers A01–A20 from the [contract](../../plans/oauth-authorization-mock.md): authorize parameter validation and state boundaries, token exchange (A05–A14), userinfo (A15–A18: Bearer validation, signature-before-token precedence, token expiry, exact response shape, replay rejection, canonical-query signing, log hygiene), and fallback responses (A19–A20: 404 `not_found`, 405 `invalid_method` with `Allow`).

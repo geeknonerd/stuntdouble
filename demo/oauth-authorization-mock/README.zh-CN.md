@@ -41,7 +41,7 @@ curl -i "http://127.0.0.1:3000/oauth2/authorize?response_type=code&client_id=dem
 
 ### 签名计算（令牌与用户信息）
 
-令牌和用户信息端点需要 mock 请求签名，见[契约](plans/oauth-authorization-mock.md)第 6 节。签名原文如下：
+令牌和用户信息端点需要 mock 请求签名，见[契约](../../plans/oauth-authorization-mock.md)第 6 节。签名原文如下：
 
 ```
 METHOD
@@ -195,4 +195,4 @@ Location: http://127.0.0.1:18081/callback?code=<64_HEX>&state=<ENCODED_STATE>
 cargo test --test cli oauth_
 ```
 
-覆盖[契约](plans/oauth-authorization-mock.md §12) 中的 A01–A20：授权参数校验与 state 边界、令牌兑换（A05–A14）、用户信息（A15–A18：Bearer 校验、签名优先于令牌、令牌过期、精确响应结构、重放拒绝、规范查询串签名、日志卫生）和兜底响应（A19–A20：404 `not_found`、405 `invalid_method` 携带 `Allow`）。
+覆盖[契约](../../plans/oauth-authorization-mock.md) 中的 A01–A20：授权参数校验与 state 边界、令牌兑换（A05–A14）、用户信息（A15–A18：Bearer 校验、签名优先于令牌、令牌过期、精确响应结构、重放拒绝、规范查询串签名、日志卫生）和兜底响应（A19–A20：404 `not_found`、405 `invalid_method` 携带 `Allow`）。
