@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- *(upstream)* classify a `ctx.http.pipe` redirect without a `Location` header as catchable `upstream_redirect_error`, matching the documented contract ([#204](https://github.com/geeknonerd/stuntdouble/issues/204))
+- *(upstream)* classify a `ctx.http.pipe` redirect without a `Location` header as catchable `upstream_redirect_error`, matching the documented contract ([#228](https://github.com/geeknonerd/stuntdouble/pull/228))
 
 ## [1.8.1](https://github.com/geeknonerd/stuntdouble/compare/v1.8.0...v1.8.1) - 2026-11-02
 
