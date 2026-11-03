@@ -5190,6 +5190,24 @@ ctx.respond(200, {}, r.text());
 }
 
 #[test]
+fn ctx_http_get_3xx_without_location_is_returned_as_data() {
+    let upstream = Upstream::start(vec![UpstreamResponse::new(307, b"")]);
+    let script = r"
+var r = ctx.http.get(ctx.env.UPSTREAM_URL);
+ctx.respond(r.status, {}, r.text());
+";
+    let url = upstream.url("/redirect");
+    let (response, _) = with_server_full(
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+        &[("UPSTREAM_URL", url.as_str())],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 307, "body: {}", response.body);
+    assert_eq!(upstream.requests().len(), 1);
+}
+
+#[test]
 fn ctx_http_get_rejects_redirect_chain_longer_than_three_hops() {
     let upstream = Upstream::start(vec![
         UpstreamResponse::new(302, b"").header("Location", "/one"),
@@ -5796,6 +5814,29 @@ try {
     assert_eq!(response.status, 200, "body: {}", response.body);
     assert_eq!(response.body, "upstream_redirect_error");
     assert_eq!(upstream.requests().len(), 4);
+}
+
+#[test]
+fn ctx_http_pipe_redirect_without_location_is_catchable() {
+    let upstream = Upstream::start(vec![UpstreamResponse::new(302, b"")]);
+    let script = r#"
+try {
+  ctx.http.pipe(ctx.env.UPSTREAM_URL);
+  ctx.respond(500, {}, "expected a redirect error");
+} catch (error) {
+  ctx.respond(200, {}, error.code);
+}
+"#;
+    let url = upstream.url("/file.pdf");
+    let (response, _) = with_server_full(
+        &with_upstream(good_config(), &["127.0.0.1"]),
+        script,
+        &[("UPSTREAM_URL", url.as_str())],
+        |port| request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+    );
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(response.body, "upstream_redirect_error");
+    assert_eq!(upstream.requests().len(), 1);
 }
 
 #[test]
