@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.2](https://github.com/geeknonerd/stuntdouble/compare/v1.8.1...v1.8.2) - 2026-11-03
+
 ### Added
 
 - *(demo)* publish OAuth authorization mock demo with English and Chinese user guides ([#181](https://github.com/geeknonerd/stuntdouble/issues/181))
