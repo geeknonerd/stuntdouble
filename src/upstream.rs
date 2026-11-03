@@ -307,6 +307,7 @@ impl UpstreamAccess {
             None,
             "ctx.http.get",
             Error::Policy,
+            false,
             index,
         )?;
 
@@ -370,6 +371,7 @@ impl UpstreamAccess {
             self.client_range.as_deref(),
             "ctx.http.pipe",
             Error::Redirect,
+            true,
             index,
         )?;
         let upstream_status = response.status().as_u16();
@@ -466,6 +468,7 @@ impl UpstreamAccess {
     /// re-validated against the allowlist; `redirect_error` classifies a chain
     /// the caller cannot follow, while an allowlist rejection stays a policy
     /// error and never masquerades as an upstream failure.
+    #[allow(clippy::too_many_arguments)]
     fn send_following_redirects(
         &self,
         mut url: Url,
@@ -473,6 +476,7 @@ impl UpstreamAccess {
         range: Option<&str>,
         call: &str,
         redirect_error: fn(String) -> Error,
+        missing_location_is_error: bool,
         index: usize,
     ) -> Result<ureq::http::Response<ureq::Body>, Error> {
         let mut redirects = 0_u8;
@@ -483,25 +487,35 @@ impl UpstreamAccess {
             }
             let response = self.fetch(&url, left, range)?;
             if is_redirect(response.status().as_u16()) {
-                if let Some(location) = response.headers().get(ureq::http::header::LOCATION) {
-                    if redirects >= MAX_REDIRECTS {
+                let Some(location) = response.headers().get(ureq::http::header::LOCATION) else {
+                    // `ctx.http.get` treats a 3xx without Location as data,
+                    // matching its "HTTP response is data" rule. `pipe`
+                    // cannot stream a redirect and reports the unusable chain.
+                    if missing_location_is_error {
                         return Err(redirect_error(format!(
-                            "{call}: redirect limit exceeded (max 3 hops)"
+                            "{call}: redirect status {} has no Location header",
+                            response.status().as_u16()
                         )));
                     }
-                    let location = location.to_str().map_err(|_| {
-                        redirect_error(format!("{call}: redirect Location is not a valid string"))
-                    })?;
-                    let next = url.join(location).map_err(|error| {
-                        redirect_error(format!("{call}: invalid redirect Location: {error}"))
-                    })?;
-                    self.validate(&next, redirect_error)?;
-                    url = next;
-                    redirects += 1;
-                    self.update_call(index, |record| record.redirects = redirects);
-                    self.record_url(index, &url);
-                    continue;
+                    return Ok(response);
+                };
+                if redirects >= MAX_REDIRECTS {
+                    return Err(redirect_error(format!(
+                        "{call}: redirect limit exceeded (max 3 hops)"
+                    )));
                 }
+                let location = location.to_str().map_err(|_| {
+                    redirect_error(format!("{call}: redirect Location is not a valid string"))
+                })?;
+                let next = url.join(location).map_err(|error| {
+                    redirect_error(format!("{call}: invalid redirect Location: {error}"))
+                })?;
+                self.validate(&next, redirect_error)?;
+                url = next;
+                redirects += 1;
+                self.update_call(index, |record| record.redirects = redirects);
+                self.record_url(index, &url);
+                continue;
             }
             return Ok(response);
         }
