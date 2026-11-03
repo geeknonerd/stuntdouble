@@ -81,7 +81,7 @@ pub type BodyStream =
 
 allowlist 边界是有意为之。每个重定向目标都会重新校验，allowlist 拒绝始终保持策略错误，即使调用方 API 会把错误 scheme 归类为 `upstream_redirect_error` 或 `upstream_url_invalid`（`src/upstream.rs:487-506`、`src/upstream.rs:635-660`）。demo 路由把 `upstream_url_invalid`、`upstream_http_error`、`upstream_redirect_error`、`upstream_unreachable` 映射为业务 502，但有意重新抛出其他错误，使 allowlist／配置故障保持 `script_error`（`demo/scripts/download.js:72-103`；`tests/cli.rs:5936-5944`）。
 
-当前 `send_following_redirects` 已按照 ADR 0005 的宽泛措辞处理缺失 `Location`：无论 `Location` 完全缺失还是存在但不可解析，都由调用方决定分类——`pipe` 抛 `upstream_redirect_error`，`get` 保留「3xx 无 Location 作为数据返回」的既有行为。契约与 ADR 现在与实际行为一致，demo 的 `demo_download_route_maps_a_redirect_without_location_to_502` 仍通过 `pdf_bad_gateway` 断言客户端可见结果，同时 `ctx_http_pipe_redirect_without_location_is_catchable` 补上了 `error.code` 的精确回归。
+当前 `send_following_redirects` 对可跟随的重定向状态（301/302/303/307/308）处理缺失 `Location`：无论 `Location` 完全缺失还是存在但不可解析，都由调用方决定分类——`pipe` 抛 `upstream_redirect_error`，`get` 保留「响应即数据」的既有行为。契约与 ADR 现在与实际行为一致，demo 的 `demo_download_route_maps_a_redirect_without_location_to_502` 仍通过 `pdf_bad_gateway` 断言客户端可见结果，同时 `ctx_http_pipe_redirect_without_location_is_catchable` 补上了 `error.code` 的精确回归。
 
 引擎级错误分类只是故事的前半段。客户端可见的业务错误表由路由脚本掌握；这一独立关注点记录在 `docs/solutions/conventions/script-owned-upstream-error-mapping.md`，不应在此重复。
 
@@ -256,8 +256,8 @@ try {
 | pipe 可传输超过 `get` 8 MiB 上限的 body | `tests/cli.rs:5596-5610` |
 | Range 被转发，206/`Content-Range` 保留 | `demo_download_route_forwards_range_and_preserves_content_range`（`tests/cli.rs:5908-5933`） |
 | demo 中 allowlist 拒绝仍是对客户端可见的 `script_error` | `tests/cli.rs:5936-5944` |
-| 缺失 `Location` 对 `pipe` 抛出可捕获的 `upstream_redirect_error` | `tests/cli.rs:5820-5843`（`ctx_http_pipe_redirect_without_location_is_catchable`）；demo 侧 `pdf_bad_gateway` 502 仍由 `tests/cli.rs:6231-6244`（`demo_download_route_maps_a_redirect_without_location_to_502`）覆盖 |
-+| 缺失 `Location` 对 `get` 返回原始 3xx 作为数据 | `tests/cli.rs:5241-5256`（`ctx_http_get_3xx_without_location_is_returned_as_data`） |
+| 缺失 `Location` 的可跟随重定向状态对 `pipe` 抛出可捕获的 `upstream_redirect_error` | `tests/cli.rs:5820-5843`（`ctx_http_pipe_redirect_without_location_is_catchable`）；demo 侧 `pdf_bad_gateway` 502 仍由 `tests/cli.rs:6231-6244`（`demo_download_route_maps_a_redirect_without_location_to_502`）覆盖 |
+| 缺失 `Location` 的可跟随重定向状态对 `get` 返回原始状态作为数据 | `tests/cli.rs:5193-5208`（`ctx_http_get_3xx_without_location_is_returned_as_data`） |
 
 ## T7 扩展：完成日志与客户端断开（issue #10，PR #25）
 

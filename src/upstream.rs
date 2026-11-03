@@ -488,9 +488,10 @@ impl UpstreamAccess {
             let response = self.fetch(&url, left, range)?;
             if is_redirect(response.status().as_u16()) {
                 let Some(location) = response.headers().get(ureq::http::header::LOCATION) else {
-                    // `ctx.http.get` treats a 3xx without Location as data,
-                    // matching its "HTTP response is data" rule. `pipe`
-                    // cannot stream a redirect and reports the unusable chain.
+                    // `ctx.http.get` treats a followable redirect status
+                    // without Location as data, matching its "HTTP response
+                    // is data" rule. `pipe` cannot stream a redirect and
+                    // reports the unusable chain.
                     if missing_location_is_error {
                         return Err(redirect_error(format!(
                             "{call}: redirect status {} has no Location header",
