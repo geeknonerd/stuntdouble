@@ -9,15 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.8.2](https://github.com/geeknonerd/stuntdouble/compare/v1.8.1...v1.8.2) - 2026-11-03
 
-### Fixed
-
-- *(upstream)* classify missing-Location redirects as redirect_error for pipe ([#228](https://github.com/geeknonerd/stuntdouble/pull/228))
-
-### Other
-
-- sync post-v1 roadmap with shipped milestones
-- *(demo)* publish OAuth authorization mock and roadmap ([#181](https://github.com/geeknonerd/stuntdouble/pull/181)) ([#226](https://github.com/geeknonerd/stuntdouble/pull/226))
-
 ### Added
 
 - *(demo)* publish OAuth authorization mock demo with English and Chinese user guides ([#181](https://github.com/geeknonerd/stuntdouble/issues/181))
