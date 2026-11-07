@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.0](https://github.com/geeknonerd/stuntdouble/compare/v1.8.2...v1.9.0) - 2026-11-07
+
+### Added
+
+- *(files)* add opt-in atomic script file writes (ADR 0022) ([#230](https://github.com/geeknonerd/stuntdouble/pull/230))
+
+### Fixed
+
+- *(files)* serialize Windows concurrent replacements ([#232](https://github.com/geeknonerd/stuntdouble/pull/232))
+
 ### Added
 
 - *(files)* add opt-in `ctx.file.writeText` / `ctx.file.writeBytes` with atomic replacement, same-root path and symlink restrictions, an 8 MiB per-call cap, and a per-request `files.write_max_bytes` budget; writes stay disabled unless `files.writable = true` and persist as artifact output across requests and restarts ([ADR 0022](plans/adr/0022-script-file-writes.md))
