@@ -1396,10 +1396,12 @@ mod tests {
         std::fs::write(root.join("concurrent.bin"), &old_payload).expect("seed file");
 
         let stopping = Arc::new(AtomicBool::new(false));
+        let started = Arc::new(std::sync::Barrier::new(READERS + 1));
         let handles = (0..READERS)
             .map(|_| {
                 let root = Arc::clone(&root);
                 let stopping = Arc::clone(&stopping);
+                let started = Arc::clone(&started);
                 let old_payload = old_payload.clone();
                 let new_payload = new_payload.clone();
                 std::thread::spawn(move || {
@@ -1407,6 +1409,21 @@ mod tests {
                     let old_text = String::from_utf8_lossy(&old_payload).into_owned();
                     let new_text = String::from_utf8_lossy(&new_payload).into_owned();
                     let mut reads = 0_usize;
+
+                    // Prove this reader is live before the writer starts, so a
+                    // busy runner cannot stop the writer before any read runs.
+                    let result = access.call(&json!({
+                        "op": "readText",
+                        "path": "concurrent.bin"
+                    }));
+                    let text = result["text"].as_str().expect("read text");
+                    assert!(
+                        text == old_text || text == new_text,
+                        "reader saw an incomplete version"
+                    );
+                    reads += 1;
+                    started.wait();
+
                     while !stopping.load(Ordering::Relaxed) {
                         let result = access.call(&json!({
                             "op": "readText",
@@ -1425,6 +1442,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         let (writer_access, _) = write_access(root.as_path(), true, 1024 * 1024);
+        started.wait();
         for _ in 0..WRITES {
             let result = writer_access.call(&json!({
                 "op": "writeBytes",
