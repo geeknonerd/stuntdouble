@@ -1003,6 +1003,17 @@ fn atomic_replace(target: &Path, parent: &Path, bytes: &[u8]) -> Result<(), Erro
     temp.as_file_mut()
         .flush()
         .map_err(|error| Error::Io(error.to_string()))?;
+    // On Windows a concurrent rename over the same target can transiently
+    // fail with the destination busy (os error 5); retry once with backoff.
+    // `persist` returns the file itself on failure, so it stays reusable.
+    let mut temp = match temp.persist(target) {
+        Ok(_) => return Ok(()),
+        Err(error) => {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            error.file
+        }
+    };
+    let _ = &mut temp;
     temp.persist(target)
         .map_err(|error| Error::Io(error.error.to_string()))?;
     Ok(())
