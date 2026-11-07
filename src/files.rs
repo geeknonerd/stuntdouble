@@ -1003,21 +1003,55 @@ fn atomic_replace(target: &Path, parent: &Path, bytes: &[u8]) -> Result<(), Erro
     temp.as_file_mut()
         .flush()
         .map_err(|error| Error::Io(error.to_string()))?;
-    // On Windows a concurrent rename over the same target can transiently
-    // fail with the destination busy (os error 5); retry once with backoff.
-    // `persist` returns the file itself on failure, so it stays reusable.
-    let mut temp = match temp.persist(target) {
-        Ok(_) => return Ok(()),
-        Err(error) => {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-            error.file
-        }
-    };
-    let _ = &mut temp;
-    temp.persist(target)
-        .map_err(|error| Error::Io(error.error.to_string()))?;
-    Ok(())
+    persist_replacement(temp, target)
 }
+
+/// Replace `target` with an already-written temporary file.
+///
+/// On Windows, concurrent `MoveFileExW` calls over the same target can fail
+/// with `ERROR_ACCESS_DENIED`. All script writes in one `serve` process go
+/// through this host, so a process-local lock serializes the replace step and
+/// lets the documented last-writer-wins behavior hold. The lock is an
+/// implementation detail, not a user-facing lock/queue; separate `serve`
+/// processes remain uncoordinated, as ADR 0022 specifies. The retry covers
+/// transient external holders without widening the stable error code.
+fn persist_replacement(mut temp: tempfile::NamedTempFile, target: &Path) -> Result<(), Error> {
+    let mut last_error = None;
+    for attempt in 0..PERSIST_ATTEMPTS {
+        let result = {
+            #[cfg(windows)]
+            let _guard = replace_lock();
+            temp.persist(target)
+        };
+        match result {
+            Ok(_) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error.error);
+                temp = error.file;
+                if attempt + 1 < PERSIST_ATTEMPTS {
+                    std::thread::sleep(std::time::Duration::from_millis(10 * (attempt as u64 + 1)));
+                }
+            }
+        }
+    }
+    Err(Error::Io(last_error.map_or_else(
+        || "failed to replace the target file".to_string(),
+        |error| error.to_string(),
+    )))
+}
+
+#[cfg(windows)]
+fn replace_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(windows)]
+const PERSIST_ATTEMPTS: usize = 3;
+
+#[cfg(not(windows))]
+const PERSIST_ATTEMPTS: usize = 2;
 
 fn is_link_like(metadata: &std::fs::Metadata) -> bool {
     if metadata.file_type().is_symlink() {
@@ -1514,45 +1548,52 @@ mod tests {
     #[test]
     fn concurrent_writes_leave_one_complete_version() {
         const WRITERS: usize = 8;
+        const ROUNDS: usize = 3;
 
         let dir = tempfile::tempdir().expect("tempdir");
         let root = Arc::new(dir.path().to_path_buf());
-        let barrier = Arc::new(std::sync::Barrier::new(WRITERS));
         let payloads = (0..WRITERS)
             .map(|index| format!("version-{index}-").repeat(1024).into_bytes())
             .collect::<Vec<_>>();
-        let handles = payloads
-            .iter()
-            .cloned()
-            .map(|payload| {
-                let root = Arc::clone(&root);
-                let barrier = Arc::clone(&barrier);
-                let encoded = BASE64.encode(&payload);
-                std::thread::spawn(move || {
-                    let (access, _) = write_access(root.as_path(), true, 1024 * 1024);
-                    barrier.wait();
-                    let result = access.call(&json!({
-                        "op": "writeBytes",
-                        "path": "concurrent.bin",
-                        "bytes_base64": encoded
-                    }));
-                    (result, payload)
-                })
-            })
-            .collect::<Vec<_>>();
 
-        let results = handles
-            .into_iter()
-            .map(|handle| handle.join().expect("writer"))
-            .collect::<Vec<_>>();
-        for (result, _) in &results {
-            assert_eq!(result["ok"], true, "result: {result}");
+        // Repeat rounds so a regression on the Windows replace path is not
+        // masked by scheduling.
+        for _ in 0..ROUNDS {
+            let barrier = Arc::new(std::sync::Barrier::new(WRITERS));
+            let handles = payloads
+                .iter()
+                .cloned()
+                .map(|payload| {
+                    let root = Arc::clone(&root);
+                    let barrier = Arc::clone(&barrier);
+                    let encoded = BASE64.encode(&payload);
+                    std::thread::spawn(move || {
+                        let (access, _) = write_access(root.as_path(), true, 1024 * 1024);
+                        barrier.wait();
+                        let result = access.call(&json!({
+                            "op": "writeBytes",
+                            "path": "concurrent.bin",
+                            "bytes_base64": encoded
+                        }));
+                        (result, payload)
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            let results = handles
+                .into_iter()
+                .map(|handle| handle.join().expect("writer"))
+                .collect::<Vec<_>>();
+            for (result, _) in &results {
+                assert_eq!(result["ok"], true, "result: {result}");
+            }
+            let final_bytes =
+                std::fs::read(dir.path().join("concurrent.bin")).expect("written file");
+            assert!(
+                results.iter().any(|(_, payload)| final_bytes == *payload),
+                "final file is not one complete version"
+            );
         }
-        let final_bytes = std::fs::read(dir.path().join("concurrent.bin")).expect("written file");
-        assert!(
-            results.iter().any(|(_, payload)| final_bytes == *payload),
-            "final file is not one complete version"
-        );
     }
 
     #[cfg(windows)]
