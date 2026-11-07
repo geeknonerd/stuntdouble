@@ -216,6 +216,76 @@ curl -i -F 'document=@./report.pdf;type=application/pdf' \
 
 上传内容保存在请求级临时存储中，请求结束后清理。
 
+## 持久化上传文件并在后续请求中返回
+
+显式开启写入，并在启动服务前创建 `files/uploads/`。宿主不会自动创建父目录。
+
+```toml
+[files]
+root = "./files"
+writable = true
+write_max_bytes = 20971520
+
+[[routes]]
+name = "upload-latest"
+method = "POST"
+path = "/documents/latest"
+script = "scripts/upload-latest.js"
+
+[[routes]]
+name = "download-latest"
+method = "GET"
+path = "/documents/latest"
+script = "scripts/download-latest.js"
+```
+
+```js
+// scripts/upload-latest.js
+const file = ctx.request.files[0];
+
+if (!file) {
+  ctx.respond(
+    400,
+    { "Content-Type": "application/json; charset=utf-8" },
+    JSON.stringify({ error: "document_required" }),
+  );
+} else {
+  try {
+    const bytes = ctx.file.writeBytes("uploads/latest.bin", file.bytes());
+    ctx.respond(
+      201,
+      { "Content-Type": "application/json; charset=utf-8" },
+      JSON.stringify({ bytes }),
+    );
+  } catch (error) {
+    ctx.respond(
+      500,
+      { "Content-Type": "application/json; charset=utf-8" },
+      JSON.stringify({ error: "write_failed", code: error.code || "script_error" }),
+    );
+  }
+}
+```
+
+```js
+// scripts/download-latest.js
+ctx.respond(
+  200,
+  { "Content-Type": "application/octet-stream" },
+  ctx.file.stream("uploads/latest.bin"),
+);
+```
+
+运行并验证：
+
+```bash
+curl -i -F 'document=@./report.pdf;type=application/pdf' \
+  http://127.0.0.1:3000/documents/latest
+curl -i http://127.0.0.1:3000/documents/latest
+```
+
+缓冲式上传路径上限为 8 MiB。写入文件跨请求与重启保留，不会自动清理，是 artifact output，不是 `ctx.state`。
+
 ## 最小 CI 验证
 
 先校验配置，后台启动服务，轮询就绪，断言一个响应，然后停止进程：

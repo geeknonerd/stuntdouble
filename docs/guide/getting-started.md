@@ -33,7 +33,7 @@ path = "/hello/:name"
 script = "hello.js"
 ```
 
-`files.root` must name an existing directory, even if this route does not read files. It is the only directory `ctx.file` can read. The [configuration contract](../contracts/config.md) lists every key and its validation rules.
+`files.root` must name an existing directory, even if this route does not access files. It is the only directory `ctx.file` can read or write. Reads are always available; writes stay disabled until the configuration enables them. The [configuration contract](../contracts/config.md) lists every key and its validation rules.
 
 ## Write your first route
 
@@ -89,7 +89,7 @@ if (upstream.status >= 400) {
 
 4xx/5xx answers are data; only transport failures throw `upstream_unreachable`. For a large or binary body, use `ctx.http.pipe`, which streams the upstream body straight to the client and preserves `Range`/206 — see the [demo fixture](../../demo/README.md) and the [`ctx` API contract](../contracts/ctx-api.md).
 
-## Read and stream local files
+## Read, stream, and write local files
 
 `ctx.file` reads only inside `files.root`. Absolute paths and any `..` component are rejected, symlinks must resolve inside the root, and buffered reads are capped at 8 MiB:
 
@@ -99,6 +99,23 @@ ctx.respond(200, { "Content-Type": "application/json" }, text);
 ```
 
 `readText` decodes strict UTF-8; `readBytes` returns a `Uint8Array`. Both throw catchable errors (`file_path_invalid`, `file_not_found`, `file_too_large`, `file_encoding_error`, `file_io_error`), and an uncaught one answers 500 `script_error`.
+
+Writes are opt-in. Add `writable = true` to the `[files]` table, create the parent directory yourself, and keep each file within the per-call and per-request limits:
+
+```toml
+[files]
+root = "./files"
+writable = true
+write_max_bytes = 20971520
+```
+
+```js
+const textBytes = ctx.file.writeText("generated/report.txt", "hello\n");
+const binaryBytes = ctx.file.writeBytes("generated/report.bin", [0, 1, 255]);
+ctx.respond(200, { "Content-Type": "text/plain" }, String(textBytes + binaryBytes));
+```
+
+`writeText` and `writeBytes` create or atomically replace one regular file and return its byte count. Each call is capped at 8 MiB; `files.write_max_bytes` is the per-request budget for successful writes. Writes reject absolute paths, `..`, and every symlink component, do not create parent directories, and are disabled by default. A failed write leaves the old file untouched. Written files persist across requests and restarts, are not cleaned up automatically, and are artifact output rather than `ctx.state`.
 
 To serve a file without loading it into the script heap, pass `ctx.file.stream(path)` as the `ctx.respond` body with status `200`. The host owns `Accept-Ranges`, `Content-Length`, and `Content-Range`: a valid single `Range` answers 206, an unusable one answers 416, and `If-Range` disables range handling. `Content-Type` is never inferred, so set it in the response headers.
 

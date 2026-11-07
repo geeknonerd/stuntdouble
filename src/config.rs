@@ -50,6 +50,10 @@ pub struct ServerConfig {
 pub struct FilesConfig {
     pub root: PathBuf,
     pub upload_max_bytes: u64,
+    /// Whether scripts may create or replace files under `root`.
+    pub writable: bool,
+    /// Per-request byte budget for script file writes.
+    pub write_max_bytes: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -201,7 +205,7 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
         }
     };
 
-    let (root_dir, upload_max_bytes) = parse_files(root_table, path, &mut v);
+    let parsed_files = parse_files(root_table, path, &mut v);
 
     // Optional: an absent [sandbox] keeps every default.
     let sandbox = parse_sandbox(root_table, &mut v);
@@ -214,7 +218,7 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
 
     let routes = parse_routes(root_table, path, &mut v);
 
-    let root_dir = existing_dir(root_dir, &mut v);
+    let root_dir = existing_dir(parsed_files.root, &mut v);
     if !v.is_empty() {
         return Err(schema_error(path, v));
     }
@@ -225,7 +229,9 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
         server,
         files: FilesConfig {
             root: root_dir,
-            upload_max_bytes,
+            upload_max_bytes: parsed_files.upload_max_bytes,
+            writable: parsed_files.writable,
+            write_max_bytes: parsed_files.write_max_bytes,
         },
         sandbox,
         upstream,
@@ -265,19 +271,38 @@ fn parse_fallback(root: &Table, config_path: &Path, v: &mut Vec<Violation>) -> O
     }
 }
 
-/// Parse the required `[files]` table and resolve its static root.
-fn parse_files(
-    root: &Table,
-    config_path: &Path,
-    out: &mut Vec<Violation>,
-) -> (Option<PathBuf>, u64) {
+struct ParsedFiles {
+    root: Option<PathBuf>,
+    upload_max_bytes: u64,
+    writable: bool,
+    write_max_bytes: u64,
+}
+
+impl Default for ParsedFiles {
+    fn default() -> Self {
+        Self {
+            root: None,
+            upload_max_bytes: default_upload_max_bytes(),
+            writable: false,
+            write_max_bytes: default_write_max_bytes(),
+        }
+    }
+}
+
+/// Parse the required `[files]` table and resolve its file root.
+fn parse_files(root: &Table, config_path: &Path, out: &mut Vec<Violation>) -> ParsedFiles {
     match root.get("files") {
         None => {
             out.push(missing("files", "table"));
-            (None, default_upload_max_bytes())
+            ParsedFiles::default()
         }
         Some(toml::Value::Table(table)) => {
-            reject_unknown(table, &["root", "upload_max_bytes"], "files", out);
+            reject_unknown(
+                table,
+                &["root", "upload_max_bytes", "writable", "write_max_bytes"],
+                "files",
+                out,
+            );
             let root = req_string(table, "root", "files.root", out).map(|raw| {
                 let path = PathBuf::from(&raw);
                 let base = config_path.parent().unwrap_or(Path::new("."));
@@ -290,11 +315,23 @@ fn parse_files(
             let upload_max_bytes =
                 opt_positive_bytes(table, "upload_max_bytes", "files.upload_max_bytes", out)
                     .unwrap_or_else(default_upload_max_bytes);
-            (root, upload_max_bytes)
+            let writable = opt_bool(table, "writable", "files.writable", out).unwrap_or(false);
+            let write_max_bytes =
+                opt_positive_bytes(table, "write_max_bytes", "files.write_max_bytes", out)
+                    .unwrap_or_else(default_write_max_bytes);
+            ParsedFiles {
+                root,
+                upload_max_bytes,
+                writable,
+                write_max_bytes,
+            }
+            // Field-by-field construction (not `..Default::default()`): defaults
+            // are applied per-key above so an invalid value fails closed
+            // rather than silently inheriting the default.
         }
         Some(other) => {
             out.push(bad("files", "table", other));
-            (None, default_upload_max_bytes())
+            ParsedFiles::default()
         }
     }
 }
@@ -620,6 +657,19 @@ fn opt_string(table: &Table, key: &str, field: &str, out: &mut Vec<Violation>) -
     }
 }
 
+/// Optional boolean; an absent key yields `None` so the caller can apply its
+/// default.
+fn opt_bool(table: &Table, key: &str, field: &str, out: &mut Vec<Violation>) -> Option<bool> {
+    match table.get(key) {
+        None => None,
+        Some(toml::Value::Boolean(value)) => Some(*value),
+        Some(other) => {
+            out.push(bad(field, "boolean", other));
+            None
+        }
+    }
+}
+
 /// Positive byte count used by `files.upload_max_bytes`.
 fn opt_positive_bytes(
     table: &Table,
@@ -779,6 +829,10 @@ fn default_upload_max_bytes() -> u64 {
     20 * 1024 * 1024
 }
 
+fn default_write_max_bytes() -> u64 {
+    20 * 1024 * 1024
+}
+
 fn default_upstream_timeout_ms() -> u64 {
     15_000
 }
@@ -874,6 +928,44 @@ script = "scripts/x.js"
             let error = load(&write_config(dir.path(), &configured)).expect_err("must fail");
             assert!(
                 error.to_string().contains("files.upload_max_bytes"),
+                "value {value}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn script_file_writes_are_disabled_by_default_and_accept_an_explicit_budget() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_config(dir.path(), minimal());
+        let config = load(&path).expect("load default");
+        assert!(!config.files.writable);
+        assert_eq!(config.files.write_max_bytes, 20 * 1024 * 1024);
+
+        let configured = minimal().replace(
+            "[files]\nroot = \"./files\"",
+            "[files]\nroot = \"./files\"\nwritable = true\nwrite_max_bytes = 4096",
+        );
+        let config = load(&write_config(dir.path(), &configured)).expect("load explicit");
+        assert!(config.files.writable);
+        assert_eq!(config.files.write_max_bytes, 4096);
+    }
+
+    #[test]
+    fn script_file_write_config_rejects_wrong_shapes() {
+        for (field, value) in [
+            ("writable", "\"yes\""),
+            ("write_max_bytes", "0"),
+            ("write_max_bytes", "-1"),
+            ("write_max_bytes", "1.5"),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let configured = minimal().replace(
+                "[files]\nroot = \"./files\"",
+                &format!("[files]\nroot = \"./files\"\n{field} = {value}"),
+            );
+            let error = load(&write_config(dir.path(), &configured)).expect_err("must fail");
+            assert!(
+                error.to_string().contains(&format!("files.{field}")),
                 "value {value}: {error}"
             );
         }

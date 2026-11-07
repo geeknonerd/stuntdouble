@@ -179,10 +179,10 @@ cargo install --path .
 
 - 路由模型只有一条流水线：`match → source → transform → response`。
 - 内置 JavaScript 运行时（Boa）与宿主注入的 `ctx`；不暴露裸 `fetch`、`fs`、`os`、`subprocess`、`socket`。
-- 上游 HTTP（`ctx.http.get`、支持 Range 透传的流式 `ctx.http.pipe`）与 `ctx.file` 读取、文件流、请求级 multipart 上传。
+- 上游 HTTP（`ctx.http.get`、支持 Range 透传的流式 `ctx.http.pipe`）与 `ctx.file` 读取、文件流、显式开启的原子文件写入、请求级 multipart 上传。
 - 宿主加密原语（`ctx.crypto.randomBytes`、`sha256`、`hmacSha256`、`timingSafeEqual`）：安全随机、SHA-256、HMAC-SHA256 与常量时间比较。
 - v2（未发布）：单个服务实例内跨请求共享的进程内 `ctx.state`，支持深拷贝读取、原子 `take` / `setIfAbsent`、按 key 的 TTL 与固定容量；重启即清空。
-- 唯一静态文件根并阻止路径穿越；静态配置 + 重启生效。
+- 单一 File root，阻止路径穿越与写入符号链接逃逸；读取始终可用，写入需 `files.writable = true` 并受每请求预算约束。
 - Linux x86_64、macOS arm64、Windows x86_64 二进制与 `linux/amd64`、`linux/arm64` 双平台容器镜像。
 - 结构化请求日志，含 `request_id`、上游调用链与稳定错误分类。
 

@@ -27,9 +27,11 @@ v1 不接受 YAML 与 JSON。
 | `server.bind` | 否 | string | `"127.0.0.1"` | IP 地址字面量；hostname 在校验期被拒绝 |
 | `server.port` | 否 | integer | `3000` | `[1, 65535]` 范围内的整数 |
 | `server.request_timeout_ms` | 否 | integer | `30000` | 正整数（0 被拒绝）；读取一个请求头与请求体的期限 |
-| `files` | 是 | table | — | 只接受 `{root, upload_max_bytes}` |
-| `files.root` | 是 | string | — | 必须已存在的目录，相对配置文件解析 |
+| `files` | 是 | table | — | 只接受 `{root, upload_max_bytes, writable, write_max_bytes}` |
+| `files.root` | 是 | string | — | 必须已存在的目录，相对配置文件解析；脚本文件根 |
 | `files.upload_max_bytes` | 否 | integer | `20971520` | 正整数（0 与负数被拒绝）；单个 multipart 请求可接受的数据字节上限 |
+| `files.writable` | 否 | boolean | `false` | 为 `true` 时脚本可在 `files.root` 内创建或原子替换普通文件；为 `false` 时所有写入抛出 `file_write_disabled` |
+| `files.write_max_bytes` | 否 | integer | `20971520` | 正整数（0 与负数被拒绝）；每请求成功写入的字节预算 |
 | `sandbox` | 否 | table | — | 只接受 `{script_timeout_ms, script_memory_limit_mb}` |
 | `sandbox.script_timeout_ms` | 否 | integer | `10000` | 正整数（0 被拒绝） |
 | `sandbox.script_memory_limit_mb` | 否 | integer | `256` | 整数 `>= 64`；零、负数、非整数与低于 floor 的值以退出码 `2` 拒绝；在 Linux 上作为 `RLIMIT_AS` 虚拟地址空间上限执行，在 Windows 上作为每 worker 的 Job Object 提交内存上限；macOS 没有硬内存上限 |
@@ -74,6 +76,8 @@ port = 3000               # [1, 65535] 范围内的整数
 [files]
 root = "./files"              # 必须已存在的目录
 upload_max_bytes = 20971520   # 正整数；默认 20 MiB
+writable = false              # 默认；true 开启 ctx.file.writeText / writeBytes
+write_max_bytes = 20971520    # 正整数；默认每请求 20 MiB
 
 [sandbox]                 # 可选表
 script_timeout_ms = 10000 # 正整数；默认 10000
@@ -96,7 +100,7 @@ script = "scripts/404.js" # .js/.mjs/.cjs；相对或绝对路径
 
 ## Route 执行模型
 
-Route 遵循唯一流水线：`match → source → transform → response`。本切片实现 Match 与脚本 Transform：命中的 Route 运行其 JavaScript，脚本通过 `ctx.respond` 或 `ctx.http.pipe` 产生 Response。路径匹配某条 Route 但方法不匹配的请求属于方法错误：配置了 `[fallback]` 时以 `ctx.match.kind` 为 `"method_not_allowed"` 运行 fallback 脚本；未配置时引擎返回 404 `not_found`。未知路径返回 404 `not_found`；若配置了 `[fallback]` 表，则以 `ctx.match.kind` 为 `"not_found"` 运行 fallback 脚本。fallback 从不读取请求 body，且对 `"not_found"` 必须以状态 404 响应、对 `"method_not_allowed"` 必须以状态 405 响应，并使用缓冲 body。任何其他状态码、流式 body 或脚本自设 `Allow` 均属于非法 fallback 响应，映射为 500 `script_error`；合法的 405 响应由宿主按 `ctx.match.allowedMethods` 注入 `Allow`。fallback 沿用与普通 Route 相同的脚本失败映射：脚本抛错、超时、加载失败、内存超限或拿不到脚本 worker 槽位返回 500 `script_error`；脚本结束却没有产生 Response 时返回 500 `script_no_response`。`ctx.http.get` 把上游响应（含 4xx/5xx）视为数据；`ctx.http.pipe` 把上游 2xx Response 流式转发给客户端，并对最终非 2xx 响应抛出可捕获的 `upstream_http_error`；未捕获的上游传输层失败返回 502 `upstream_unreachable`。本地静态文件读取与 multipart 上传均已实现。命中的 `multipart/form-data` 请求会在脚本运行前解析进请求级临时目录，并通过 `ctx.request.files` 暴露。每个 multipart part 必须带 `name` 属性；缺少该属性的 part 属于畸形请求。multipart 畸形时返回 400 `invalid_multipart`；文件与非文件字段数据总量超过 `files.upload_max_bytes` 时返回 413 `upload_too_large`。整个 multipart body 流（含 framing）受 `files.upload_max_bytes` 加 1 MiB framing allowance 约束。两类 multipart 失败使用带 `request_id` 的项目 JSON 错误 envelope；非 multipart body 超过既有的 2 MiB 上限时保持有界的 413 响应，不引入 JSON 错误类别。
+Route 遵循唯一流水线：`match → source → transform → response`。本切片实现 Match 与脚本 Transform：命中的 Route 运行其 JavaScript，脚本通过 `ctx.respond` 或 `ctx.http.pipe` 产生 Response。路径匹配某条 Route 但方法不匹配的请求属于方法错误：配置了 `[fallback]` 时以 `ctx.match.kind` 为 `"method_not_allowed"` 运行 fallback 脚本；未配置时引擎返回 404 `not_found`。未知路径返回 404 `not_found`；若配置了 `[fallback]` 表，则以 `ctx.match.kind` 为 `"not_found"` 运行 fallback 脚本。fallback 从不读取请求 body，且对 `"not_found"` 必须以状态 404 响应、对 `"method_not_allowed"` 必须以状态 405 响应，并使用缓冲 body。任何其他状态码、流式 body 或脚本自设 `Allow` 均属于非法 fallback 响应，映射为 500 `script_error`；合法的 405 响应由宿主按 `ctx.match.allowedMethods` 注入 `Allow`。fallback 沿用与普通 Route 相同的脚本失败映射：脚本抛错、超时、加载失败、内存超限或拿不到脚本 worker 槽位返回 500 `script_error`；脚本结束却没有产生 Response 时返回 500 `script_no_response`。`ctx.http.get` 把上游响应（含 4xx/5xx）视为数据；`ctx.http.pipe` 把上游 2xx Response 流式转发给客户端，并对最终非 2xx 响应抛出可捕获的 `upstream_http_error`；未捕获的上游传输层失败返回 502 `upstream_unreachable`。本地文件读取、显式开启的文件写入与 multipart 上传均已实现。命中的 `multipart/form-data` 请求会在脚本运行前解析进请求级临时目录，并通过 `ctx.request.files` 暴露。每个 multipart part 必须带 `name` 属性；缺少该属性的 part 属于畸形请求。multipart 畸形时返回 400 `invalid_multipart`；文件与非文件字段数据总量超过 `files.upload_max_bytes` 时返回 413 `upload_too_large`。整个 multipart body 流（含 framing）受 `files.upload_max_bytes` 加 1 MiB framing allowance 约束。两类 multipart 失败使用带 `request_id` 的项目 JSON 错误 envelope；非 multipart body 超过既有的 2 MiB 上限时保持有界的 413 响应，不引入 JSON 错误类别。
 
 ### 匹配语义
 
@@ -114,7 +118,7 @@ Route 遵循唯一流水线：`match → source → transform → response`。�
 - 期望形状与实际值
 - TOML 解析器能提供时给出行列号
 
-校验在每一层 table 上对未知键 fail-closed。它还会拒绝未知 `config_version`、非 IP 的 `server.bind`、空 `routes` 数组、非正数 timeout、低于 64 的 `sandbox.script_memory_limit_mb`、非正数 `files.upload_max_bytes`，以及缺失或不是目录的 `files.root`。`validate` 不打开 socket，也不读取 Route 脚本。
+校验在每一层 table 上对未知键 fail-closed。它还会拒绝未知 `config_version`、非 IP 的 `server.bind`、空 `routes` 数组、非正数 timeout、低于 64 的 `sandbox.script_memory_limit_mb`、非正数 `files.upload_max_bytes` 或 `files.write_max_bytes`，以及缺失或不是目录的 `files.root`。`validate` 不打开 socket，不读取 Route 脚本，也不探测目录写权限。
 
 配置错误以退出码 `2` 结束。
 

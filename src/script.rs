@@ -824,6 +824,61 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
   function fileReadBytes(path) {
     return decodeBase64(fileCall("readBytes", path, "ctx.file.readBytes").bytes_base64);
   }
+  function checkFileBytes(value, label) {
+    var bytes;
+    if (value instanceof Uint8Array) {
+      bytes = value;
+    } else if (value instanceof ArrayBuffer) {
+      bytes = new Uint8Array(value);
+    } else if (__sd_array_is_array(value)) {
+      bytes = value;
+    } else {
+      throw new TypeError(label + ": bytes must be a Uint8Array, ArrayBuffer, or byte array");
+    }
+    if (bytes.length > 8388608) {
+      throw makeError(label + ": bytes exceed the 8 MiB per-call write cap", "file_too_large");
+    }
+    if (__sd_array_is_array(bytes)) {
+      for (var i = 0; i < bytes.length; i++) {
+        if (!hasOwn(bytes, i)) {
+          throw new TypeError(label + ": sparse arrays are not allowed");
+        }
+      }
+    }
+    for (var j = 0; j < bytes.length; j++) {
+      var byte = bytes[j];
+      if (!__sd_number_is_integer(byte) || byte < 0 || byte > 255) {
+        throw new TypeError(label + ": bytes must be integers in [0, 255]");
+      }
+    }
+    return bytes;
+  }
+  function fileWriteText(path, text) {
+    var label = "ctx.file.writeText";
+    if (typeof text !== "string") {
+      throw new TypeError(label + ": text must be a string");
+    }
+    checkUtf16Surrogates(text, label + ": text must be well-formed UTF-16", "file_encoding_error");
+    if (measureUtf8Bytes(text) > 8388608) {
+      throw makeError(label + ": text exceeds the 8 MiB per-call write cap", "file_too_large");
+    }
+    var result = callBridge(__sd_file, {
+      op: "writeText",
+      path: checkFilePath(path, label),
+      text: text
+    }, label);
+    return result.bytes;
+  }
+  function fileWriteBytes(path, bytes) {
+    var label = "ctx.file.writeBytes";
+    var checked = checkFileBytes(bytes, label);
+    var result = callBridge(__sd_file, {
+      op: "writeBytes",
+      path: checkFilePath(path, label),
+      bytes_base64: encodeBase64(checked)
+    }, label);
+    return result.bytes;
+  }
   function fileStream(path) {
     var result = fileCall("stream", path, "ctx.file.stream");
     var handle = Object.freeze(Object.create(null));
@@ -928,6 +983,8 @@ var ctx = (function (__sd_http_get, __sd_http_pipe, __sd_validate_headers, __sd_
     file: Object.freeze({
       readText: fileReadText,
       readBytes: fileReadBytes,
+      writeText: fileWriteText,
+      writeBytes: fileWriteBytes,
       stream: fileStream
     }),
     log: Object.freeze({
@@ -1764,7 +1821,12 @@ impl HostState {
             client_range,
             calls,
         );
-        let files = files::FileAccess::new(&files_config.root, file_calls.clone());
+        let files = files::FileAccess::new(
+            &files_config.root,
+            files_config.writable,
+            files_config.write_max_bytes,
+            file_calls.clone(),
+        );
         let uploads = uploads.map(|store| files::UploadAccess::new(store, file_calls));
         Self {
             upstream: Some(upstream),

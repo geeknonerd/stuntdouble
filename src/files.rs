@@ -1,7 +1,7 @@
 //! Rooted local file access for `ctx.file` plus request-scoped uploads.
 //! Contracts: docs/contracts/ctx-api.md, docs/contracts/config.md
 //!
-//! Every script-visible path resolves against the configured static file root.
+//! Every script-visible path resolves against the configured file root.
 //! Absolute paths and `..` components are rejected before resolution, and the
 //! canonicalized target must stay inside the canonicalized root, so a symlink
 //! cannot widen the readable set. The remaining TOCTOU window between
@@ -13,9 +13,9 @@ use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use axum::http::HeaderMap;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write as _};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -29,12 +29,17 @@ use tokio::io::AsyncWriteExt as _;
 /// Buffered read cap shared by `ctx.file.readText` and `ctx.file.readBytes`.
 const MAX_READ_BYTES: u64 = 8 * 1024 * 1024;
 
+/// Buffered write cap shared by `ctx.file.writeText` and `ctx.file.writeBytes`.
+const MAX_WRITE_BYTES: u64 = 8 * 1024 * 1024;
+
 /// One script-visible `ctx.file` operation.
 #[derive(Debug, Clone, Copy)]
 enum FileOp {
     ReadText,
     ReadBytes,
     Stream,
+    WriteText,
+    WriteBytes,
 }
 
 impl FileOp {
@@ -43,6 +48,8 @@ impl FileOp {
             "readText" => Some(Self::ReadText),
             "readBytes" => Some(Self::ReadBytes),
             "stream" => Some(Self::Stream),
+            "writeText" => Some(Self::WriteText),
+            "writeBytes" => Some(Self::WriteBytes),
             _ => None,
         }
     }
@@ -52,6 +59,8 @@ impl FileOp {
             Self::ReadText => "file.readText",
             Self::ReadBytes => "file.readBytes",
             Self::Stream => "file.stream",
+            Self::WriteText => "file.writeText",
+            Self::WriteBytes => "file.writeBytes",
         }
     }
 }
@@ -62,6 +71,9 @@ pub enum Error {
     PathInvalid(&'static str),
     NotFound,
     TooLarge,
+    WriteDisabled,
+    WriteTooLarge(&'static str),
+    Script(&'static str),
     Encoding,
     Io(String),
 }
@@ -73,7 +85,9 @@ impl Error {
         match self {
             Self::PathInvalid(_) => "file_path_invalid",
             Self::NotFound => "file_not_found",
-            Self::TooLarge => "file_too_large",
+            Self::TooLarge | Self::WriteTooLarge(_) => "file_too_large",
+            Self::WriteDisabled => "file_write_disabled",
+            Self::Script(_) => "script_error",
             Self::Encoding => "file_encoding_error",
             Self::Io(_) => "file_io_error",
         }
@@ -83,9 +97,14 @@ impl Error {
     #[must_use]
     pub fn message(&self) -> String {
         match self {
-            Self::PathInvalid(reason) => (*reason).to_string(),
+            Self::PathInvalid(reason) | Self::WriteTooLarge(reason) | Self::Script(reason) => {
+                (*reason).to_string()
+            }
             Self::NotFound => "file not found".to_string(),
             Self::TooLarge => format!("file exceeds the {MAX_READ_BYTES}-byte read cap"),
+            Self::WriteDisabled => {
+                "script file writes are disabled; set [files] writable = true".to_string()
+            }
             Self::Encoding => "file is not valid UTF-8".to_string(),
             Self::Io(message) => message.clone(),
         }
@@ -639,10 +658,15 @@ fn finish_call(
     });
 }
 
-/// Request-scoped access rooted at the configured static file root.
+/// Request-scoped access rooted at the configured file root.
 #[derive(Debug)]
 pub struct FileAccess {
     root: PathBuf,
+    writable: bool,
+    write_max_bytes: u64,
+    /// Bytes successfully written by this request; the host, not the script,
+    /// owns this budget.
+    written_bytes: Cell<u64>,
     calls: CallLog,
     /// Opened `ctx.file.stream` bodies, claimed by the Response that uses them.
     streams: RefCell<Vec<Option<FileBody>>>,
@@ -653,9 +677,12 @@ impl FileAccess {
     /// root that disappears or stops being a directory at runtime surfaces as
     /// a catchable `file_io_error` instead of failing the script before it runs.
     #[must_use]
-    pub fn new(root: &Path, calls: CallLog) -> Self {
+    pub fn new(root: &Path, writable: bool, write_max_bytes: u64, calls: CallLog) -> Self {
         Self {
             root: root.to_path_buf(),
+            writable,
+            write_max_bytes,
+            written_bytes: Cell::new(0),
             calls,
             streams: RefCell::new(Vec::new()),
         }
@@ -687,13 +714,13 @@ impl FileAccess {
         };
         let index = begin_call(&self.calls, op.api());
         let started = Instant::now();
-        let read = match op {
+        let operation = match op {
             FileOp::ReadText => self.read_text(path).map(|text| {
-                let payload = json!({ "ok": true, "text": text });
-                (payload, text.len())
+                let len = u64::try_from(text.len()).unwrap_or(u64::MAX);
+                (json!({ "ok": true, "text": text }), len)
             }),
             FileOp::ReadBytes => self.read_bytes(path).map(|bytes| {
-                let len = bytes.len();
+                let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
                 let payload = json!({ "ok": true, "bytes_base64": BASE64.encode(&bytes) });
                 (payload, len)
             }),
@@ -703,10 +730,27 @@ impl FileAccess {
                     Err(error) => error_json(&error),
                 };
             }
+            FileOp::WriteText => payload
+                .get("text")
+                .and_then(Json::as_str)
+                .ok_or(Error::Script("ctx.file.writeText: text must be a string"))
+                .and_then(|text| self.write_text(path, text))
+                .map(|len| (json!({ "ok": true, "bytes": len }), len)),
+            FileOp::WriteBytes => payload
+                .get("bytes_base64")
+                .and_then(Json::as_str)
+                .ok_or(Error::Script("ctx.file.writeBytes: bytes must be provided"))
+                .and_then(|encoded| {
+                    BASE64
+                        .decode(encoded)
+                        .map_err(|_| Error::Script("ctx.file.writeBytes: invalid byte payload"))
+                })
+                .and_then(|bytes| self.write_bytes(path, &bytes))
+                .map(|len| (json!({ "ok": true, "bytes": len }), len)),
         };
-        match read {
+        match operation {
             Ok((payload, bytes)) => {
-                finish_call(&self.calls, index, started, u64::try_from(bytes).ok(), None);
+                finish_call(&self.calls, index, started, Some(bytes), None);
                 payload
             }
             Err(error) => {
@@ -759,6 +803,114 @@ impl FileAccess {
         read_capped_file(file, size)
     }
 
+    fn write_text(&self, path: &str, text: &str) -> Result<u64, Error> {
+        self.write_bytes(path, text.as_bytes())
+    }
+
+    fn write_bytes(&self, path: &str, bytes: &[u8]) -> Result<u64, Error> {
+        if !self.writable {
+            return Err(Error::WriteDisabled);
+        }
+        let len = u64::try_from(bytes.len())
+            .map_err(|_| Error::WriteTooLarge("write byte count overflowed"))?;
+        if len > MAX_WRITE_BYTES {
+            return Err(Error::WriteTooLarge("write exceeds the 8 MiB per-call cap"));
+        }
+        let already_written = self.written_bytes.get();
+        let next_total = already_written
+            .checked_add(len)
+            .ok_or(Error::WriteTooLarge("write byte count overflowed"))?;
+        if next_total > self.write_max_bytes {
+            return Err(Error::WriteTooLarge(
+                "write exceeds files.write_max_bytes for this request",
+            ));
+        }
+
+        let (target, parent) = self.resolve_for_write(path)?;
+        atomic_replace(&target, &parent, bytes)?;
+        self.written_bytes.set(next_total);
+        Ok(len)
+    }
+
+    /// Resolve a write target without following symlinks. The final component
+    /// may be absent; every existing parent must be a real directory, and an
+    /// existing final target must be a regular file.
+    fn resolve_for_write(&self, raw: &str) -> Result<(PathBuf, PathBuf), Error> {
+        if raw.is_empty() {
+            return Err(Error::PathInvalid("path must not be empty"));
+        }
+        let windows_separator = cfg!(windows) && (raw.ends_with('\\') || raw.ends_with("\\."));
+        if raw.ends_with('/') || raw.ends_with("/.") || windows_separator {
+            return Err(Error::PathInvalid("path must name a file"));
+        }
+        let mut parts = Vec::new();
+        for component in Path::new(raw).components() {
+            match component {
+                Component::ParentDir => {
+                    return Err(Error::PathInvalid("`..` components are not allowed"));
+                }
+                Component::RootDir | Component::Prefix(_) => {
+                    return Err(Error::PathInvalid("absolute paths are not allowed"));
+                }
+                Component::CurDir => {}
+                Component::Normal(part) => {
+                    #[cfg(windows)]
+                    validate_write_component(part)?;
+                    parts.push(part.to_os_string());
+                }
+            }
+        }
+        let Some(file_name) = parts.pop() else {
+            return Err(Error::PathInvalid("path must name a file"));
+        };
+
+        let root =
+            std::fs::canonicalize(&self.root).map_err(|error| Error::Io(error.to_string()))?;
+        if !root.is_dir() {
+            return Err(Error::Io("file root is not a directory".to_string()));
+        }
+        let mut parent = root.clone();
+        for part in &parts {
+            parent.push(part);
+            let metadata = std::fs::symlink_metadata(&parent).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    Error::Io("parent directory does not exist".to_string())
+                } else {
+                    Error::Io(error.to_string())
+                }
+            })?;
+            if is_link_like(&metadata) {
+                return Err(Error::PathInvalid(
+                    "symbolic links are not allowed for writes",
+                ));
+            }
+            if !metadata.is_dir() {
+                return Err(Error::Io("parent path is not a directory".to_string()));
+            }
+        }
+        let parent =
+            std::fs::canonicalize(&parent).map_err(|error| Error::Io(error.to_string()))?;
+        if !parent.starts_with(&root) {
+            return Err(Error::PathInvalid("path escapes the file root"));
+        }
+        let target = parent.join(file_name);
+        match std::fs::symlink_metadata(&target) {
+            Ok(metadata) => {
+                if is_link_like(&metadata) {
+                    return Err(Error::PathInvalid(
+                        "symbolic links are not allowed for writes",
+                    ));
+                }
+                if !metadata.is_file() {
+                    return Err(Error::Io("path is not a regular file".to_string()));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(Error::Io(error.to_string())),
+        }
+        Ok((target, parent))
+    }
+
     fn open(&self, raw: &str) -> Result<(File, u64), Error> {
         let (target, root) = self.resolve(raw)?;
         // Check the path type before opening: a FIFO would block `File::open`
@@ -800,7 +952,7 @@ impl FileAccess {
         let root =
             std::fs::canonicalize(&self.root).map_err(|error| Error::Io(error.to_string()))?;
         if !root.is_dir() {
-            return Err(Error::Io("static file root is not a directory".to_string()));
+            return Err(Error::Io("file root is not a directory".to_string()));
         }
         let target = std::fs::canonicalize(root.join(raw)).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
@@ -810,7 +962,7 @@ impl FileAccess {
             }
         })?;
         if !target.starts_with(&root) {
-            return Err(Error::PathInvalid("path escapes the static file root"));
+            return Err(Error::PathInvalid("path escapes the file root"));
         }
         Ok((target, root))
     }
@@ -831,7 +983,7 @@ impl FileAccess {
         if canonical.starts_with(root) {
             Ok(())
         } else {
-            Err(Error::PathInvalid("path escapes the static file root"))
+            Err(Error::PathInvalid("path escapes the file root"))
         }
     }
 
@@ -839,6 +991,79 @@ impl FileAccess {
     fn verify_open_target(&self, _file: &File, _root: &Path) -> Result<(), Error> {
         Ok(())
     }
+}
+
+fn atomic_replace(target: &Path, parent: &Path, bytes: &[u8]) -> Result<(), Error> {
+    let mut temp = tempfile::Builder::new()
+        .prefix(".stuntdouble-write-")
+        .tempfile_in(parent)
+        .map_err(|error| Error::Io(error.to_string()))?;
+    temp.write_all(bytes)
+        .map_err(|error| Error::Io(error.to_string()))?;
+    temp.as_file_mut()
+        .flush()
+        .map_err(|error| Error::Io(error.to_string()))?;
+    // On Windows a concurrent rename over the same target can transiently
+    // fail with the destination busy (os error 5); retry once with backoff.
+    // `persist` returns the file itself on failure, so it stays reusable.
+    let mut temp = match temp.persist(target) {
+        Ok(_) => return Ok(()),
+        Err(error) => {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            error.file
+        }
+    };
+    let _ = &mut temp;
+    temp.persist(target)
+        .map_err(|error| Error::Io(error.error.to_string()))?;
+    Ok(())
+}
+
+fn is_link_like(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileTypeExt as _;
+
+        let file_type = metadata.file_type();
+        if file_type.is_symlink_dir() || file_type.is_symlink_file() {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(windows)]
+fn validate_write_component(part: &std::ffi::OsStr) -> Result<(), Error> {
+    const RESERVED: [&str; 25] = [
+        "CON", "PRN", "AUX", "NUL", "CLOCK$", "CONIN$", "CONOUT$", "COM1", "COM2", "COM3", "COM4",
+        "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6",
+        "LPT7", "LPT8", "LPT9",
+    ];
+    const RESERVED_SUPERSCRIPT: [&str; 6] = ["COM¹", "COM²", "COM³", "LPT¹", "LPT²", "LPT³"];
+
+    let Some(name) = part.to_str() else {
+        return Err(Error::PathInvalid(
+            "path components must be valid Unicode on Windows",
+        ));
+    };
+    let reserved = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+    let invalid_character = name.chars().any(|character| {
+        character < '\u{20}' || matches!(character, '<' | '>' | '"' | '|' | '?' | '*' | ':')
+    });
+    if invalid_character
+        || name.ends_with('.')
+        || name.ends_with(' ')
+        || RESERVED.contains(&reserved.as_str())
+        || RESERVED_SUPERSCRIPT.contains(&reserved.as_str())
+    {
+        return Err(Error::PathInvalid(
+            "path component is reserved or invalid on Windows",
+        ));
+    }
+    Ok(())
 }
 
 fn map_open_error(error: &std::io::Error) -> Error {
@@ -991,6 +1216,369 @@ fn error_json(error: &Error) -> Json {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_access(root: &Path, writable: bool, write_max_bytes: u64) -> (FileAccess, CallLog) {
+        let calls = CallLog::new();
+        (
+            FileAccess::new(root, writable, write_max_bytes, calls.clone()),
+            calls,
+        )
+    }
+
+    #[test]
+    fn script_file_writes_are_disabled_by_default() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (access, calls) = write_access(dir.path(), false, 1024);
+        let result = access.call(&json!({
+            "op": "writeText",
+            "path": "created.txt",
+            "text": "hello"
+        }));
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["code"], "file_write_disabled");
+        assert!(!dir.path().join("created.txt").exists());
+        let calls = calls.snapshot();
+        assert_eq!(calls[0]["api"], "file.writeText");
+        assert_eq!(calls[0]["error"], "file_write_disabled");
+    }
+
+    #[test]
+    fn script_write_text_creates_replaces_and_reads_back() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (access, calls) = write_access(dir.path(), true, 1024);
+        let first = access.call(&json!({
+            "op": "writeText",
+            "path": "nested/report.txt",
+            "text": "old"
+        }));
+        assert_eq!(first["ok"], false);
+        assert_eq!(first["code"], "file_io_error");
+
+        std::fs::create_dir(dir.path().join("nested")).expect("nested dir");
+        let first = access.call(&json!({
+            "op": "writeText",
+            "path": "nested/report.txt",
+            "text": "old"
+        }));
+        assert_eq!(first["ok"], true);
+        assert_eq!(first["bytes"], 3);
+
+        let second = access.call(&json!({
+            "op": "writeText",
+            "path": "nested/report.txt",
+            "text": "new value"
+        }));
+        assert_eq!(second["ok"], true);
+        assert_eq!(second["bytes"], 9);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("nested/report.txt")).expect("written file"),
+            "new value"
+        );
+
+        let read = access.call(&json!({ "op": "readText", "path": "nested/report.txt" }));
+        assert_eq!(read["ok"], true);
+        assert_eq!(read["text"], "new value");
+        let calls = calls.snapshot();
+        assert_eq!(calls[0]["error"], "file_io_error");
+        assert_eq!(calls[1]["api"], "file.writeText");
+        assert_eq!(calls[1]["bytes"], 3);
+        assert_eq!(calls[2]["bytes"], 9);
+    }
+
+    #[test]
+    fn script_write_bytes_round_trips_binary_data() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (access, _) = write_access(dir.path(), true, 1024);
+        let bytes = vec![0_u8, 1, 127, 128, 255];
+        let result = access.call(&json!({
+            "op": "writeBytes",
+            "path": "binary.bin",
+            "bytes_base64": BASE64.encode(&bytes)
+        }));
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["bytes"], 5);
+        assert_eq!(
+            std::fs::read(dir.path().join("binary.bin")).expect("written file"),
+            bytes
+        );
+    }
+
+    #[test]
+    fn script_write_rejects_empty_and_dot_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (access, _) = write_access(dir.path(), true, 1024);
+        for path in ["", ".", "./", "sub/.."] {
+            let result = access.call(&json!({
+                "op": "writeText",
+                "path": path,
+                "text": "x"
+            }));
+            assert_eq!(result["ok"], false, "path: {path}");
+            assert_eq!(result["code"], "file_path_invalid", "path: {path}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn script_write_replace_breaks_hard_link_outside_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("outside");
+        std::fs::write(dir.path().join("linked.txt"), "old").expect("target file");
+        std::fs::hard_link(
+            dir.path().join("linked.txt"),
+            outside.path().join("linked.txt"),
+        )
+        .expect("hard link");
+        let (access, _) = write_access(dir.path(), true, 1024);
+        let result = access.call(&json!({
+            "op": "writeText",
+            "path": "linked.txt",
+            "text": "new"
+        }));
+        assert_eq!(result["ok"], true, "result: {result}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("linked.txt")).expect("target file"),
+            "new"
+        );
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("linked.txt")).expect("outside file"),
+            "old",
+            "rename replacement must not mutate the outside inode"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_readers_see_a_complete_version_during_replace() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        const READERS: usize = 4;
+        const WRITES: usize = 20;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = Arc::new(dir.path().to_path_buf());
+        let old_payload = "old-".repeat(1024).into_bytes();
+        let new_payload = "new-".repeat(1024).into_bytes();
+        std::fs::write(root.join("concurrent.bin"), &old_payload).expect("seed file");
+
+        let stopping = Arc::new(AtomicBool::new(false));
+        let handles = (0..READERS)
+            .map(|_| {
+                let root = Arc::clone(&root);
+                let stopping = Arc::clone(&stopping);
+                let old_payload = old_payload.clone();
+                let new_payload = new_payload.clone();
+                std::thread::spawn(move || {
+                    let (access, _) = write_access(root.as_path(), true, 1024 * 1024);
+                    let old_text = String::from_utf8_lossy(&old_payload).into_owned();
+                    let new_text = String::from_utf8_lossy(&new_payload).into_owned();
+                    let mut reads = 0_usize;
+                    while !stopping.load(Ordering::Relaxed) {
+                        let result = access.call(&json!({
+                            "op": "readText",
+                            "path": "concurrent.bin"
+                        }));
+                        let text = result["text"].as_str().expect("read text");
+                        assert!(
+                            text == old_text || text == new_text,
+                            "reader saw an incomplete version"
+                        );
+                        reads += 1;
+                    }
+                    reads
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let (writer_access, _) = write_access(root.as_path(), true, 1024 * 1024);
+        for _ in 0..WRITES {
+            let result = writer_access.call(&json!({
+                "op": "writeBytes",
+                "path": "concurrent.bin",
+                "bytes_base64": BASE64.encode(&new_payload)
+            }));
+            assert_eq!(result["ok"], true, "result: {result}");
+        }
+        stopping.store(true, Ordering::Relaxed);
+        for handle in handles {
+            let reads = handle.join().expect("reader");
+            assert!(reads > 0, "reader never completed a read");
+        }
+    }
+
+    #[test]
+    fn script_write_budget_is_per_request() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (access, _) = write_access(dir.path(), true, 4);
+        let first = access.call(&json!({
+            "op": "writeText",
+            "path": "first.txt",
+            "text": "four"
+        }));
+        assert_eq!(first["ok"], true);
+        let second = access.call(&json!({
+            "op": "writeText",
+            "path": "second.txt",
+            "text": "x"
+        }));
+        assert_eq!(second["ok"], false);
+        assert_eq!(second["code"], "file_too_large");
+        assert!(!dir.path().join("second.txt").exists());
+    }
+
+    #[test]
+    fn script_write_rejects_oversized_input_before_touching_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("too-large.txt"), "old").expect("old file");
+        let (access, _) = write_access(dir.path(), true, u64::MAX);
+        let text = "x".repeat(usize::try_from(MAX_WRITE_BYTES).expect("cap") + 1);
+        let result = access.call(&json!({
+            "op": "writeText",
+            "path": "too-large.txt",
+            "text": text
+        }));
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["code"], "file_too_large");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("too-large.txt")).expect("old file"),
+            "old"
+        );
+    }
+
+    #[test]
+    fn script_write_rejects_directories_and_missing_parents() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("directory")).expect("directory");
+        let (access, _) = write_access(dir.path(), true, 1024);
+        let directory = access.call(&json!({
+            "op": "writeText",
+            "path": "directory",
+            "text": "x"
+        }));
+        assert_eq!(directory["code"], "file_io_error");
+        let missing = access.call(&json!({
+            "op": "writeText",
+            "path": "missing/file.txt",
+            "text": "x"
+        }));
+        assert_eq!(missing["code"], "file_io_error");
+        let trailing_separator = access.call(&json!({
+            "op": "writeText",
+            "path": "trailing/",
+            "text": "x"
+        }));
+        assert_eq!(trailing_separator["code"], "file_path_invalid");
+        assert!(!dir.path().join("trailing").exists());
+        let trailing_dot = access.call(&json!({
+            "op": "writeText",
+            "path": "trailing/.",
+            "text": "x"
+        }));
+        assert_eq!(trailing_dot["code"], "file_path_invalid");
+        assert!(!dir.path().join("trailing").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn script_write_rejects_symlink_components() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("outside");
+        std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+        symlink(outside.path(), dir.path().join("outside-dir")).expect("dir symlink");
+        symlink(
+            outside.path().join("secret.txt"),
+            dir.path().join("outside-file.txt"),
+        )
+        .expect("file symlink");
+        let (access, _) = write_access(dir.path(), true, 1024);
+        let parent = access.call(&json!({
+            "op": "writeText",
+            "path": "outside-dir/escape.txt",
+            "text": "overwritten"
+        }));
+        assert_eq!(parent["code"], "file_path_invalid");
+        let final_target = access.call(&json!({
+            "op": "writeText",
+            "path": "outside-file.txt",
+            "text": "overwritten"
+        }));
+        assert_eq!(final_target["code"], "file_path_invalid");
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("secret.txt")).expect("outside file"),
+            "secret"
+        );
+    }
+
+    #[test]
+    fn concurrent_writes_leave_one_complete_version() {
+        const WRITERS: usize = 8;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = Arc::new(dir.path().to_path_buf());
+        let barrier = Arc::new(std::sync::Barrier::new(WRITERS));
+        let payloads = (0..WRITERS)
+            .map(|index| format!("version-{index}-").repeat(1024).into_bytes())
+            .collect::<Vec<_>>();
+        let handles = payloads
+            .iter()
+            .cloned()
+            .map(|payload| {
+                let root = Arc::clone(&root);
+                let barrier = Arc::clone(&barrier);
+                let encoded = BASE64.encode(&payload);
+                std::thread::spawn(move || {
+                    let (access, _) = write_access(root.as_path(), true, 1024 * 1024);
+                    barrier.wait();
+                    let result = access.call(&json!({
+                        "op": "writeBytes",
+                        "path": "concurrent.bin",
+                        "bytes_base64": encoded
+                    }));
+                    (result, payload)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("writer"))
+            .collect::<Vec<_>>();
+        for (result, _) in &results {
+            assert_eq!(result["ok"], true, "result: {result}");
+        }
+        let final_bytes = std::fs::read(dir.path().join("concurrent.bin")).expect("written file");
+        assert!(
+            results.iter().any(|(_, payload)| final_bytes == *payload),
+            "final file is not one complete version"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn script_write_rejects_windows_alternate_data_streams_and_reserved_names() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (access, _) = write_access(dir.path(), true, 1024);
+        for path in [
+            "report.txt:stream",
+            "CON",
+            "nul.txt",
+            "COM1",
+            "LPT².log",
+            "trailing.",
+            "trailing ",
+            "bad?.txt",
+        ] {
+            let result = access.call(&json!({
+                "op": "writeText",
+                "path": path,
+                "text": "x"
+            }));
+            assert_eq!(result["code"], "file_path_invalid", "path: {path}");
+        }
+        assert!(!dir.path().join("report.txt").exists());
+    }
 
     #[test]
     fn failed_upload_stream_records_a_stable_error() {

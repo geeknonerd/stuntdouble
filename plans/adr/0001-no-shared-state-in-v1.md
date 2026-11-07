@@ -40,3 +40,7 @@ Mock 产品普遍把请求间状态当核心能力：WireMock Scenarios、Mounte
 ## 修订（2026-10-22）
 
 OAuth authorization mock 提供了跨请求状态的首个硬需求。v2 在保持进程隔离、禁止脚本闭包持有状态的前提下增加宿主管理的进程内 Shared state；生命周期、API、容量与并发语义见 [ADR 0021](0021-v2-shared-state.md)。本 ADR 对 v1 的约束及上方历史决策不变。
+
+## 修订（2026-11-07）
+
+[ADR 0022](0022-script-file-writes.md) 增加显式开启的脚本文件写入。文件写入是 artifact output，不是 Shared state：它没有原子读改写、事务、TTL 或跨实例协调语义，也不能替代 `ctx.state`。脚本若自行用文件模拟跨请求状态，不享有本产品的状态保证。本 ADR 对“不得把状态藏进脚本闭包或变量”的约束不变。

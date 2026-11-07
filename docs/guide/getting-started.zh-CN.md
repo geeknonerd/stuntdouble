@@ -35,7 +35,7 @@ path = "/hello/:name"
 script = "hello.js"
 ```
 
-即使这条 Route 不读文件，`files.root` 仍必须指向一个已存在的目录。它是 `ctx.file` 唯一可读取的目录。[配置契约](../contracts/config.zh-CN.md)列出了全部键与校验规则。
+即使这条 Route 不访问文件，`files.root` 仍必须指向一个已存在的目录。它是 `ctx.file` 唯一可读写的目录。读取始终可用；写入在配置显式开启前保持关闭。[配置契约](../contracts/config.zh-CN.md)列出了全部键与校验规则。
 
 ## 写第一个 Route
 
@@ -91,7 +91,7 @@ if (upstream.status >= 400) {
 
 4xx/5xx 响应是数据；只有传输层失败才抛 `upstream_unreachable`。body 很大或是二进制时改用 `ctx.http.pipe`，它把上游 body 直接流给客户端并保留 `Range`/206——见[演示夹具](../../demo/README.zh-CN.md)与 [`ctx` API 契约](../contracts/ctx-api.zh-CN.md)。
 
-## 读取与流式发送本地文件
+## 读取、写入与流式发送本地文件
 
 `ctx.file` 只读取 `files.root` 内的文件。绝对路径与任何 `..` 组件都会被拒绝，符号链接必须解析到根内，缓冲读取上限为 8 MiB：
 
@@ -101,6 +101,23 @@ ctx.respond(200, { "Content-Type": "application/json" }, text);
 ```
 
 `readText` 以严格 UTF-8 解码；`readBytes` 返回 `Uint8Array`。两者都抛出可捕获错误（`file_path_invalid`、`file_not_found`、`file_too_large`、`file_encoding_error`、`file_io_error`），未捕获时返回 500 `script_error`。
+
+写入需要显式开启。在 `[files]` 表中加入 `writable = true`，自行创建父目录，并确保每次写入与每请求总量都在限额内：
+
+```toml
+[files]
+root = "./files"
+writable = true
+write_max_bytes = 20971520
+```
+
+```js
+const textBytes = ctx.file.writeText("generated/report.txt", "hello\n");
+const binaryBytes = ctx.file.writeBytes("generated/report.bin", [0, 1, 255]);
+ctx.respond(200, { "Content-Type": "text/plain" }, String(textBytes + binaryBytes));
+```
+
+`writeText` 与 `writeBytes` 创建或原子替换一个普通文件，并返回写入字节数。单次调用上限 8 MiB；`files.write_max_bytes` 是每请求成功写入的预算。写入拒绝绝对路径、`..` 与任何符号链接组件，不自动创建父目录，且默认关闭。失败的写入保留旧文件。写入内容跨请求与重启保留，不会自动清理，是 artifact output，不是 `ctx.state`。
 
 要把文件流给客户端而不进入脚本堆，把 `ctx.file.stream(path)` 作为 `ctx.respond` 的 body 传入（状态必须是 `200`）。`Accept-Ranges`、`Content-Length` 与 `Content-Range` 归宿主所有：合法的单 `Range` 答 206，不可用的 Range 答 416，`If-Range` 存在时禁用 Range 处理。`Content-Type` 不会自动推断，需要脚本在响应 header 中设置。
 
