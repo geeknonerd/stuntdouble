@@ -4,7 +4,8 @@
 // plans/adr/0012-release-artifacts-and-supply-chain.md must include it. T9 wires
 // the release pipeline.
 // It covers the implemented subset through T1-T13 plus the v2 process-local
-// Shared state slice and host crypto API (ADR 0019); capabilities deferred by
+// Shared state slice, host crypto API (ADR 0019), and opt-in script file
+// writes (ADR 0022); capabilities deferred by
 // plans/adr/0016-v1-ctx-pending-capabilities-deferred.md are intentionally
 // absent. Keep this file in sync with docs/contracts/ctx-api.md.
 
@@ -121,19 +122,42 @@ interface SdFileStream {
 
 interface SdFile {
   /**
-   * Reads one file inside the static file root as strict UTF-8. Throws a
+   * Reads one file inside the file root as strict UTF-8. Throws a
    * catchable error with code "file_path_invalid", "file_not_found",
    * "file_too_large", "file_encoding_error", or "file_io_error".
    */
   readText(path: string): string;
   /**
-   * Reads one file inside the static file root as bytes. Throws a catchable
+   * Reads one file inside the file root as bytes. Throws a catchable
    * error with code "file_path_invalid", "file_not_found", "file_too_large",
    * or "file_io_error".
    */
   readBytes(path: string): Uint8Array;
-  /** Opens one file inside the static file root as a streamed Response body. */
+  /** Opens one file inside the file root as a streamed Response body. */
   stream(path: string): SdFileStream;
+  /**
+   * Creates or atomically replaces one regular file under the file root and
+   * returns the UTF-8 byte length written. Requires `[files] writable = true`;
+   * otherwise throws `file_write_disabled`. The path must be relative, must
+   * name a file, must not contain `..`, must not contain a symlink component,
+   * and its parent directory must already exist. On Windows, alternate data
+   * streams, reserved device names, trailing dots or spaces, and
+   * Windows-invalid characters are rejected. Throws a catchable error with code
+   * "file_write_disabled", "file_path_invalid", "file_too_large",
+   * "file_encoding_error", or "file_io_error".
+   */
+  writeText(path: string, text: string): number;
+  /**
+   * Creates or atomically replaces one regular file under the file root and
+   * returns the number of bytes written. Requires `[files] writable = true`.
+   * The path rules match `writeText`; the parent directory must already exist.
+   * Throws a catchable error with code "file_write_disabled",
+   * "file_path_invalid", "file_too_large", or "file_io_error".
+   */
+  writeBytes(
+    path: string,
+    bytes: Uint8Array | ArrayBuffer | readonly number[],
+  ): number;
 }
 
 type SdHeaderValue = string | number | boolean | readonly string[];
@@ -241,6 +265,7 @@ type SdErrorCode =
   | "file_too_large"
   | "file_encoding_error"
   | "file_io_error"
+  | "file_write_disabled"
   | "state_invalid_input"
   | "state_capacity_exceeded"
   | "state_internal_error"

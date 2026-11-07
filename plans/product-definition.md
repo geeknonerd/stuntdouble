@@ -28,7 +28,7 @@
 | 共享状态 | v1 不支持；v2 提供进程内、重启即清空、固定容量的 Shared state，不做持久化或跨实例协调 | [ADR 0001](adr/0001-no-shared-state-in-v1.md)、[ADR 0021](adr/0021-v2-shared-state.md) |
 | 资源派生模型 | 不实装；未来可作为"OpenAPI 预设生成器"实现，但不作为独立引擎 | [ADR 0002](adr/0002-route-model-only-in-v1.md) |
 | 变换表达力边界 | 完全脚本化，不做私有模板 DSL；脚本语言为 JS（第一版）；Python 为 v2 候选 | [ADR 0003](adr/0003-script-first-multi-runtime.md)、[ADR 0015](adr/0015-python-runtime-deferred-to-v2.md) |
-| 文件 I/O 语义 | 静态文件目录为唯一文件根：配置声明，脚本文件操作只能在该目录内，相对路径默认解析到此根；上传由宿主解析 multipart 并落到系统临时目录下的每请求独立随机子目录（Unix 0700，脚本不可见路径），请求结束清理；响应侧支持流式透传与本地文件流，Range 透传/支持；纯内存响应不支持 Range；上传上限默认 20MB（可配置） | 本轮讨论 |
+| 文件 I/O 语义 | File root 为唯一文件根：配置声明，脚本文件操作只能在该目录内，相对路径默认解析到此根；读取始终可用，写入默认关闭，需 `files.writable = true` 显式开启并受每请求预算约束；上传由宿主解析 multipart 并落到系统临时目录下的每请求独立随机子目录（Unix 0700，脚本不可见路径），请求结束清理；响应侧支持流式透传与本地文件流，Range 透传/支持；纯内存响应不支持 Range；上传上限默认 20MB（可配置） | 本轮讨论 |
 | 上游失败语义 | 以"是否拿到 HTTP 响应"为唯一分界：有响应则视为数据、默认透传状态码（脚本可改写）；传输层失败抛异常，未捕获返回 502 + `request_id`；脚本异常返回 500；脚本未调用 `respond` 视为逻辑错误 | [ADR 0005](adr/0005-upstream-failure-semantics.md) |
 | 超时与重试 | 脚本总超时默认 10 秒（可配置），上游超时 = `min(剩余脚本时间, opts.timeout_ms)`，并预留最多 100ms 的回复余量以避免与脚本硬超时竞态；默认不重试（`opts.retries` 移出 1.0，见 ADR 0016） | [ADR 0005](adr/0005-upstream-failure-semantics.md)、[ADR 0016](adr/0016-v1-ctx-pending-capabilities-deferred.md) |
 | 可观测性 | 每请求一条结构化日志（request_id/路由/耗时/上游链/状态码/错误分类）；默认不记录请求体与响应体；诊断开关附加 `detail`；堆栈永不进响应 | [ADR 0005](adr/0005-upstream-failure-semantics.md) |
@@ -54,7 +54,8 @@
 | 请求只读 | `ctx.request`: `method` / `path` / `params` / `query` / `rawQuery` / `headers` / `bodyText` / `bodyBytes`（M1.1，v1.x） | 只读；不暴露原始 socket |
 | 外部取数 | `ctx.http.get(url, opts)`（`opts` 仅 `timeout_ms`；`retries` / `backoff` 与 `ctx.http.request` 移出 1.0，见 ADR 0016） | 仅白名单 host；返回 `{status, headers, text(), bytes()}` |
 | 二进制透传 | `ctx.http.pipe(url, {status, headers})` | 于 T6 实现；上游 2xx 响应体直接流到客户端，不进脚本堆内存；默认透传上游 2xx 状态并转发 Range/206；不做字节级变换 |
-| 读文件 | `ctx.file.readText(p)` / `ctx.file.readBytes(p)` / `ctx.file.stream(p)` | 只读；路径相对静态文件目录解析；拒绝绝对路径与 `..`；v1 不提供脚本写文件能力（上传由宿主落盘） |
+| 读文件 | `ctx.file.readText(p)` / `ctx.file.readBytes(p)` / `ctx.file.stream(p)` | 路径相对 File root 解析；拒绝绝对路径与 `..`；缓冲读取上限 8 MiB |
+| 写文件 | `ctx.file.writeText(p, text)` / `ctx.file.writeBytes(p, bytes)`（ADR 0022） | 默认关闭；同根创建或原子替换普通文件；拒绝绝对路径、`..` 与符号链接组件；单次 8 MiB、每请求 `files.write_max_bytes`；持久化为 artifact output，不是 Shared state |
 | 响应 | `ctx.respond(status, headers, body)`；body 为 string / bytes / 文件流引用 | 文件流引用支持 Range；纯内存 body 不支持 Range；不调用则视为未产生响应（固定错误码，不静默 200） |
 | 请求内暂存 | 未提供（`ctx.local` 移出 1.0，见 ADR 0016） | **不跨请求**（ADR 0001）；与"共享状态"严格区分 |
 | 日志 | `ctx.log.info/warn/error` | 只进服务端日志，绝不出现在响应里 |
@@ -71,7 +72,7 @@
 | TypeScript 转译 | 不引入 swc/oxc；用户自行用 tsc/esbuild 编译为 `.js` | [ADR 0003](adr/0003-script-first-multi-runtime.md) |
 | Python 运行时 | v1 不提供；`.py` 脚本在 `validate` 直接拒绝；v2 候选 | [ADR 0015](adr/0015-python-runtime-deferred-to-v2.md) |
 | 第三方包 | 不支持 import / npm / pip | ADR 0003 |
-| 脚本写文件 | 不提供 `ctx.file.write`；上传由宿主落盘 | 本轮讨论 |
+| 文件追加/删除/目录管理 | 不提供 append、delete、mkdir、rename、chmod 或流式写文件 | [ADR 0022](adr/0022-script-file-writes.md) |
 | 上游自动重试 | 默认不重试；`opts.retries` 显式开启（v1.x 候选，见 ADR 0016） | [ADR 0005](adr/0005-upstream-failure-semantics.md) |
 | 请求二进制快照 | `ctx.request.bodyBytes` 提供精确请求 Body 字节（未读取为 `null`）；`rawQuery` 保留原始 query 片段（M1.1，v1.x） | [ADR 0016](adr/0016-v1-ctx-pending-capabilities-deferred.md) |
 | 上游任意方法 | `ctx.http.request` 不提供；先用 `ctx.http.get` / `ctx.http.pipe`（v1.x 候选，见 ADR 0016） | [ADR 0016](adr/0016-v1-ctx-pending-capabilities-deferred.md) |

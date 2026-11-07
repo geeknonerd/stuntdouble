@@ -3540,6 +3540,29 @@ fn upload_config(upload_max_bytes: u64) -> String {
         )
 }
 
+fn writable_config(write_max_bytes: u64) -> String {
+    good_config().replace(
+        "[files]\nroot = \"./files\"",
+        &format!(
+            "[files]\nroot = \"./files\"\nwritable = true\nwrite_max_bytes = {write_max_bytes}"
+        ),
+    )
+}
+
+fn serve_config_fixture<T>(
+    dir: &Path,
+    config: &str,
+    script: &str,
+    run_tests: impl FnOnce(u16) -> T,
+) -> (T, String) {
+    serve_and_run(
+        |port| fixture_with_script(dir, port, config, script),
+        &[],
+        &[],
+        run_tests,
+    )
+}
+
 fn serve_upload_fixture<T>(
     dir: &Path,
     config: &str,
@@ -4571,6 +4594,244 @@ ctx.respond(200, { "Content-Type": "text/plain" }, ctx.file.stream("report.txt")
     assert!(
         !stderr.contains(&dir.path().display().to_string()),
         "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn ctx_file_write_text_persists_across_requests_and_logs_without_paths() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("files/generated")).expect("generated dir");
+    let script = r#"
+if (ctx.request.query.mode === "write") {
+  var bytes = ctx.file.writeText("generated/report.txt", "hello");
+  ctx.respond(200, {}, String(bytes));
+} else {
+  ctx.respond(200, {}, ctx.file.readText("generated/report.txt"));
+}
+"#;
+    let (responses, stderr) =
+        serve_config_fixture(dir.path(), &writable_config(1024), script, |port| {
+            [
+                request(
+                    port,
+                    "GET",
+                    "/demo/documents/manifest/group-a?mode=write",
+                    &[],
+                ),
+                request(port, "GET", "/demo/documents/manifest/group-a", &[]),
+            ]
+        });
+    assert_eq!(responses[0].status, 200, "body: {}", responses[0].body);
+    assert_eq!(responses[0].body, "5");
+    assert_eq!(responses[1].status, 200, "body: {}", responses[1].body);
+    assert_eq!(responses[1].body, "hello");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("files/generated/report.txt"))
+            .expect("written file"),
+        "hello"
+    );
+    let logs: Vec<serde_json::Value> = stderr
+        .lines()
+        .filter(|line| line.contains("\"request_id\""))
+        .map(|line| serde_json::from_str(line).expect("structured log json"))
+        .collect();
+    assert_eq!(logs.len(), 2, "stderr: {stderr}");
+    assert_eq!(logs[0]["file_calls"][0]["api"], "file.writeText");
+    assert_eq!(logs[0]["file_calls"][0]["bytes"], 5);
+    assert_eq!(logs[0]["file_calls"][0]["error"], serde_json::Value::Null);
+    assert_eq!(logs[1]["file_calls"][0]["api"], "file.readText");
+    assert!(!stderr.contains("generated/report.txt"), "stderr: {stderr}");
+    assert!(!stderr.contains("hello"), "stderr: {stderr}");
+}
+
+#[test]
+fn ctx_file_write_is_disabled_by_default() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = r#"
+var out = {};
+try { ctx.file.writeText("blocked.txt", "x"); out.text = "no error"; }
+catch (error) { out.text = error.code; }
+try { ctx.file.writeBytes("blocked.bin", [1, 2]); out.bytes = "no error"; }
+catch (error) { out.bytes = error.code; }
+ctx.respond(200, {}, JSON.stringify(out));
+"#;
+    let (response, _) = serve_fixture_dir(dir.path(), script, |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(json["text"], "file_write_disabled");
+    assert_eq!(json["bytes"], "file_write_disabled");
+    assert!(!dir.path().join("files/blocked.txt").exists());
+    assert!(!dir.path().join("files/blocked.bin").exists());
+}
+
+#[test]
+fn ctx_file_write_rejects_path_traversal_and_budget_overruns() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = r#"
+var out = {};
+try { ctx.file.writeText("../escape.txt", "x"); out.traversal = "no error"; }
+catch (error) { out.traversal = error.code; }
+try { ctx.file.writeText("/absolute.txt", "x"); out.absolute = "no error"; }
+catch (error) { out.absolute = error.code; }
+out.first = ctx.file.writeText("first.txt", "four");
+try { ctx.file.writeText("second.txt", "x"); out.second = "no error"; }
+catch (error) { out.second = error.code; }
+ctx.respond(200, {}, JSON.stringify(out));
+"#;
+    let (response, _) = serve_config_fixture(dir.path(), &writable_config(4), script, |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(json["traversal"], "file_path_invalid");
+    assert_eq!(json["absolute"], "file_path_invalid");
+    assert_eq!(json["first"], 4);
+    assert_eq!(json["second"], "file_too_large");
+    assert!(!dir.path().join("files/second.txt").exists());
+}
+
+#[test]
+fn ctx_file_write_text_rejects_lone_surrogates() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("files")).expect("files dir");
+    std::fs::write(dir.path().join("files/bad.txt"), "old").expect("old file");
+    let script = r#"
+var out = {};
+try { ctx.file.writeText("bad.txt", "\uD800"); out.code = "no error"; }
+catch (error) { out.code = error.code; }
+ctx.respond(200, {}, JSON.stringify(out));
+"#;
+    let (response, _) = serve_config_fixture(dir.path(), &writable_config(1024), script, |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(json["code"], "file_encoding_error");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("files/bad.txt")).expect("old file"),
+        "old"
+    );
+}
+
+#[test]
+fn ctx_file_write_bytes_rejects_invalid_byte_inputs() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = r#"
+var out = {};
+function attempt(name, value) {
+  try {
+    ctx.file.writeBytes(name + ".bin", value);
+    out[name] = "no error";
+  } catch (error) {
+    out[name] = error.code || error.name;
+  }
+}
+attempt("range", [256]);
+attempt("fraction", [1.5]);
+attempt("sparse", [1, , 3]);
+attempt("string", "abc");
+ctx.respond(200, {}, JSON.stringify(out));
+"#;
+    let (response, _) = serve_config_fixture(dir.path(), &writable_config(1024), script, |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    for name in ["range", "fraction", "sparse", "string"] {
+        assert_eq!(json[name], "TypeError", "field: {name}");
+        assert!(!dir.path().join(format!("files/{name}.bin")).exists());
+    }
+}
+
+#[test]
+fn ctx_file_write_survives_a_serve_restart() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let write_script = r#"
+ctx.file.writeText("persisted.txt", "across restart");
+ctx.respond(200, {}, "written");
+"#;
+    let (response, _) =
+        serve_config_fixture(dir.path(), &writable_config(1024), write_script, |port| {
+            request(port, "GET", "/demo/documents/manifest/group-a", &[])
+        });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(response.body, "written");
+
+    let read_script = r#"
+ctx.respond(200, {}, ctx.file.readText("persisted.txt"));
+"#;
+    let (response, _) =
+        serve_config_fixture(dir.path(), &writable_config(1024), read_script, |port| {
+            request(port, "GET", "/demo/documents/manifest/group-a", &[])
+        });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    assert_eq!(response.body, "across restart");
+}
+
+#[test]
+fn ctx_file_write_bytes_accepts_typed_arrays_and_array_buffers() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = r#"
+var typed = new Uint8Array([0, 1, 255]);
+var buffer = new Uint8Array([2, 3]).buffer;
+var out = {
+  typed: ctx.file.writeBytes("typed.bin", typed),
+  buffer: ctx.file.writeBytes("buffer.bin", buffer),
+  plain: ctx.file.writeBytes("plain.bin", [4, 5, 6])
+};
+ctx.respond(200, {}, JSON.stringify(out));
+"#;
+    let (response, _) = serve_config_fixture(dir.path(), &writable_config(1024), script, |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(json["typed"], 3);
+    assert_eq!(json["buffer"], 2);
+    assert_eq!(json["plain"], 3);
+    assert_eq!(
+        std::fs::read(dir.path().join("files/typed.bin")).expect("typed file"),
+        [0, 1, 255]
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("files/buffer.bin")).expect("buffer file"),
+        [2, 3]
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("files/plain.bin")).expect("plain file"),
+        [4, 5, 6]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ctx_file_write_rejects_symlink_escapes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let outside = tempfile::tempdir().expect("outside");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    std::fs::create_dir_all(dir.path().join("files")).expect("files dir");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        dir.path().join("files/escape-link.txt"),
+    )
+    .expect("symlink");
+    let script = r#"
+var out = {};
+try { ctx.file.writeText("escape-link.txt", "overwritten"); out.code = "no error"; }
+catch (error) { out.code = error.code; }
+ctx.respond(200, {}, JSON.stringify(out));
+"#;
+    let (response, _) = serve_config_fixture(dir.path(), &writable_config(1024), script, |port| {
+        request(port, "GET", "/demo/documents/manifest/group-a", &[])
+    });
+    assert_eq!(response.status, 200, "body: {}", response.body);
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(json["code"], "file_path_invalid");
+    assert_eq!(
+        std::fs::read_to_string(outside.path().join("secret.txt")).expect("outside file"),
+        "secret"
     );
 }
 
@@ -6536,7 +6797,7 @@ fn demo_upload_route_reports_the_file_and_keeps_no_state() {
 
             // A later request cannot observe the upload: the committed fixture
             // still serves its own bytes, and the upload wrote nothing to the
-            // static file root.
+            // file root.
             let download = demo_local_download_request(port, "DOC-0002", &[]);
             assert_eq!(download.status, 200, "body: {}", download.body);
             assert_eq!(download.body_bytes, fixture_pdf("DOC-0002.pdf"));

@@ -36,9 +36,9 @@ _Avoid_: jail, container, isolation layer
 承载一次 Route 脚本运行的独立进程；一次运行对应一个新 worker，互不可见、不跨请求复用。
 _Avoid_: worker thread, script thread, shared worker
 
-**Static file root**：
-脚本可读取文件的唯一配置目录。
-_Avoid_: file root, document root, upload directory
+**File root**：
+脚本可访问文件的唯一配置目录。默认可读；配置显式开启写入后，脚本可在其中创建或原子替换文件。
+_Avoid_: static file root, document root, upload directory
 
 **Upload data budget**：
 一次 multipart 请求允许提交的 part 内容字节总量（文件与非文件字段都计入），不包含 boundary、part header 等 framing。它是“客户端能提交多少内容”的权威账目，由配置声明。

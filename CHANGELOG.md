@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(files)* add opt-in `ctx.file.writeText` / `ctx.file.writeBytes` with atomic replacement, same-root path and symlink restrictions, an 8 MiB per-call cap, and a per-request `files.write_max_bytes` budget; writes stay disabled unless `files.writable = true` and persist as artifact output across requests and restarts ([ADR 0022](plans/adr/0022-script-file-writes.md))
+
 ## [1.8.2](https://github.com/geeknonerd/stuntdouble/compare/v1.8.1...v1.8.2) - 2026-11-03
 
 ### Added

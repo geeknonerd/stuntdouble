@@ -25,6 +25,7 @@
 | [0019](0019-host-crypto-api.md) | Host crypto API：最小、可审计的加密原语 | 已接受 |
 | [0020](0020-fallback-route-and-method-mismatch.md) | Fallback Route：可脚本化的 404 与 405 错误响应 | 已接受 |
 | [0021](0021-v2-shared-state.md) | v2 Shared state：进程内、TTL 与原子操作 | 已接受 |
+| [0022](0022-script-file-writes.md) | 脚本文件写入：同根、显式开启、原子替换 | 已接受 |
 
 ## 如何新增 ADR
 

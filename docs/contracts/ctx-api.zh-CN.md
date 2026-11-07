@@ -4,7 +4,7 @@
 
 > 本页是英文版 [ctx-api.md](./ctx-api.md) 的译本；如有出入，以英文版为准。
 
-- **状态**：v1 切片已公开并冻结；本页描述至 T13 的已实现子集、进程内 Shared state 切片及宿主 Crypto API（ADR 0019）
+- **状态**：v1 切片已公开并冻结；本页描述至 T13 的已实现子集、进程内 Shared state 切片、宿主 Crypto API（ADR 0019）与显式开启的脚本文件写入（ADR 0022）
 - **适用**：`apiVersion` 1
 - **稳定性**：同一 `apiVersion` 内只做增量；移除需要新的 `apiVersion`
 
@@ -32,6 +32,7 @@
 | 上游 HTTP | `ctx.http.request` | 已移出 1.0（v1.x 候选，见 ADR 0016） |
 | 二进制透传 | `ctx.http.pipe` | 已实现（T6） |
 | 文件 | `ctx.file.readText` / `ctx.file.readBytes` / `ctx.file.stream` | 已实现（T11） |
+| 文件 | `ctx.file.writeText` / `ctx.file.writeBytes` | 已实现（ADR 0022） |
 | 响应 | `ctx.respond` | 已实现（T2） |
 | 共享状态 | `ctx.state.get` / `set` / `take` / `setIfAbsent` | 已实现（v2 进程内切片） |
 | 加密原语 | `ctx.crypto.randomBytes` / `sha256` / `hmacSha256` / `timingSafeEqual` | 已实现（ADR 0019） |
@@ -66,7 +67,7 @@
   - 上游响应在 `[200, 299]` 范围时开始流式传输。最终非 2xx 响应抛出可捕获错误，其 `error.code` 为 `"upstream_http_error"`；URL 无法解析或 scheme 不是 `http`/`https` 时抛出 `"upstream_url_invalid"`；宿主无法跟随的重定向链（超过 3 跳或 `Location` 不可用）抛出 `"upstream_redirect_error"`；DNS、连接、TLS 与超时失败抛出 `"upstream_unreachable"`；allowlist 拒绝抛出 `"script_error"`。
   - 第一次 `ctx.respond` 或 `ctx.http.pipe` 调用生效；之后的调用被忽略、返回 `false`，并在服务端产生警告。未捕获的 `upstream_http_error` 是普通脚本错误（500 `script_error`），绝不变成 `502 upstream_unreachable`。
   - 上游 body 读取始终受有效上游超时约束；已经开始流式传输的 body 不能被变换，也不能转成缓冲 Response；需要字节的脚本请用 `ctx.http.get`。流一旦开始，body 中途的上游失败只能截断客户端 body，因为状态与 headers 已经在网络上发出。宿主会在请求日志中把该失败记为 `upstream_stream_error`；日志字段见 [CLI 契约](./cli.zh-CN.md)。
-- `ctx.file.readText(path)` 与 `ctx.file.readBytes(path)` 读取配置的静态文件根内的一个文件。路径是相对于 `[files] root` 的文件系统路径，绝不按 URL 或其它平台的路径语法解析；绝对路径与任何 `..` 组件在解析前即被拒绝，符号链接只有在规范化后的目标仍位于规范化根内时才会被跟随。`readText` 以严格 UTF-8 解码；`readBytes` 返回 `Uint8Array`。两者上限均为 8 MiB，并抛出可捕获错误：
+- `ctx.file.readText(path)` 与 `ctx.file.readBytes(path)` 读取配置的文件根内的一个文件。路径是相对于 `[files] root` 的文件系统路径，绝不按 URL 或其它平台的路径语法解析；绝对路径与任何 `..` 组件在解析前即被拒绝，符号链接只有在规范化后的目标仍位于规范化根内时才会被跟随。`readText` 以严格 UTF-8 解码；`readBytes` 返回 `Uint8Array`。两者上限均为 8 MiB，并抛出可捕获错误：
   - `file_path_invalid` —— 绝对路径、`..` 组件、空路径，或逃逸出根的符号链接；
   - `file_not_found` —— 解析后的路径上没有文件；
   - `file_too_large` —— 文件超过 8 MiB 缓冲读取上限；
@@ -74,6 +75,14 @@
   - `file_io_error` —— 路径不是普通文件，或其他 I/O 失败。
   未捕获的文件错误是普通脚本错误（500 `script_error`）；宿主绝不把缺失文件自动映射为 404。
 - `ctx.file.stream(path)` 打开根内的一个文件，返回不透明、只能消费一次的 handle，且不带任何可读属性。该 handle 仅可作为 `ctx.respond` 的 `body` 参数使用，打开阶段的失败码与缓冲读取相同。
+- `ctx.file.writeText(path, text)` 与 `ctx.file.writeBytes(path, bytes)` 在同一个文件根内创建或原子替换一个普通文件，并返回成功写入的字节数。
+  - 只有 `[files] writable = true` 时才允许写入；否则在触碰磁盘前抛出可捕获的 `file_write_disabled`。每请求预算为 `files.write_max_bytes`（默认 20 MiB），单次调用最多写入 8 MiB。预算只累计成功写入；失败的写入不扣减预算。
+  - `writeText` 按严格 UTF-8 编码；含孤立 UTF-16 surrogate 的字符串抛出 `file_encoding_error`。`writeBytes` 接受 `Uint8Array`、`ArrayBuffer` 或元素为 `[0, 255]` 整数的稠密字节数组；非法输入属于普通脚本错误。
+  - 路径遵循读取规则，但写入更严格：任何符号链接组件（包括最终目标）都被拒绝；路径必须指向文件，因此结尾的路径分隔符或最终 `.` 组件会被拒绝；只能替换普通文件；父目录必须已经存在，宿主绝不自动创建目录。Windows 上还拒绝 alternate data stream（任何 `:`）、保留设备名（含带扩展名与上标端口的形式）、结尾的点或空格，以及 Windows 不允许的字符。替换会断开位于目标路径上的硬链接，写入不会通过硬链接改写文件根外的 inode。
+  - 写入通过目标目录内的临时文件加原子 rename 完成；宿主不调用 `fsync`。失败的写入保留旧目标并清理临时文件。并发写同一路径为 last-writer-wins；读取方只会看到旧文件或完整的新文件，不会看到半截 body。
+  - 写入跨请求、跨 `serve` 重启保留，不自动清理；脚本之后抛错或客户端断开不会回滚已完成的写入。它是显式 artifact output，不是 Shared state：不提供原子读改写、CAS、事务、TTL 或跨实例协调，脚本不得用它替代 `ctx.state`。
+  - Unix 上创建或替换后的文件使用宿主临时文件的默认权限（`0600`）；脚本不能设置 mode。替换前已打开的文件流在平台 rename 语义允许时继续发送旧文件；其他进程持有目标时，替换可能以 `file_io_error` 失败。
+  - 失败码为 `file_write_disabled`、`file_path_invalid`、`file_too_large`、`file_encoding_error` 与 `file_io_error`。未捕获的文件错误是普通脚本错误（500 `script_error`）；文件路径与内容绝不进入日志。
 - `ctx.respond(200, headers, ctx.file.stream(path))` 把文件流式发给客户端，字节不进入脚本堆。脚本状态必须是 `200`；`Accept-Ranges`、`Content-Length` 与 `Content-Range` 归宿主所有，脚本为这些 header 提供值——或在文件流上使用非 200 状态——会抛出可捕获的 `script_error`。
   - 合法的单 range（`bytes=N-M`、`bytes=N-` 或 `bytes=-N`）答 `206`，end 偏移截断到文件末尾，并带正确的 `Content-Length` 与 `Content-Range`。不可用的 Range header——不可满足、畸形、多 range，或空文件上的任意 range——答 `416`，带 `Content-Range: bytes */<size>` 且无 body。存在 `If-Range` 时禁用 Range 处理，答完整 `200`。
   - 绝不推断 `Content-Type`，由脚本设置。HEAD 不会自动映射到 GET Route；只有显式声明的 HEAD Route 才会命中。缓冲的 `ctx.respond` body 保持原有的无 Range 行为。
@@ -125,7 +134,7 @@
 - 脚本 worker 进程并发上限（按可用并行度取 4–16 个槽位），槽满时快速失败
 - 网络 allowlist
 - 宿主持有的进程内状态，具有固定的 key、value、条目、字节与 TTL 边界
-- `ctx.file` 的静态文件根限制
+- `ctx.file` 读写的文件根限制
 - 请求级 multipart 临时存储：`files.upload_max_bytes`、流式计数、8 MiB 缓冲上传读取与 guard 清理
 - 堆栈绝不返回给客户端
 
@@ -135,7 +144,7 @@ Boa 0.22 不暴露堆指标、堆上限或 interrupt 钩子。进程隔离 worke
 
 产品必须为每个受支持的 `apiVersion` 发布 `.d.ts` 文件；[ADR 0012](../../plans/adr/0012-release-artifacts-and-supply-chain.md) 已把它列入发布产物集合。T9 (#12) 接入该流水线。源码定义已经属于本契约。
 
-当前已实现子集（含进程内 Shared state 切片与宿主 Crypto API）的 `apiVersion` 1 源码定义在 [`types/ctx-api-v1.d.ts`](../../types/ctx-api-v1.d.ts)。在 `apiVersion` 1 内新增能力时，必须在同一次变更中更新该文件与契约。
+当前已实现子集（含进程内 Shared state 切片、宿主 Crypto API 与显式开启的文件写入）的 `apiVersion` 1 源码定义在 [`types/ctx-api-v1.d.ts`](../../types/ctx-api-v1.d.ts)。在 `apiVersion` 1 内新增能力时，必须在同一次变更中更新该文件与契约。
 
 ## 弃用
 

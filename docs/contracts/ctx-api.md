@@ -2,7 +2,7 @@
 
 **English** \| [中文](./ctx-api.zh-CN.md)
 
-- **Status**: public and frozen for the v1 slice; this page documents the implemented subset through T13 plus the process-local Shared state slice and host crypto API (ADR 0019)
+- **Status**: public and frozen for the v1 slice; this page documents the implemented subset through T13 plus the process-local Shared state slice, host crypto API (ADR 0019), and opt-in script file writes (ADR 0022)
 - **Applies to**: `apiVersion` 1
 - **Stability**: additive within an `apiVersion`; removals require a new `apiVersion`
 
@@ -29,6 +29,7 @@ Within one `apiVersion`:
 | Upstream HTTP | `ctx.http.request` | deferred out of 1.0 (v1.x candidate, see ADR 0016) |
 | Binary passthrough | `ctx.http.pipe` | implemented (T6) |
 | Files | `ctx.file.readText` / `ctx.file.readBytes` / `ctx.file.stream` | implemented (T11) |
+| Files | `ctx.file.writeText` / `ctx.file.writeBytes` | implemented (ADR 0022) |
 | Response | `ctx.respond` | implemented (T2) |
 | Shared state | `ctx.state.get` / `set` / `take` / `setIfAbsent` | implemented (v2 process-local slice) |
 | Crypto | `ctx.crypto.randomBytes` / `sha256` / `hmacSha256` / `timingSafeEqual` | implemented (ADR 0019) |
@@ -63,7 +64,7 @@ Within one `apiVersion`:
   - Upstream responses in `[200, 299]` start the stream. A final non-2xx response raises a catchable error whose `error.code` is `"upstream_http_error"`; a URL that does not parse or whose scheme is not `http`/`https` raises `"upstream_url_invalid"`; a redirect chain the host cannot follow (more than 3 hops or an unusable `Location`) raises `"upstream_redirect_error"`; DNS, connection, TLS, and timeout failures raise `"upstream_unreachable"`; an allowlist rejection raises `"script_error"`.
   - The first `ctx.respond` or `ctx.http.pipe` call wins; a later call is ignored, returns `false`, and produces a server-side warning. An uncaught `upstream_http_error` is an ordinary script error (500 `script_error`), never `502 upstream_unreachable`.
   - The upstream body read stays bounded by the effective upstream timeout, and a body already being streamed cannot be transformed or converted into a buffered Response; scripts that need the bytes use `ctx.http.get`. Once the stream starts, a mid-body upstream failure can only truncate the client body, because the status and headers are already on the wire. The host records that failure in the request log as `upstream_stream_error`; see the [CLI contract](cli.md) for the log fields.
-- `ctx.file.readText(path)` and `ctx.file.readBytes(path)` read one file inside the configured static file root. A path is a filesystem path relative to `[files] root` and is never parsed as a URL or a platform-specific path on another platform; absolute paths and any `..` component are rejected before resolution, and symlinks are followed only while the canonicalized target stays inside the canonicalized root. `readText` decodes strict UTF-8; `readBytes` returns a `Uint8Array`. Both are capped at 8 MiB and throw catchable errors:
+- `ctx.file.readText(path)` and `ctx.file.readBytes(path)` read one file inside the configured file root. A path is a filesystem path relative to `[files] root` and is never parsed as a URL or a platform-specific path on another platform; absolute paths and any `..` component are rejected before resolution, and symlinks are followed only while the canonicalized target stays inside the canonicalized root. `readText` decodes strict UTF-8; `readBytes` returns a `Uint8Array`. Both are capped at 8 MiB and throw catchable errors:
   - `file_path_invalid` — absolute path, `..` component, empty path, or a symlink that escapes the root;
   - `file_not_found` — no file at the resolved path;
   - `file_too_large` — the file exceeds the 8 MiB buffered cap;
@@ -71,6 +72,14 @@ Within one `apiVersion`:
   - `file_io_error` — the path is not a regular file or another I/O failure occurred.
   An uncaught file error is an ordinary script error (500 `script_error`); the host never maps a missing file to 404 automatically.
 - `ctx.file.stream(path)` opens one file inside the root and returns an opaque, single-consumption handle with no readable properties. The handle is valid only as the `body` argument of `ctx.respond`, and its open-time failures use the same catchable codes as the buffered reads.
+- `ctx.file.writeText(path, text)` and `ctx.file.writeBytes(path, bytes)` create or atomically replace one regular file under the same file root and return the number of bytes written.
+  - Writes are disabled unless `[files] writable = true`; otherwise they throw catchable `file_write_disabled` before touching disk. The per-request budget is `files.write_max_bytes` (default 20 MiB), and one call may write at most 8 MiB. The budget counts successful writes; a failed write does not consume it.
+  - `writeText` encodes strict UTF-8 and rejects lone UTF-16 surrogates with `file_encoding_error`. `writeBytes` accepts a `Uint8Array`, `ArrayBuffer`, or dense byte array whose elements are integers in `[0, 255]`; invalid input is an ordinary script error.
+  - Paths follow the read path rules, with one stronger rule: writes reject every symlink component, including a symlink as the final target. A write path must name a file, so a trailing path separator or final `.` component is rejected. Only regular files may be replaced, and the parent directory must already exist; the host never creates directories. On Windows, write paths also reject alternate data streams (any `:`), reserved device names (including names with extensions and superscript ports), trailing dots or spaces, and characters Windows does not allow. Replacing a target breaks any hard link at the target path, so a write never mutates an inode outside the file root through a hard link.
+  - A write creates or replaces the file through a temporary file in the target directory followed by an atomic rename. The host does not call `fsync`. A failed write leaves the old target untouched and cleans up the temporary file. Concurrent writes to one path are last-writer-wins; readers see the old file or the complete new file, never a partial body.
+  - Writes persist across requests and across `serve` restarts, are not automatically cleaned up, and are not rolled back when the script later throws or the client disconnects. They are explicit artifact output, not Shared state: they provide no atomic read-modify-write, CAS, transaction, TTL, or cross-instance coordination, and scripts must not use them in place of `ctx.state`.
+  - On Unix, created or replaced files use the host temporary-file default permission (`0600`); scripts cannot set a mode. A file stream opened before a replacement keeps serving the old file on platforms where rename semantics allow it; a replacement may fail with `file_io_error` while another process holds the target open.
+  - Failures are catchable with the stable codes `file_write_disabled`, `file_path_invalid`, `file_too_large`, `file_encoding_error`, and `file_io_error`. An uncaught file error is an ordinary script error (500 `script_error`); file paths and contents never enter logs.
 - `ctx.respond(200, headers, ctx.file.stream(path))` streams the file to the client without entering the script heap. The script status must be `200`; the host owns `Accept-Ranges`, `Content-Length`, and `Content-Range`, and a script-supplied value for those headers — or a non-200 status with a file stream — raises a catchable `script_error`.
   - A valid single range (`bytes=N-M`, `bytes=N-`, or `bytes=-N`) answers `206` with a clamped end offset and the correct `Content-Length` and `Content-Range`. An unusable Range header — unsatisfiable, malformed, multi-range, or any range on an empty file — answers `416` with `Content-Range: bytes */<size>` and no body. A present `If-Range` disables Range handling and answers a full `200`.
   - `Content-Type` is never inferred; the script sets it. HEAD is not auto-mapped to a GET Route; only an explicitly declared HEAD Route matches. Buffered `ctx.respond` bodies keep the existing no-Range behavior.
@@ -122,7 +131,7 @@ Scripts receive no raw `fetch`, `fs`, `os`, `subprocess`, or `socket`. All exter
 - script-worker process concurrency cap (4–16 slots derived from available parallelism) with fail-fast when saturated
 - network allowlist
 - host-managed process-local state with fixed key, value, entry, byte, and TTL bounds
-- static file root confinement for `ctx.file`
+- file-root confinement for `ctx.file` reads and writes
 - request-scoped multipart temporary storage with `files.upload_max_bytes`, streaming accounting, 8 MiB buffered upload reads, and guard-based cleanup
 - stack traces never returned to clients
 
@@ -132,7 +141,7 @@ Boa 0.22 exposes no heap metric, heap limit, or interrupt hook. The process-isol
 
 The product must publish the `.d.ts` file for each supported `apiVersion`; [ADR 0012](../../plans/adr/0012-release-artifacts-and-supply-chain.md) makes it part of the release artifact set. T9 (#12) wires that pipeline. The source definition is already part of this contract.
 
-The `apiVersion` 1 source definition for the implemented subset, including the process-local Shared state slice and host crypto API, is [`types/ctx-api-v1.d.ts`](../../types/ctx-api-v1.d.ts). Additions within `apiVersion` 1 must update that file and the contract in the same change.
+The `apiVersion` 1 source definition for the implemented subset, including the process-local Shared state slice, host crypto API, and opt-in file writes, is [`types/ctx-api-v1.d.ts`](../../types/ctx-api-v1.d.ts). Additions within `apiVersion` 1 must update that file and the contract in the same change.
 
 ## Deprecation
 

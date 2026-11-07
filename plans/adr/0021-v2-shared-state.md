@@ -154,3 +154,7 @@ interface SdState {
 - **LRU 自动淘汰**：容量满时可能静默丢失有效 code/token，测试结果不确定，拒绝。
 - **用锁、事务或 Admin API 扩展成通用数据库**：超出 Mock Server 场景，增加不可控 API 面，拒绝。
 - **复用 `ctx.local`**：请求内状态在请求结束即销毁，无法满足跨请求需求，且会混淆两种生命周期，拒绝。
+
+## 修订（2026-11-07）
+
+[ADR 0022](0022-script-file-writes.md) 增加显式开启的脚本文件写入。该能力不是本 ADR 的 Shared state：它不提供原子读改写、事务、TTL、容量账本或跨实例协调，也不能替代 `ctx.state`。本 ADR 的“状态只能经宿主 API 读写”约束继续适用于 Shared state；脚本自行把文件当作状态使用时，不享有本 ADR 的任何保证。

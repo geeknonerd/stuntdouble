@@ -214,6 +214,76 @@ curl -i -F 'document=@./report.pdf;type=application/pdf' \
 
 Upload bytes stay in request-scoped temporary storage and are removed after the request.
 
+## Persist an uploaded file and serve it later
+
+Enable writes explicitly and create `files/uploads/` before starting the server. The parent directory is never created automatically.
+
+```toml
+[files]
+root = "./files"
+writable = true
+write_max_bytes = 20971520
+
+[[routes]]
+name = "upload-latest"
+method = "POST"
+path = "/documents/latest"
+script = "scripts/upload-latest.js"
+
+[[routes]]
+name = "download-latest"
+method = "GET"
+path = "/documents/latest"
+script = "scripts/download-latest.js"
+```
+
+```js
+// scripts/upload-latest.js
+const file = ctx.request.files[0];
+
+if (!file) {
+  ctx.respond(
+    400,
+    { "Content-Type": "application/json; charset=utf-8" },
+    JSON.stringify({ error: "document_required" }),
+  );
+} else {
+  try {
+    const bytes = ctx.file.writeBytes("uploads/latest.bin", file.bytes());
+    ctx.respond(
+      201,
+      { "Content-Type": "application/json; charset=utf-8" },
+      JSON.stringify({ bytes }),
+    );
+  } catch (error) {
+    ctx.respond(
+      500,
+      { "Content-Type": "application/json; charset=utf-8" },
+      JSON.stringify({ error: "write_failed", code: error.code || "script_error" }),
+    );
+  }
+}
+```
+
+```js
+// scripts/download-latest.js
+ctx.respond(
+  200,
+  { "Content-Type": "application/octet-stream" },
+  ctx.file.stream("uploads/latest.bin"),
+);
+```
+
+Run and check:
+
+```bash
+curl -i -F 'document=@./report.pdf;type=application/pdf' \
+  http://127.0.0.1:3000/documents/latest
+curl -i http://127.0.0.1:3000/documents/latest
+```
+
+The buffered upload path is limited to 8 MiB. Written files persist across requests and restarts, are not cleaned up automatically, and are artifact output rather than `ctx.state`.
+
 ## Minimum CI verification
 
 Validate first, start the server in the background, poll it, assert one response, then stop it:

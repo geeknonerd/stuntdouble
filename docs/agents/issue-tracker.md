@@ -47,7 +47,7 @@ canonical triage label 定义在 `docs/agents/triage-labels.md`；一个普通 i
 - `area:sandbox`：`ctx` API、宿主限制、脚本安全边界
 - `area:runtime-js`：Boa JavaScript 运行时
 - `area:runtime-python`：RustPython 运行时
-- `area:files`：静态文件目录、上传、文件流
+- `area:files`：文件根、上传、文件流、脚本文件写入
 - `area:observability`：日志、request ID、指标、诊断
 - `area:distribution`：发布、包、容器镜像、CI
 
