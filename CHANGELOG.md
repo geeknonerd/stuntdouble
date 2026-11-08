@@ -12,14 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - *(files)* align file-write contract, deadline, and concurrency test ([#236](https://github.com/geeknonerd/stuntdouble/pull/236))
+- *(docs)* clarify file-write error precedence and which failed writes appear in `file_calls` (ADR 0022)
 
 ### Other
 
 - *(files)* document write deadline and bridge-scoped file_calls ([#238](https://github.com/geeknonerd/stuntdouble/pull/238))
-
-### Fixed
-
-- *(docs)* clarify file-write error precedence and which failed writes appear in `file_calls` (ADR 0022)
 
 ## [1.9.0](https://github.com/geeknonerd/stuntdouble/compare/v1.8.2...v1.9.0) - 2026-11-07
 
