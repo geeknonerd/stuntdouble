@@ -152,6 +152,7 @@ interface SdFile {
    * Creates or atomically replaces one regular file under the file root and
    * returns the number of bytes written. Requires `[files] writable = true`.
    * The path rules match `writeText`; the parent directory must already exist.
+   * Once the script deadline has passed, nothing is created or replaced.
    * Throws a catchable error with code "file_write_disabled",
    * "file_path_invalid", "file_too_large", or "file_io_error".
    */

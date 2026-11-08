@@ -117,7 +117,7 @@ const binaryBytes = ctx.file.writeBytes("generated/report.bin", [0, 1, 255]);
 ctx.respond(200, { "Content-Type": "text/plain" }, String(textBytes + binaryBytes));
 ```
 
-`writeText` 与 `writeBytes` 创建或原子替换一个普通文件，并返回写入字节数。单次调用上限 8 MiB；`files.write_max_bytes` 是每请求成功写入的预算。写入拒绝绝对路径、`..` 与任何符号链接组件，不自动创建父目录，且默认关闭。失败的写入保留旧文件。写入内容跨请求与重启保留，不会自动清理，是 artifact output，不是 `ctx.state`。
+`writeText` 与 `writeBytes` 创建或原子替换一个普通文件，并返回写入字节数。单次调用上限 8 MiB；`files.write_max_bytes` 是每请求成功写入的预算。写入拒绝绝对路径、`..` 与任何符号链接组件，不自动创建父目录，且默认关闭。失败的写入保留旧文件。脚本 deadline（`sandbox.script_timeout_ms`）过后不再创建或替换任何文件。写入内容跨请求与重启保留，不会自动清理，是 artifact output，不是 `ctx.state`。
 
 要把文件流给客户端而不进入脚本堆，把 `ctx.file.stream(path)` 作为 `ctx.respond` 的 body 传入（状态必须是 `200`）。`Accept-Ranges`、`Content-Length` 与 `Content-Range` 归宿主所有：合法的单 `Range` 答 206，不可用的 Range 答 416，`If-Range` 存在时禁用 Range 处理。`Content-Type` 不会自动推断，需要脚本在响应 header 中设置。
 
