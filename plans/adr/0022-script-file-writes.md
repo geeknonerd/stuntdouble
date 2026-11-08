@@ -2,6 +2,7 @@
 
 - 状态：`已接受`
 - 日期：2026-11-07
+- 作者：@geeknonerd
 - 关联：[ADR 0001](0001-no-shared-state-in-v1.md)、[ADR 0004](0004-host-functions-only-sandbox.md)、[ADR 0011](0011-contract-compatibility.md)、[ADR 0021](0021-v2-shared-state.md)、[配置契约](../../docs/contracts/config.md)、[`ctx` API 契约](../../docs/contracts/ctx-api.md)、[安全说明](../../SECURITY.md)
 
 ## 背景
@@ -65,6 +66,7 @@ interface SdFile {
 - 父目录必须已经存在；缺失父目录是 `file_io_error`，宿主不自动创建目录。
 - 目标不存在时创建普通文件；目标存在时必须是普通文件，并被原子替换。
 - 原子替换使用目标目录内的临时文件加 rename；不调用 `fsync`。失败时临时文件由 guard 清理，目标保持旧内容。
+- 单次写入与替换重试都受脚本 deadline 约束：请求已超时后不再创建或替换目标，某个等待窗口会越过 deadline 时直接以 `file_io_error` 失败。Windows 上同一进程内的并发替换在宿主侧串行化，最多 3 次尝试（含首次，2 次退避，增量约 30ms）；这只是平台补偿，不改变 last-writer-wins，也不引入用户可见的锁或队列。
 - 读取方只会看到旧文件或新完整文件，不会看到截断到一半的新文件。
 - 多个请求并发写同一路径时 last-writer-wins；不提供锁、队列或冲突错误。
 - 替换会断开目标路径上的硬链接，因此不会通过硬链接改写 root 外的 inode；若实现改成原地写（截断后写入），该保证即告失效。

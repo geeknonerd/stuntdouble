@@ -2,6 +2,7 @@
 
 - 状态：`已接受`
 - 日期：2026-09-19
+- 作者：@geeknonerd
 - 关联：[ADR 0006](0006-product-positioning.md)、[ADR 0008](0008-dual-mit-apache-license.md)、[开源仓库基线](../../research/open-source-repo-baseline.md)
 
 ## 背景

@@ -2,6 +2,7 @@
 
 - 状态：`已接受`
 - 日期：2026-09-27
+- 作者：@geeknonerd
 - 关联：[issue #28](https://github.com/geeknonerd/stuntdouble/issues/28)、[ADR 0003](0003-script-first-multi-runtime.md)（T3 与 #29 修订）、[ADR 0004](0004-host-functions-only-sandbox.md)、[方案评估](../../research/process-isolation-assessment.md)、[外部事实](../../research/process-isolation-external-facts.md)
 
 ## 背景

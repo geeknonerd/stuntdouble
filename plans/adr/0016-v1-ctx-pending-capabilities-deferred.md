@@ -2,6 +2,7 @@
 
 - 状态：`已接受`
 - 日期：2026-09-30
+- 作者：@geeknonerd
 - 关联：[ADR 0001](0001-no-shared-state-in-v1.md)、[ADR 0004](0004-host-functions-only-sandbox.md)、[ADR 0005](0005-upstream-failure-semantics.md)、[ADR 0011](0011-contract-compatibility.md)、[ADR 0014](0014-process-isolated-script-runner.md)、[ADR 0015](0015-python-runtime-deferred-to-v2.md)、[产品功能定义](../product-definition.md)、[`ctx` API 契约](../../docs/contracts/ctx-api.md)
 
 ## 背景

@@ -115,7 +115,7 @@ const binaryBytes = ctx.file.writeBytes("generated/report.bin", [0, 1, 255]);
 ctx.respond(200, { "Content-Type": "text/plain" }, String(textBytes + binaryBytes));
 ```
 
-`writeText` and `writeBytes` create or atomically replace one regular file and return its byte count. Each call is capped at 8 MiB; `files.write_max_bytes` is the per-request budget for successful writes. Writes reject absolute paths, `..`, and every symlink component, do not create parent directories, and are disabled by default. A failed write leaves the old file untouched. Written files persist across requests and restarts, are not cleaned up automatically, and are artifact output rather than `ctx.state`.
+`writeText` and `writeBytes` create or atomically replace one regular file and return its byte count. Each call is capped at 8 MiB; `files.write_max_bytes` is the per-request budget for successful writes. Writes reject absolute paths, `..`, and every symlink component, do not create parent directories, and are disabled by default. A failed write leaves the old file untouched. Once the script deadline (`sandbox.script_timeout_ms`) has passed, no file is created or replaced. Written files persist across requests and restarts, are not cleaned up automatically, and are artifact output rather than `ctx.state`.
 
 To serve a file without loading it into the script heap, pass `ctx.file.stream(path)` as the `ctx.respond` body with status `200`. The host owns `Accept-Ranges`, `Content-Length`, and `Content-Range`: a valid single `Range` answers 206, an unusable one answers 416, and `If-Range` disables range handling. `Content-Type` is never inferred, so set it in the response headers.
 

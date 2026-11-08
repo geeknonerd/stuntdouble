@@ -2,6 +2,7 @@
 
 - 状态：`已接受（API 明细已由 ADR 0016 收敛）`
 - 日期：2026-09-18
+- 作者：@geeknonerd
 - 关联：[ADR 0001](0001-no-shared-state-in-v1.md)、[ADR 0003](0003-script-first-multi-runtime.md)
 
 ## 背景
