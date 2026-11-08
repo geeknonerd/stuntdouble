@@ -68,7 +68,7 @@ Files:
 - `files/metadata.json` — public document fixture rows (`code`, `title`,
   `system_code`, and the root-relative `file`).
 - `files/DOC-0001.pdf`, `files/DOC-0002.pdf` — minimal public PDF fixtures.
-- `files/` is the only static file root; uploads use separate request-scoped
+- `files/` is the only file root; uploads use separate request-scoped
   temporary storage and never write here.
 
 ## Manifest contract
@@ -153,7 +153,7 @@ Files:
   `filename` is the client-provided basename, and `content_type` is `null` when
   the part carries no `Content-Type`.
 - Nothing is persisted: the bytes stay in request-scoped temporary storage that
-  is removed when the request ends, the static file root is never written, and a
+  is removed when the request ends, the file root is never written, and a
   later request cannot observe the upload.
 - Multipart failures happen before the script: malformed multipart answers 400
   `invalid_multipart`, and data over `files.upload_max_bytes` answers 413

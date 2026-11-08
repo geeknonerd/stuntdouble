@@ -664,6 +664,9 @@ pub struct FileAccess {
     root: PathBuf,
     writable: bool,
     write_max_bytes: u64,
+    /// Script deadline; a replacement that cannot finish before it must not
+    /// keep retrying, because a timed-out request must not leave side effects.
+    write_deadline: Instant,
     /// Bytes successfully written by this request; the host, not the script,
     /// owns this budget.
     written_bytes: Cell<u64>,
@@ -677,11 +680,18 @@ impl FileAccess {
     /// root that disappears or stops being a directory at runtime surfaces as
     /// a catchable `file_io_error` instead of failing the script before it runs.
     #[must_use]
-    pub fn new(root: &Path, writable: bool, write_max_bytes: u64, calls: CallLog) -> Self {
+    pub fn new(
+        root: &Path,
+        writable: bool,
+        write_max_bytes: u64,
+        write_deadline: Instant,
+        calls: CallLog,
+    ) -> Self {
         Self {
             root: root.to_path_buf(),
             writable,
             write_max_bytes,
+            write_deadline,
             written_bytes: Cell::new(0),
             calls,
             streams: RefCell::new(Vec::new()),
@@ -825,9 +835,15 @@ impl FileAccess {
                 "write exceeds files.write_max_bytes for this request",
             ));
         }
+        // A request that already exceeded its script deadline must not create
+        // or replace anything: the client stopped waiting, and a late write
+        // would be an unobservable side effect.
+        if Instant::now() >= self.write_deadline {
+            return Err(Error::Io("write deadline exceeded".to_string()));
+        }
 
         let (target, parent) = self.resolve_for_write(path)?;
-        atomic_replace(&target, &parent, bytes)?;
+        atomic_replace(&target, &parent, bytes, self.write_deadline)?;
         self.written_bytes.set(next_total);
         Ok(len)
     }
@@ -993,7 +1009,12 @@ impl FileAccess {
     }
 }
 
-fn atomic_replace(target: &Path, parent: &Path, bytes: &[u8]) -> Result<(), Error> {
+fn atomic_replace(
+    target: &Path,
+    parent: &Path,
+    bytes: &[u8],
+    deadline: Instant,
+) -> Result<(), Error> {
     let mut temp = tempfile::Builder::new()
         .prefix(".stuntdouble-write-")
         .tempfile_in(parent)
@@ -1003,7 +1024,7 @@ fn atomic_replace(target: &Path, parent: &Path, bytes: &[u8]) -> Result<(), Erro
     temp.as_file_mut()
         .flush()
         .map_err(|error| Error::Io(error.to_string()))?;
-    persist_replacement(temp, target)
+    persist_replacement(temp, target, deadline)
 }
 
 /// Replace `target` with an already-written temporary file.
@@ -1015,9 +1036,18 @@ fn atomic_replace(target: &Path, parent: &Path, bytes: &[u8]) -> Result<(), Erro
 /// implementation detail, not a user-facing lock/queue; separate `serve`
 /// processes remain uncoordinated, as ADR 0022 specifies. The retry covers
 /// transient external holders without widening the stable error code.
-fn persist_replacement(mut temp: tempfile::NamedTempFile, target: &Path) -> Result<(), Error> {
+fn persist_replacement(
+    mut temp: tempfile::NamedTempFile,
+    target: &Path,
+    deadline: Instant,
+) -> Result<(), Error> {
     let mut last_error = None;
     for attempt in 0..PERSIST_ATTEMPTS {
+        // The caller's script deadline bounds every retry. Stop before the
+        // next attempt or backoff window once it has passed.
+        if Instant::now() >= deadline {
+            return Err(Error::Io("write deadline exceeded".to_string()));
+        }
         let result = {
             #[cfg(windows)]
             let _guard = replace_lock();
@@ -1029,7 +1059,11 @@ fn persist_replacement(mut temp: tempfile::NamedTempFile, target: &Path) -> Resu
                 last_error = Some(error.error);
                 temp = error.file;
                 if attempt + 1 < PERSIST_ATTEMPTS {
-                    std::thread::sleep(std::time::Duration::from_millis(10 * (attempt as u64 + 1)));
+                    let backoff = std::time::Duration::from_millis(10 * (attempt as u64 + 1));
+                    if Instant::now() + backoff >= deadline {
+                        return Err(Error::Io("write deadline exceeded".to_string()));
+                    }
+                    std::thread::sleep(backoff);
                 }
             }
         }
@@ -1254,7 +1288,13 @@ mod tests {
     fn write_access(root: &Path, writable: bool, write_max_bytes: u64) -> (FileAccess, CallLog) {
         let calls = CallLog::new();
         (
-            FileAccess::new(root, writable, write_max_bytes, calls.clone()),
+            FileAccess::new(
+                root,
+                writable,
+                write_max_bytes,
+                Instant::now() + std::time::Duration::from_secs(30),
+                calls.clone(),
+            ),
             calls,
         )
     }
@@ -1384,10 +1424,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn concurrent_readers_see_a_complete_version_during_replace() {
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
         const READERS: usize = 4;
         const WRITES: usize = 20;
+        // Every reader must still be inside its read loop when the writes run,
+        // and must complete several loop reads; otherwise the assertions only
+        // cover the pre-barrier read and the round proves nothing.
+        const MIN_READS_PER_THREAD: usize = 4;
 
         let dir = tempfile::tempdir().expect("tempdir");
         let root = Arc::new(dir.path().to_path_buf());
@@ -1397,11 +1441,13 @@ mod tests {
 
         let stopping = Arc::new(AtomicBool::new(false));
         let started = Arc::new(std::sync::Barrier::new(READERS + 1));
+        let readers_looping = Arc::new(AtomicUsize::new(0));
         let handles = (0..READERS)
             .map(|_| {
                 let root = Arc::clone(&root);
                 let stopping = Arc::clone(&stopping);
                 let started = Arc::clone(&started);
+                let readers_looping = Arc::clone(&readers_looping);
                 let old_payload = old_payload.clone();
                 let new_payload = new_payload.clone();
                 std::thread::spawn(move || {
@@ -1423,8 +1469,9 @@ mod tests {
                     );
                     reads += 1;
                     started.wait();
+                    readers_looping.fetch_add(1, Ordering::Release);
 
-                    while !stopping.load(Ordering::Relaxed) {
+                    while reads < MIN_READS_PER_THREAD || !stopping.load(Ordering::Relaxed) {
                         let result = access.call(&json!({
                             "op": "readText",
                             "path": "concurrent.bin"
@@ -1443,6 +1490,9 @@ mod tests {
 
         let (writer_access, _) = write_access(root.as_path(), true, 1024 * 1024);
         started.wait();
+        while readers_looping.load(Ordering::Acquire) < READERS {
+            std::thread::yield_now();
+        }
         for _ in 0..WRITES {
             let result = writer_access.call(&json!({
                 "op": "writeBytes",
@@ -1454,7 +1504,10 @@ mod tests {
         stopping.store(true, Ordering::Relaxed);
         for handle in handles {
             let reads = handle.join().expect("reader");
-            assert!(reads > 0, "reader never completed a read");
+            assert!(
+                reads >= MIN_READS_PER_THREAD,
+                "reader only completed {reads} reads"
+            );
         }
     }
 
@@ -1476,6 +1529,40 @@ mod tests {
         assert_eq!(second["ok"], false);
         assert_eq!(second["code"], "file_too_large");
         assert!(!dir.path().join("second.txt").exists());
+    }
+
+    #[test]
+    fn script_write_past_the_deadline_leaves_no_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("existing.txt"), "old").expect("old file");
+        let calls = CallLog::new();
+        let expired = Instant::now()
+            .checked_sub(std::time::Duration::from_secs(1))
+            .expect("deadline before now");
+        let (access, _) = (
+            FileAccess::new(dir.path(), true, 1024, expired, calls.clone()),
+            calls,
+        );
+
+        let created = access.call(&json!({
+            "op": "writeText",
+            "path": "created.txt",
+            "text": "x"
+        }));
+        assert_eq!(created["ok"], false);
+        assert_eq!(created["code"], "file_io_error");
+        assert!(!dir.path().join("created.txt").exists());
+
+        let replaced = access.call(&json!({
+            "op": "writeText",
+            "path": "existing.txt",
+            "text": "new"
+        }));
+        assert_eq!(replaced["ok"], false);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("existing.txt")).expect("old file"),
+            "old"
+        );
     }
 
     #[test]

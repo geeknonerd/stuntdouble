@@ -2,7 +2,7 @@
 // plans/demo-document-catalog.md §3.4.
 //
 // Offline twin of scripts/download.js: the metadata comes from the fixture in
-// the static file root, and the PDF streams from that root through
+// the file root, and the PDF streams from that root through
 // ctx.file.stream, so the bytes never enter the script heap. The host owns
 // Accept-Ranges, Content-Length, and Content-Range: a valid single Range
 // answers 206, an unusable one answers 416.
@@ -42,7 +42,7 @@ function download() {
     return;
   }
 
-  // `file` is a path inside the static file root; absolute paths, `..`
+  // `file` is a path inside the file root; absolute paths, `..`
   // components, and targets outside the root are rejected by the host and
   // surface as catchable file_path_invalid errors.
   ctx.respond(

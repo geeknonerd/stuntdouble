@@ -1825,6 +1825,7 @@ impl HostState {
             &files_config.root,
             files_config.writable,
             files_config.write_max_bytes,
+            script_deadline,
             file_calls.clone(),
         );
         let uploads = uploads.map(|store| files::UploadAccess::new(store, file_calls));

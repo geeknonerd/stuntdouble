@@ -4,7 +4,7 @@
 // before this script runs; ctx.request.files exposes each file's metadata and
 // contents, and non-file form fields are ignored. The demo expects at least one
 // file part, answers the first one's metadata, and persists nothing: the upload
-// never reaches the static file root, and the temporary storage is removed when
+// never reaches the file root, and the temporary storage is removed when
 // the request ends.
 var file = ctx.request.files[0];
 

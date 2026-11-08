@@ -2,7 +2,7 @@
 // plans/demo-document-catalog.md §3.3.
 //
 // Offline twin of scripts/manifest.js: the same CSV contract, sourced from the
-// metadata fixture in the static file root instead of an upstream call. The
+// metadata fixture in the file root instead of an upstream call. The
 // file is read on every request; Stunt Double v1 has no cross-request state.
 // The :group path parameter is kept for existing callers and does not filter
 // the metadata: every request returns all records of the fixture data array.

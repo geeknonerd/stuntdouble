@@ -43,9 +43,11 @@ tags: [ctx-file, atomic-replace, hard-link, symlink, artifact-output, fail-close
 
 ### 3. 原子替换用目标目录临时文件 + rename，并用反例测试锁死保证
 
-- 实现：`atomic_replace`（`src/files.rs:996`）在目标目录内建临时文件、写入、`persist` 到目标；不 `fsync`；失败保留旧文件；权限使用临时文件默认 `0600`。
+- 实现：`atomic_replace`（`src/files.rs:1012`）在目标目录内建临时文件、写入、`persist` 到目标；不 `fsync`；失败保留旧文件；权限使用临时文件默认 `0600`。
 - 硬链接隔离：`rename` 只替换目录项指向的 inode，外部硬链接路径不受影响；原地截断写会改写同一 inode，必须由测试拦截。
 - 并发读者：rename 原子切换使读者只见完整旧版或新版；Windows 的替换 API 在目标打开时可能报共享冲突，写入失败要有上层错误码而非部分文件。并发 writer 还会在 Windows 上互相抢同一目标（`MoveFileExW` 可返回 `ERROR_ACCESS_DENIED`）；宿主进程内必须串行化 replace 步骤或做有界重试，并用 `test-windows` 的多轮并发测试锁住。
+- 重试与 deadline：Windows 上最多 3 次尝试（含首次，2 次退避，增量约 30ms），非 Windows 2 次；每次尝试与退避窗口前都检查脚本 deadline，已超时直接返回 `file_io_error` 且不落盘（`src/files.rs:1039`）。重试只是平台补偿，不改变 ADR 0022 的 last-writer-wins 与“不提供锁/队列”语义。
+- 回归测试：并发读者用例要求 4 个读线程都进入读循环后才开始写入，并各自完成至少 4 次循环读，避免 schedule 饥饿让并发断言空转（`src/files.rs:1424`）。
 
 ## Why This Matters
 
