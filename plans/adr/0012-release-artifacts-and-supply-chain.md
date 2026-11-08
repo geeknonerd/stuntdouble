@@ -2,6 +2,7 @@
 
 - 状态：`已接受`
 - 日期：2026-09-19
+- 作者：@geeknonerd
 - 关联：[ADR 0008](0008-dual-mit-apache-license.md)、[ADR 0010](0010-git-and-release-workflow.md)、[开发指南](../../docs/development.md)
 
 ## 背景

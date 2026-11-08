@@ -2,6 +2,7 @@
 
 - 状态：`已接受`
 - 日期：2026-10-22
+- 作者：@geeknonerd
 - 关联：[ADR 0002](0002-route-model-only-in-v1.md)、[ADR 0004](0004-host-functions-only-sandbox.md)、[ADR 0011](0011-contract-compatibility.md)、[ADR 0019](0019-host-crypto-api.md)、[Post-v1 开发路线](../post-v1-roadmap.md)、[OAuth authorization mock](../oauth-authorization-mock.md)
 
 ## 背景

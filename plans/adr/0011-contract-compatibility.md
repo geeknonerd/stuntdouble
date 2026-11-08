@@ -2,6 +2,7 @@
 
 - 状态：`已接受`
 - 日期：2026-09-19
+- 作者：@geeknonerd
 - 关联：[ADR 0003](0003-script-first-multi-runtime.md)、[ADR 0004](0004-host-functions-only-sandbox.md)、[ADR 0010](0010-git-and-release-workflow.md)
 
 ## 背景

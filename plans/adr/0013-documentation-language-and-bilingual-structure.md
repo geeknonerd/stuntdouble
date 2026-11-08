@@ -2,6 +2,7 @@
 
 - 状态：`已接受`
 - 日期：2026-09-21
+- 作者：@geeknonerd
 - 关联：[ADR 0010](0010-git-and-release-workflow.md)、[CONTRIBUTING.md](../../CONTRIBUTING.md)、[docs/development.md](../../docs/development.md)
 
 ## 背景

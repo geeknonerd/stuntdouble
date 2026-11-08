@@ -2,6 +2,7 @@
 
 - 状态：`已接受`
 - 日期：2026-09-30
+- 作者：@geeknonerd
 - 关联：[ADR 0010](0010-git-and-release-workflow.md)、[ADR 0011](0011-contract-compatibility.md)、[ADR 0012](0012-release-artifacts-and-supply-chain.md)、[ADR 0015](0015-python-runtime-deferred-to-v2.md)、[ADR 0016](0016-v1-ctx-pending-capabilities-deferred.md)、[产品功能定义](../product-definition.md)、[开发指南](../../docs/development.md)
 
 ## 背景

@@ -2,6 +2,7 @@
 
 - 状态：`已接受`
 - 日期：2026-10-22
+- 作者：@geeknonerd
 - 关联：[ADR 0001](0001-no-shared-state-in-v1.md)、[ADR 0004](0004-host-functions-only-sandbox.md)、[ADR 0011](0011-contract-compatibility.md)、[ADR 0014](0014-process-isolated-script-runner.md)、[ADR 0016](0016-v1-ctx-pending-capabilities-deferred.md)、[Post-v1 开发路线](../post-v1-roadmap.md)、[OAuth authorization mock](../oauth-authorization-mock.md)
 
 ## 背景

@@ -2,6 +2,7 @@
 
 - 状态：`已接受（Python 范围见 ADR 0015）`
 - 日期：2026-09-18
+- 作者：@geeknonerd
 - 关联：[ADR 0001](0001-no-shared-state-in-v1.md)、[ADR 0002](0002-route-model-only-in-v1.md)、[架构设计最佳实践调研](../../research/architecture-best-practices.md)
 
 ## 背景

@@ -2,6 +2,7 @@
 
 - 状态：`已接受`
 - 日期：2026-09-30
+- 作者：@geeknonerd
 - 关联：[ADR 0003](0003-script-first-multi-runtime.md)、[ADR 0004](0004-host-functions-only-sandbox.md)、[ADR 0011](0011-contract-compatibility.md)、[ADR 0014](0014-process-isolated-script-runner.md)、[产品功能定义](../product-definition.md)、[脚本运行时选型调研](../../research/script-runtime-selection.md)
 
 ## 背景
