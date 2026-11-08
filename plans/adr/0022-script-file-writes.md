@@ -35,7 +35,7 @@ writable = true
 write_max_bytes = 20971520
 ```
 
-- `files.writable` 是布尔值，默认 `false`。关闭时任何写入 API 都抛可捕获的 `file_write_disabled`，不触碰磁盘。
+- `files.writable` 是布尔值，默认 `false`。关闭时，通过参数校验的写入调用都抛可捕获的 `file_write_disabled`，不触碰磁盘。接口参数校验（类型、稠密字节范围、单次 8 MiB 上限）先于启用状态检查，因此关闭时被拒绝的参数仍报告各自的错误码。
 - `files.write_max_bytes` 是每请求成功写入字节预算，默认 20 MiB，必须是正整数。
 - 启用写入后，`root` 内的普通文件都可能被覆盖。需要保持 fixture 不可变的部署不应启用写入，或为其配置独立的 root。
 - 领域术语从 `Static file root` 改为 `File root`；配置键 `files.root` 不变。
@@ -93,7 +93,7 @@ interface SdFile {
 
 ### 日志
 
-- 每次写入追加到 `file_calls`，`api` 为 `file.writeText` 或 `file.writeBytes`，成功时记录 `bytes` 与 `duration_ms`，失败时记录稳定 `error`。
+- 每次到达宿主的写入尝试追加到 `file_calls`，`api` 为 `file.writeText` 或 `file.writeBytes`，成功时记录 `bytes` 与 `duration_ms`，失败时记录稳定 `error`。在脚本侧完成、尚未跨过宿主桥的参数拒绝（类型错误、桥前尺寸/编码检查）不产生记录，与 `ctx.http.get` 对桥前参数错误的处理一致。
 - 文件路径、文件内容、客户端文件名与临时文件名绝不写入日志。
 
 ## 后果

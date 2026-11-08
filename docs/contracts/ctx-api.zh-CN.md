@@ -76,8 +76,8 @@
   未捕获的文件错误是普通脚本错误（500 `script_error`）；宿主绝不把缺失文件自动映射为 404。
 - `ctx.file.stream(path)` 打开根内的一个文件，返回不透明、只能消费一次的 handle，且不带任何可读属性。该 handle 仅可作为 `ctx.respond` 的 `body` 参数使用，打开阶段的失败码与缓冲读取相同。
 - `ctx.file.writeText(path, text)` 与 `ctx.file.writeBytes(path, bytes)` 在同一个文件根内创建或原子替换一个普通文件，并返回成功写入的字节数。
-  - 只有 `[files] writable = true` 时才允许写入；否则在触碰磁盘前抛出可捕获的 `file_write_disabled`。每请求预算为 `files.write_max_bytes`（默认 20 MiB），单次调用最多写入 8 MiB。预算只累计成功写入；失败的写入不扣减预算。
-  - `writeText` 按严格 UTF-8 编码；含孤立 UTF-16 surrogate 的字符串抛出 `file_encoding_error`。`writeBytes` 接受 `Uint8Array`、`ArrayBuffer` 或元素为 `[0, 255]` 整数的稠密字节数组；非法输入属于普通脚本错误。
+  - 只有 `[files] writable = true` 时才允许写入；否则通过参数校验的写入调用在触碰磁盘前抛出可捕获的 `file_write_disabled`。每请求预算为 `files.write_max_bytes`（默认 20 MiB），单次调用最多写入 8 MiB。预算只累计成功写入；失败的写入不扣减预算。
+  - `writeText` 按严格 UTF-8 编码；含孤立 UTF-16 surrogate 的字符串抛出 `file_encoding_error`。`writeBytes` 接受 `Uint8Array`、`ArrayBuffer` 或元素为 `[0, 255]` 整数的稠密字节数组；非法输入属于普通脚本错误。接口参数校验与单次 8 MiB 上限检查先于启用状态检查，因此写入关闭时被拒绝的参数仍报告各自的错误；`file_write_disabled` 只表示宿主未尝试访问磁盘。
   - 路径遵循读取规则，但写入更严格：任何符号链接组件（包括最终目标）都被拒绝；路径必须指向文件，因此结尾的路径分隔符或最终 `.` 组件会被拒绝；只能替换普通文件；父目录必须已经存在，宿主绝不自动创建目录。Windows 上还拒绝 alternate data stream（任何 `:`）、保留设备名（含带扩展名与上标端口的形式）、结尾的点或空格，以及 Windows 不允许的字符。替换会断开位于目标路径上的硬链接，写入不会通过硬链接改写文件根外的 inode。
   - 写入通过目标目录内的临时文件加原子 rename 完成；宿主不调用 `fsync`。失败的写入保留旧目标并清理临时文件。并发写同一路径为 last-writer-wins；读取方只会看到旧文件或完整的新文件，不会看到半截 body。
   - 写入跨请求、跨 `serve` 重启保留，不自动清理；脚本之后抛错或客户端断开不会回滚已完成的写入。它是显式 artifact output，不是 Shared state：不提供原子读改写、CAS、事务、TTL 或跨实例协调，脚本不得用它替代 `ctx.state`。

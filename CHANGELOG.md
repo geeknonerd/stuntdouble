@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- *(docs)* clarify file-write error precedence and which failed writes appear in `file_calls` (ADR 0022)
+
 ## [1.9.0](https://github.com/geeknonerd/stuntdouble/compare/v1.8.2...v1.9.0) - 2026-11-07
 
 ### Added

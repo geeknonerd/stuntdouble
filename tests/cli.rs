@@ -4653,6 +4653,10 @@ try { ctx.file.writeText("blocked.txt", "x"); out.text = "no error"; }
 catch (error) { out.text = error.code; }
 try { ctx.file.writeBytes("blocked.bin", [1, 2]); out.bytes = "no error"; }
 catch (error) { out.bytes = error.code; }
+try { ctx.file.writeText("blocked.txt", "\uD800"); out.surrogate = "no error"; }
+catch (error) { out.surrogate = error.code; }
+try { ctx.file.writeBytes("blocked.bin", [256]); out.badByte = "no error"; }
+catch (error) { out.badByte = error.name; }
 ctx.respond(200, {}, JSON.stringify(out));
 "#;
     let (response, _) = serve_fixture_dir(dir.path(), script, |port| {
@@ -4662,6 +4666,10 @@ ctx.respond(200, {}, JSON.stringify(out));
     let json: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
     assert_eq!(json["text"], "file_write_disabled");
     assert_eq!(json["bytes"], "file_write_disabled");
+    // Argument validation runs before the writable check, so a rejected
+    // argument keeps its own error instead of masking as file_write_disabled.
+    assert_eq!(json["surrogate"], "file_encoding_error");
+    assert_eq!(json["badByte"], "TypeError");
     assert!(!dir.path().join("files/blocked.txt").exists());
     assert!(!dir.path().join("files/blocked.bin").exists());
 }

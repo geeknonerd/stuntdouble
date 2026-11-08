@@ -138,7 +138,8 @@ interface SdFile {
   /**
    * Creates or atomically replaces one regular file under the file root and
    * returns the UTF-8 byte length written. Requires `[files] writable = true`;
-   * otherwise throws `file_write_disabled`. The path must be relative, must
+   * otherwise a validated call throws `file_write_disabled`. Argument
+   * validation runs before the writable check. The path must be relative, must
    * name a file, must not contain `..`, must not contain a symlink component,
    * and its parent directory must already exist. On Windows, alternate data
    * streams, reserved device names, trailing dots or spaces, and
