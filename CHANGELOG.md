@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.2](https://github.com/geeknonerd/stuntdouble/compare/v1.9.1...v1.9.2) - 2026-11-10
+
+### Other
+
+- *(deps)* bump toml from 1.1.8+spec-1.1.0 to 1.2.0+spec-1.1.0 ([#234](https://github.com/geeknonerd/stuntdouble/pull/234))
+- *(deps)* bump the actions group with 5 updates ([#235](https://github.com/geeknonerd/stuntdouble/pull/235))
+- *(deps)* bump ureq from 3.5.0 to 3.5.1 ([#233](https://github.com/geeknonerd/stuntdouble/pull/233))
+
 ## [1.9.1](https://github.com/geeknonerd/stuntdouble/compare/v1.9.0...v1.9.1) - 2026-11-08
 
 ### Fixed
