@@ -1087,20 +1087,17 @@ const PERSIST_ATTEMPTS: usize = 3;
 #[cfg(not(windows))]
 const PERSIST_ATTEMPTS: usize = 2;
 
+#[cfg(not(windows))]
 fn is_link_like(metadata: &std::fs::Metadata) -> bool {
-    if metadata.file_type().is_symlink() {
-        return true;
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::FileTypeExt as _;
+    metadata.file_type().is_symlink()
+}
 
-        let file_type = metadata.file_type();
-        if file_type.is_symlink_dir() || file_type.is_symlink_file() {
-            return true;
-        }
-    }
-    false
+#[cfg(windows)]
+fn is_link_like(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::FileTypeExt as _;
+
+    let file_type = metadata.file_type();
+    file_type.is_symlink() || file_type.is_symlink_dir() || file_type.is_symlink_file()
 }
 
 #[cfg(windows)]
