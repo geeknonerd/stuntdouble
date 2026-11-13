@@ -39,7 +39,7 @@ impl CryptoError {
 }
 
 /// One decoded host crypto operation.
-#[derive(Debug, PartialEq)]
+#[derive(PartialEq)]
 pub(crate) enum CryptoCall {
     RandomBytes { byte_length: usize },
     Sha256 { input: Vec<u8> },
@@ -48,7 +48,7 @@ pub(crate) enum CryptoCall {
 }
 
 /// One successful host crypto result, before wire encoding.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub(crate) enum CryptoReply {
     Bytes(Vec<u8>),
     Equal(bool),
@@ -438,10 +438,10 @@ mod tests {
         // random_bytes failure injection
         let call =
             parse_crypto_call(&json!({ "op": "random_bytes", "byte_length": 16 })).expect("parse");
-        assert_eq!(
-            execute_crypto_with_entropy(call, &FailingEntropy).expect_err("entropy failure"),
-            CryptoError::RandomUnavailable
-        );
+        let error = execute_crypto_with_entropy(call, &FailingEntropy)
+            .err()
+            .expect("entropy failure");
+        assert_eq!(error, CryptoError::RandomUnavailable,);
 
         // sha256 string
         let call = parse_crypto_call(&json!({
@@ -464,9 +464,6 @@ mod tests {
             "right": { "type": "string", "value": "tokenA" }
         }))
         .expect("parse timing_safe_equal");
-        assert_eq!(
-            execute_crypto(call).expect("timing_safe_equal"),
-            CryptoReply::Equal(true)
-        );
+        assert!(matches!(execute_crypto(call), Ok(CryptoReply::Equal(true))));
     }
 }

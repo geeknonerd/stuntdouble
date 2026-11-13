@@ -718,7 +718,6 @@ impl UpstreamAccess {
 }
 
 /// Parsed bridge payload; unknown keys are rejected before this point.
-#[derive(Debug)]
 struct GetCall {
     url: String,
     timeout: Option<Duration>,
@@ -726,7 +725,6 @@ struct GetCall {
 
 /// Parsed `ctx.http.pipe` payload: the client status and headers are fixed
 /// before the upstream body is handed to the HTTP layer.
-#[derive(Debug)]
 struct PipeCall {
     url: String,
     status: Option<u16>,
@@ -734,7 +732,6 @@ struct PipeCall {
 }
 
 /// One decoded `ctx.http.get` call, with its call-chain slot already opened.
-#[derive(Debug)]
 pub(crate) struct PreparedGet {
     call: Result<GetCall, Error>,
     index: usize,
@@ -742,7 +739,6 @@ pub(crate) struct PreparedGet {
 }
 
 /// One decoded `ctx.http.pipe` call, with its call-chain slot already opened.
-#[derive(Debug)]
 pub(crate) struct PreparedPipe {
     call: Result<PipeCall, Error>,
     index: usize,

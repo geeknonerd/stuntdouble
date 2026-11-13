@@ -56,7 +56,6 @@ impl FileOp {
 }
 
 /// One decoded `ctx.file` call.
-#[derive(Debug)]
 #[allow(clippy::enum_variant_names)]
 pub(crate) enum FileCall {
     ReadText {
@@ -129,7 +128,6 @@ impl FileCall {
 }
 
 /// One successful file or upload operation, before wire encoding.
-#[derive(Debug)]
 pub(crate) enum FileReply {
     Text(String),
     Bytes(Vec<u8>),
@@ -555,7 +553,6 @@ impl UploadOp {
 }
 
 /// One decoded `ctx.request.files[i]` call.
-#[derive(Debug)]
 pub(crate) struct UploadCall {
     op: UploadOp,
     path: PathBuf,
@@ -839,13 +836,7 @@ impl FileAccess {
 
     /// Open one `ctx.file.stream` body and register it under a fresh handle.
     fn open_stream(&self, path: &str, index: usize, started: Instant) -> Result<u64, Error> {
-        let (file, size) = match self.open(path) {
-            Ok(opened) => opened,
-            Err(error) => {
-                finish_call(&self.calls, index, started, None, Some(error.code()));
-                return Err(error);
-            }
-        };
+        let (file, size) = self.open(path)?;
         let call = Pending::new(self.calls.clone(), index, started);
         let body = FileBody {
             file,
@@ -1804,6 +1795,20 @@ mod tests {
             assert_eq!(result["code"], "file_path_invalid", "path: {path}");
         }
         assert!(!dir.path().join("report.txt").exists());
+    }
+
+    #[test]
+    fn failed_file_stream_records_one_call() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (access, calls) = write_access(dir.path(), false, 1024);
+
+        let result = access.call(&json!({ "op": "stream", "path": "missing.bin" }));
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["code"], "file_not_found");
+        let calls = calls.snapshot();
+        assert_eq!(calls.len(), 1, "calls: {calls:?}");
+        assert_eq!(calls[0]["api"], "file.stream");
+        assert_eq!(calls[0]["error"], "file_not_found");
     }
 
     #[test]

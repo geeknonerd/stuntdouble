@@ -1802,7 +1802,7 @@ enum HostCall {
     Crypto(crypto::CryptoCall),
 }
 
-/// One successful host result, before JSON Lines encoding.
+/// One parent-side host result, before JSON Lines encoding.
 enum HostReply {
     HttpGet(upstream::Response),
     HttpPipe {
@@ -1988,11 +1988,14 @@ impl HostState {
             BridgeName::HttpPipe => Some(Ok(HostCall::HttpPipe(
                 self.upstream.as_ref()?.prepare_pipe(payload),
             ))),
-            BridgeName::File => Some(
-                files::FileCall::parse(payload)
-                    .map(HostCall::File)
-                    .map_err(BridgeError::from),
-            ),
+            BridgeName::File => {
+                self.files.as_ref()?;
+                Some(
+                    files::FileCall::parse(payload)
+                        .map(HostCall::File)
+                        .map_err(BridgeError::from),
+                )
+            }
             BridgeName::Upload => {
                 let Some(host) = self.uploads.as_ref() else {
                     return Some(Err(BridgeError::standard(
@@ -3026,6 +3029,18 @@ mod tests {
                 "kind": null,
                 "message": "ctx.http.get: url must be a string"
             }))
+        );
+    }
+
+    #[test]
+    fn missing_file_capability_is_a_protocol_error_before_payload_parse() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut host = test_host_state(dir.path());
+        host.files = None;
+
+        assert_eq!(
+            host.dispatch(BridgeName::File, &json!({ "malformed": true })),
+            None
         );
     }
 
