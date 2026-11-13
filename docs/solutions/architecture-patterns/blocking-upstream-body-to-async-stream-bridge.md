@@ -1,7 +1,7 @@
 ---
 title: "Bridge blocking upstream reads into an async streaming response"
 date: 2026-09-21
-last_updated: 2026-10-23
+last_updated: 2026-11-13
 category: architecture-patterns
 module: upstream HTTP streaming bridge
 problem_type: architecture_pattern
@@ -31,7 +31,7 @@ T11（issue #52）已落地本地文件流：`ctx.file.stream` 复用「由宿�
 实现分三层：
 
 1. JS prelude 校验调用，只记录 stream 标记与客户端 status/headers（`src/script.rs:748-766`）。
-2. 原生桥接调用 `UpstreamAccess::pipe`，把上游 `PipeBody` 存进父进程请求级的 `HostState.pipe`（不再是线程局部存储），只把 status/header 元数据返回给 worker（`src/script.rs:1115-1121`、`src/script.rs:1604-1620`）。
+2. 原生桥接先在 `HostState::decode_call` 经 `UpstreamAccess::prepare_pipe` 解码（`src/script.rs:1988-1990`、`src/upstream.rs:363-375`），随后在 `HostState::execute_call` 调用 `UpstreamAccess::pipe`，把上游 `PipeBody` 存进父进程请求级的 `HostState.pipe`（不再是线程局部存储），只把 status/header 元数据返回给 worker（`src/script.rs:2037-2045`、`src/upstream.rs:383-395`）。
 3. worker 成功退出后，`finish_outcome` 用 `HostState::take_streams()` 取走 stream，`parse_script_body` 把它转换为 `ResponseBody::Stream`，axum 在 `server::stream_body` 用 `Body::from_stream(ReceiverStream::new(receiver))` 适配（`src/script.rs:1480-1539`、`src/script.rs:1640-1648`、`src/script.rs:2053-2063`、`src/server.rs:860-881`）。
 
 公开契约给出可观察的结果：body 直接流向客户端，从不进入脚本堆，并保留上游 2xx 状态与相关 range header（`docs/contracts/ctx-api.md:52-59`）。ADR 记录了这条路径为何偏离 `ctx.http.get` 的普通「HTTP 响应即数据」规则（`plans/adr/0005-upstream-failure-semantics.md:45-56`）。
@@ -42,7 +42,7 @@ T11（issue #52）已落地本地文件流：`ctx.file.stream` 复用「由宿�
 
 ### 1. 让字节流留在 JavaScript 堆之外
 
-`ctx.http.pipe` 不是返回字节的 API。它的 JS wrapper 校验 `{status, headers}`、调用原生桥接，并记录 `{stream: true, status, headers}`；它从不接收 body 字节（`src/script.rs:748-766`）。worker 侧原生回调只把调用转交给父进程（`src/script.rs:1115-1121`）；父进程的 `HostState::dispatch` 把 `PipeBody`（上游 stream 与调用终止句柄）存进请求级 `HostState.pipe`，只把 status/header 的 JSON 返回 worker（`src/script.rs:1604-1620`）。`ResponseBody::Stream` 在文档注释中明确写着：把帧从上游连接搬到客户端，且不进入 JavaScript 堆（`src/script.rs:149-156`）。
+`ctx.http.pipe` 不是返回字节的 API。它的 JS wrapper 校验 `{status, headers}`、调用原生桥接，并记录 `{stream: true, status, headers}`；它从不接收 body 字节（`src/script.rs:748-766`）。worker 侧原生回调只把调用转交给父进程（`src/script.rs:1115-1121`）；父进程的 `HostState::execute_call` 在 `HostCall::HttpPipe` 分支把 `PipeBody`（上游 stream 与调用终止句柄）存进请求级 `HostState.pipe`，`HostState::dispatch` 只做 JSON wire 的 decode → execute → encode（`src/script.rs:1971-1977`、`:2037-2045`），只把 status/header 的 JSON 返回 worker。`ResponseBody::Stream` 在文档注释中明确写着：把帧从上游连接搬到客户端，且不进入 JavaScript 堆（`src/script.rs:149-156`）。
 
 宿主侧表示是带类型的 receiver，而不是 `Vec<u8>` 或 JavaScript 数组：
 
@@ -55,13 +55,13 @@ pub type BodyStream =
 
 ### 2. 在暴露 body 之前先定下响应头
 
-`UpstreamAccess::pipe` 有意按这个顺序执行（`src/upstream.rs:353-410`）：
+`ctx.http.pipe` 先在 `UpstreamAccess::prepare_pipe` 中开启调用记录并解析载荷（`src/upstream.rs:363-375`）；解析成功后，`UpstreamAccess::pipe` / `pipe_inner` 有意按这个顺序执行（`src/upstream.rs:383-445`）：
 
-1. 解析并校验 URL，包含首次 allowlist 检查（`src/upstream.rs:360-363`）。
-2. 跟随重定向并取得上游响应头（`src/upstream.rs:367-374`）。
-3. 在创建 body channel 之前拒绝最终非 2xx 状态（`src/upstream.rs:377-379`）。
-4. 合并脚本 header 与上游 range 元数据，然后选定客户端状态（`src/upstream.rs:381-398`）。
-5. 创建有界 channel，把阻塞 reader 移入 `spawn_blocking(pump_body)`，返回 `PipeResponse`（`src/upstream.rs:399-409`）。
+1. 解析并校验 URL，包含首次 allowlist 检查（`src/upstream.rs:403-406`）。
+2. 跟随重定向并取得上游响应头（`src/upstream.rs:410-418`）。
+3. 在创建 body channel 之前拒绝最终非 2xx 状态（`src/upstream.rs:419-423`）。
+4. 合并脚本 header 与上游 range 元数据，然后选定客户端状态（`src/upstream.rs:425-442`）。
+5. 创建有界 channel，把阻塞 reader 移入 `spawn_blocking(pump_body)`，返回 `PipeResponse`（`src/upstream.rs:443-453`）。
 
 状态默认值就是上游的 2xx 状态：`client_status.unwrap_or(upstream_status)`（`src/upstream.rs:398`）。因此普通下载答 200，而 Range 响应答 206 时保留 206；测试 `ctx_http_pipe_defaults_to_the_upstream_2xx_status` 用 207 响应证明这是透传而不是硬编码 200（`tests/cli.rs:5527-5540`）。契约记录了同一条规则（`docs/contracts/ctx-api.md:55`）。
 

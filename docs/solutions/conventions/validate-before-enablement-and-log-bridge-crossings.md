@@ -63,12 +63,13 @@ var result = callBridge(__sd_file, { op: "writeText", ... }, label);
 
 ### 3. 调用日志的边界是桥，不是磁盘
 
-`file_calls` 的记录槽位在宿主 `FileAccess::call` 进入后创建（`src/files.rs:725`），早于载荷字段校验（`src/files.rs:743-757`）。因此：
+`file_calls` 的记录槽位在宿主 `FileAccess::execute` 进入后创建（`src/files.rs:790-792`），早于 `text` / `bytes_base64` 等写载荷的可用性校验与解码（`src/files.rs:811-823`）。`op` / `path` 的 wire 形状先由 `FileCall::parse` 解码，不在这一步创建槽位。因此：
 
-- 跨过桥但载荷非法的调用**会**入账，错误码为 `script_error`；
+- 跨过桥、`op` / `path` 可识别但写载荷细节非法的调用**会**入账，错误码为 `script_error`；
+- `op` / `path` 本身无法解码的调用**不会**入账；
 - 在脚本侧被前置校验拦下、从未调用 `callBridge` 的调用**不会**入账。
 
-这与 `ctx.http.get` 的既有口径一致：`UpstreamAccess::get` 先 `begin_call`（`src/upstream.rs:282-283`），再 `parse_get_call`（`src/upstream.rs:296-297`，校验实现自 `src/upstream.rs:545`）；而 `httpGet` 的 URL / `timeout_ms` 校验在 `src/script.rs:788-800` 的桥之前完成。
+这与 `ctx.http.get` 的既有口径一致：`UpstreamAccess::prepare_get` 先 `begin_call`（`src/upstream.rs:285-291`），再 `parse_get_call`（校验实现自 `src/upstream.rs:587`）；而 `httpGet` 的 URL / `timeout_ms` 校验在 `src/script.rs:788-803` 的桥之前完成。
 
 这不是“漏记”，而是把日志定义成**宿主边界穿越账本**。它带来两个可断言的性质：条目数等于真正到达宿主的调用数；每条记录的错误码都来自宿主侧，脚本错误码不会伪装成宿主错误码。ADR 0022 与 CLI 契约已按此表述（`plans/adr/0022-script-file-writes.md:98`、`docs/contracts/cli.md:60`）。
 
@@ -116,12 +117,12 @@ ctx.file.writeText("a.txt", "\uD800") → file_write_disabled   （应为 file_e
                          （不入 file_calls，从未跨桥）
         │ 校验通过
         ▼
-callBridge ──► FileAccess::call ──► begin_call（入账）
+callBridge ──► FileAccess::execute ──► begin_call（入账）
                               │ 载荷仍非法 ──► script_error（已入账）
                               │ 合法但未启用 ──► file_write_disabled（已入账，未碰磁盘）
                               │ 已启用 ──► 落盘或 file_io_error（已入账）
 ```
 
-对应的断言：`tests/cli.rs:4669-4674` 锁住第一行的两个错误码与“文件未创建”；`src/files.rs:1302-1317` 锁住第三行的 `file_write_disabled` 与日志条目。
+对应的断言：`tests/cli.rs:4669-4674` 锁住第一行的两个错误码与“文件未创建”；`src/files.rs:1373-1388` 锁住第三行的 `file_write_disabled` 与日志条目。
 
-相关文档：[脚本文件写入是 artifact output 而非 Shared state](script-file-writes-are-artifacts-not-shared-state.md) 覆盖写入语义、路径分叉与原子替换；[宿主边界输入分类](host-boundary-fail-closed-input-classification.md) 覆盖读取侧的缺失/畸形/不可用三态；[脚本侧预检与宿主权威校验](host-authoritative-state-bridge-validation.md) 覆盖状态提交的同类分工；[上游阻塞 body 到异步流的桥](../architecture-patterns/blocking-upstream-body-to-async-stream-bridge.md) 覆盖流式响应的定稿时机（`begin_call` 先于参数校验的实现见 `src/upstream.rs:282-283`）。
+相关文档：[脚本文件写入是 artifact output 而非 Shared state](script-file-writes-are-artifacts-not-shared-state.md) 覆盖写入语义、路径分叉与原子替换；[宿主边界输入分类](host-boundary-fail-closed-input-classification.md) 覆盖读取侧的缺失/畸形/不可用三态；[脚本侧预检与宿主权威校验](host-authoritative-state-bridge-validation.md) 覆盖状态提交的同类分工；[上游阻塞 body 到异步流的桥](../architecture-patterns/blocking-upstream-body-to-async-stream-bridge.md) 覆盖流式响应的定稿时机（`begin_call` 先于参数校验的实现见 `src/upstream.rs:285-291`）。

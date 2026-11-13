@@ -1,7 +1,7 @@
 ---
 title: Keep host-boundary failures distinct from absence and validate before blocking
 date: 2026-09-23
-last_updated: 2026-11-08
+last_updated: 2026-11-13
 category: conventions
 module: host boundary input validation
 problem_type: convention
@@ -99,7 +99,7 @@ enum RangeRequest<'a> {
 
 T12 已把同一风险带到上传路径并落地：按产品定义，上传由宿主持有 multipart 解析、默认 20MB（可配置）大小上限、每请求独立临时目录并在请求结束清理（`plans/product-definition.md:31`）；公开契约现已包含上传存储与限制（`docs/contracts/ctx-api.md:72-76`）。T12 的实现按同样的原则落地：区分了声明长度与流式账目，`invalid_multipart` 与 `upload_too_large` 是两个稳定类别，临时文件写入失败映射为 500 `upload_io_error`；后续实现必须继续避免“缺 Content-Length 就当 0”“multipart 畸形与超限都当 400 或都当 413”“临时文件写满后继续读入内存”这类同类降级。本文件中的“缺失/合法/畸形”三态和“执行前先检查对象/资源类型”适用于该切片；上传侧的大小上限分层结论见 `docs/solutions/conventions/separate-multipart-data-budget-from-raw-body-limit.md`。
 
-此外，错误可见性影响可观测性：文件调用日志需要完成记录，脚本才能捕获错误并继续；如果 FIFO 阻塞到全局脚本超时，`file_calls` 的完成记录也不能按正常路径收尾。当前 `open_stream` 的失败分支会结束该次文件调用并记录错误码（`src/files.rs:774-781`），这与快速、可分类的失败目标一致。
+此外，错误可见性影响可观测性：文件调用日志需要完成记录，脚本才能捕获错误并继续；如果 FIFO 阻塞到全局脚本超时，`file_calls` 的完成记录也不能按正常路径收尾。当前 `FileAccess::execute` 的 stream 错误分支会在 `open_stream` 返回失败时结束该次文件调用并记录错误码（`src/files.rs:802-809`），这与快速、可分类的失败目标一致。
 
 ## When to Apply
 
