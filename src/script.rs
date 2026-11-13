@@ -1922,11 +1922,15 @@ fn parse_state_ttl(payload: &Json) -> Result<Option<Duration>, state::StateError
     let Some(ttl_ms) = payload.get("ttl_ms") else {
         return Ok(None);
     };
-    let ttl_ms = ttl_ms
-        .as_u64()
-        .filter(|ttl_ms| *ttl_ms > 0 && *ttl_ms <= state::MAX_TTL_MS)
-        .ok_or(state::StateError::InvalidInput)?;
+    let ttl_ms = ttl_ms.as_u64().ok_or(state::StateError::InvalidInput)?;
     Ok(Some(Duration::from_millis(ttl_ms)))
+}
+
+fn reject_read_ttl(payload: &Json) -> Result<(), state::StateError> {
+    if payload.get("ttl_ms").is_some() {
+        return Err(state::StateError::InvalidInput);
+    }
+    Ok(())
 }
 
 fn parse_state_command(payload: &Json) -> Result<state::StateCommand, state::StateError> {
@@ -1939,17 +1943,24 @@ fn parse_state_command(payload: &Json) -> Result<state::StateCommand, state::Sta
         .and_then(Json::as_str)
         .ok_or(state::StateError::InvalidInput)?
         .to_string();
-    let ttl = parse_state_ttl(payload)?;
     match operation {
-        "get" => Ok(state::StateCommand::Get { key }),
+        "get" => {
+            reject_read_ttl(payload)?;
+            Ok(state::StateCommand::Get { key })
+        }
         "set" => {
+            let ttl = parse_state_ttl(payload)?;
             let Some(value) = payload.get("value").cloned() else {
                 return Err(state::StateError::InvalidInput);
             };
             Ok(state::StateCommand::Set { key, value, ttl })
         }
-        "take" => Ok(state::StateCommand::Take { key }),
+        "take" => {
+            reject_read_ttl(payload)?;
+            Ok(state::StateCommand::Take { key })
+        }
         "setIfAbsent" => {
+            let ttl = parse_state_ttl(payload)?;
             let Some(value) = payload.get("value").cloned() else {
                 return Err(state::StateError::InvalidInput);
             };
@@ -2748,6 +2759,19 @@ mod tests {
                 "message": "state_invalid_input"
             })
         );
+        for operation in ["get", "take"] {
+            assert_eq!(
+                dispatch_state(
+                    &shared_state,
+                    &json!({ "op": operation, "key": "key", "ttl_ms": 1000 })
+                ),
+                json!({
+                    "ok": false,
+                    "code": "state_invalid_input",
+                    "message": "state_invalid_input"
+                })
+            );
+        }
         assert_eq!(
             dispatch_state(
                 &shared_state,
