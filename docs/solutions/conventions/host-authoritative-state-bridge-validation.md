@@ -47,7 +47,7 @@ prelude 只保留可信的编译期占位符；request、env 和内部标记必�
 
 worker 侧仍应做无损 JSON 预检，因为宿主只收到序列化后的 JSON，无法还原已经被 `undefined`、函数、`NaN` 或孤立 surrogate 丢弃的原始值。但预检不能被当作安全边界：宿主在提交前重新检查 operation、key、TTL、深度、单值与总容量，失败时不改变旧值。
 
-单值大小必须由宿主重新编码计量，而不是使用 worker 上报的 size 或 `JSON.stringify` 的长度。当前 `Store::validate_value` 先执行宿主深度检查，再用 `serde_json::to_vec` 计算 compact bytes（`src/state.rs:180-184`）；深度上限的递归检查见 `src/state.rs:239-255`。状态提交路径在单个锁内完成存在性判断、容量计算与写入（`src/script.rs:1681-1725`、`src/state.rs:107-153`）。
+单值大小必须由宿主重新编码计量，而不是使用 worker 上报的 size 或 `JSON.stringify` 的长度。当前 `Store::validate_value` 先执行宿主深度检查，再用 `serde_json::to_vec` 计算 compact bytes（`src/state.rs:239-246`）；深度上限的递归检查见 `src/state.rs:298-315`。状态提交路径在 `SharedState::execute` 的单个锁内完成，存在性判断、容量计算与写入分别由 `Store::set_if_absent` 与 `Store::commit_write` 承担（`src/state.rs:43-56`、`src/state.rs:166-215`）。
 
 ### 4. 状态写入的提交点独立于脚本最终结果
 
@@ -62,7 +62,7 @@ worker 侧仍应做无损 JSON 预检，因为宿主只收到序列化后的 JSO
 - 替换属性检查、数字内建与正则方法后，稀疏数组、`NaN`、`-0` 和额外数组属性仍被拒绝（`tests/cli.rs:2222`）。
 - 同一个 number 在 JS 与宿主 encoder 下词法长度不同，由宿主口径决定接受或拒绝（`tests/cli.rs:2330`）。
 - 并发 `take` / `setIfAbsent` 同时断言完整 HTTP 状态、完整 body，并在之后回读宿主最终值；不能只收集含 `"won"` 的响应（`tests/cli.rs:1959`）。
-- 失败写入后，旧值与旧 TTL 仍存在（`src/state.rs:351`）。
+- 失败写入后，旧值与旧 TTL 仍存在（`src/state.rs:495`）。
 - 宿主自动生成的请求日志不记录 state key/value；脚本通过 `ctx.log.*` 主动记录的内容仍由脚本自行脱敏。
 
 ## Why This Matters

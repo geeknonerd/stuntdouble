@@ -5,7 +5,7 @@ use crate::config::Config;
 use crate::files;
 use crate::matcher::{allowed_methods, match_route};
 use crate::script::{self, RequestSnapshot, ResponseBody, ScriptResponse};
-use crate::state::{self, SharedState};
+use crate::state::SharedState;
 use crate::{request_log::elapsed_ms, upstream};
 use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Request, State};
@@ -75,7 +75,7 @@ impl AppState {
             verbose,
             sequence: AtomicU64::new(0),
             script_workers: Arc::new(tokio::sync::Semaphore::new(script_worker_limit())),
-            shared_state: state::new_shared_state(),
+            shared_state: SharedState::new(),
         }
     }
 
@@ -300,7 +300,7 @@ impl AppState {
                                 upstream: self.config.upstream.clone(),
                                 files_config: self.config.files.clone(),
                                 uploads,
-                                shared_state: Arc::clone(&self.shared_state),
+                                shared_state: self.shared_state.clone(),
                                 worker_slot: slot,
                                 match_allowed_methods,
                             },

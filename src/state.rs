@@ -14,14 +14,78 @@ pub(crate) const MAX_TTL_MS: u64 = 604_800_000;
 pub(crate) const MAX_VALUE_DEPTH: usize = 32;
 
 /// One state store shared by every script worker in a single server instance.
-pub(crate) type SharedState = Arc<Mutex<Store>>;
-
-/// Create the empty state store for one server instance.
-pub(crate) fn new_shared_state() -> SharedState {
-    Arc::new(Mutex::new(Store::new(Arc::new(RealClock))))
+///
+/// The mutex and the `Store` are implementation details: callers submit one
+/// [`StateCommand`] and receive one [`StateReply`], so TTL, capacity, and
+/// atomicity stay in this module.
+#[derive(Clone)]
+pub(crate) struct SharedState {
+    inner: Arc<Mutex<Store>>,
 }
 
-pub(crate) trait Clock: Send + Sync {
+impl SharedState {
+    /// Create the empty state store for one server instance.
+    #[must_use]
+    pub(crate) fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(Store::new(Arc::new(RealClock)))),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_clock(clock: Arc<dyn Clock>) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(Store::new(clock))),
+        }
+    }
+
+    /// Execute one atomic state operation.
+    pub(crate) fn execute(&self, command: StateCommand) -> Result<StateReply, StateError> {
+        let mut store = self.inner.lock().map_err(|_| StateError::Internal)?;
+        match command {
+            StateCommand::Get { key } => store.get(&key).map(StateReply::Value),
+            StateCommand::Set { key, value, ttl } => {
+                store.set(&key, value, ttl)?;
+                Ok(StateReply::Written)
+            }
+            StateCommand::Take { key } => store.take(&key).map(StateReply::Value),
+            StateCommand::SetIfAbsent { key, value, ttl } => store
+                .set_if_absent(&key, value, ttl)
+                .map(StateReply::Stored),
+        }
+    }
+}
+
+/// One command from the host bridge into the Shared state store.
+#[derive(Debug, PartialEq)]
+pub(crate) enum StateCommand {
+    Get {
+        key: String,
+    },
+    Set {
+        key: String,
+        value: Json,
+        ttl: Option<Duration>,
+    },
+    Take {
+        key: String,
+    },
+    SetIfAbsent {
+        key: String,
+        value: Json,
+        ttl: Option<Duration>,
+    },
+}
+
+/// One successful state operation result.
+#[derive(Debug, PartialEq)]
+pub(crate) enum StateReply {
+    Value(Option<Json>),
+    Written,
+    Stored(bool),
+}
+
+trait Clock: Send + Sync {
     fn now(&self) -> Instant;
 }
 
@@ -50,7 +114,7 @@ impl StateError {
     }
 }
 
-pub(crate) struct Store {
+struct Store {
     clock: Arc<dyn Clock>,
     entries: HashMap<String, Entry>,
     used_bytes: usize,
@@ -72,7 +136,7 @@ impl Store {
         }
     }
 
-    pub(crate) fn get(&mut self, key: &str) -> Result<Option<Json>, StateError> {
+    fn get(&mut self, key: &str) -> Result<Option<Json>, StateError> {
         self.validate_key(key)?;
         let now = self.clock.now();
         if self.remove_if_expired(key, now)? {
@@ -81,12 +145,7 @@ impl Store {
         Ok(self.entries.get(key).map(|entry| entry.value.clone()))
     }
 
-    pub(crate) fn set(
-        &mut self,
-        key: &str,
-        value: Json,
-        ttl: Option<Duration>,
-    ) -> Result<(), StateError> {
+    fn set(&mut self, key: &str, value: Json, ttl: Option<Duration>) -> Result<(), StateError> {
         self.validate_key(key)?;
         let value_bytes = self.validate_value(&value)?;
         self.validate_ttl(ttl)?;
@@ -95,7 +154,7 @@ impl Store {
         self.commit_write(key, value, value_bytes, ttl, now)
     }
 
-    pub(crate) fn take(&mut self, key: &str) -> Result<Option<Json>, StateError> {
+    fn take(&mut self, key: &str) -> Result<Option<Json>, StateError> {
         self.validate_key(key)?;
         let now = self.clock.now();
         if self.remove_if_expired(key, now)? {
@@ -104,7 +163,7 @@ impl Store {
         Ok(self.remove_entry(key)?.map(|entry| entry.value))
     }
 
-    pub(crate) fn set_if_absent(
+    fn set_if_absent(
         &mut self,
         key: &str,
         value: Json,
@@ -290,113 +349,196 @@ mod tests {
         }
     }
 
+    fn state_with_clock(clock: &Arc<ManualClock>) -> SharedState {
+        SharedState::with_clock(Arc::clone(clock) as Arc<dyn Clock>)
+    }
+
+    fn set(
+        state: &SharedState,
+        key: &str,
+        value: Json,
+        ttl: Option<Duration>,
+    ) -> Result<(), StateError> {
+        match state.execute(StateCommand::Set {
+            key: key.to_string(),
+            value,
+            ttl,
+        })? {
+            StateReply::Written => Ok(()),
+            other => panic!("unexpected set reply: {other:?}"),
+        }
+    }
+
+    fn get(state: &SharedState, key: &str) -> Result<Option<Json>, StateError> {
+        match state.execute(StateCommand::Get {
+            key: key.to_string(),
+        })? {
+            StateReply::Value(value) => Ok(value),
+            other => panic!("unexpected get reply: {other:?}"),
+        }
+    }
+
+    fn take(state: &SharedState, key: &str) -> Result<Option<Json>, StateError> {
+        match state.execute(StateCommand::Take {
+            key: key.to_string(),
+        })? {
+            StateReply::Value(value) => Ok(value),
+            other => panic!("unexpected take reply: {other:?}"),
+        }
+    }
+
+    fn set_if_absent(
+        state: &SharedState,
+        key: &str,
+        value: Json,
+        ttl: Option<Duration>,
+    ) -> Result<bool, StateError> {
+        match state.execute(StateCommand::SetIfAbsent {
+            key: key.to_string(),
+            value,
+            ttl,
+        })? {
+            StateReply::Stored(stored) => Ok(stored),
+            other => panic!("unexpected setIfAbsent reply: {other:?}"),
+        }
+    }
+
     #[test]
     fn ttl_expires_at_the_exact_boundary_and_reads_do_not_slide_it() {
         let clock = Arc::new(ManualClock::new(Instant::now()));
-        let mut store = Store::new(Arc::clone(&clock) as Arc<dyn Clock>);
-        store
-            .set(
-                "key",
-                serde_json::json!("value"),
-                Some(Duration::from_millis(100)),
-            )
-            .expect("set ttl");
+        let state = state_with_clock(&clock);
+        set(
+            &state,
+            "key",
+            serde_json::json!("value"),
+            Some(Duration::from_millis(100)),
+        )
+        .expect("set ttl");
 
         clock.advance(Duration::from_millis(60));
         assert_eq!(
-            store.get("key").expect("read before boundary"),
+            get(&state, "key").expect("read before boundary"),
             Some(serde_json::json!("value"))
         );
 
         clock.advance(Duration::from_millis(39));
         assert_eq!(
-            store.get("key").expect("read near boundary"),
+            get(&state, "key").expect("read near boundary"),
             Some(serde_json::json!("value"))
         );
 
         clock.advance(Duration::from_millis(1));
-        assert_eq!(store.get("key").expect("read at boundary"), None);
+        assert_eq!(get(&state, "key").expect("read at boundary"), None);
+    }
+
+    #[test]
+    fn state_store_rejects_out_of_range_ttl() {
+        let state = SharedState::new();
+
+        assert_eq!(
+            set(
+                &state,
+                "key",
+                serde_json::json!("value"),
+                Some(Duration::ZERO)
+            ),
+            Err(StateError::InvalidInput)
+        );
+        assert_eq!(
+            set(
+                &state,
+                "key",
+                serde_json::json!("value"),
+                Some(Duration::from_millis(MAX_TTL_MS + 1))
+            ),
+            Err(StateError::InvalidInput)
+        );
+        set(
+            &state,
+            "key",
+            serde_json::json!("value"),
+            Some(Duration::from_millis(MAX_TTL_MS)),
+        )
+        .expect("maximum ttl is accepted");
     }
 
     #[test]
     fn set_replaces_the_value_and_resets_the_ttl_origin() {
         let clock = Arc::new(ManualClock::new(Instant::now()));
-        let mut store = Store::new(Arc::clone(&clock) as Arc<dyn Clock>);
-        store
-            .set(
-                "key",
-                serde_json::json!("old"),
-                Some(Duration::from_millis(100)),
-            )
-            .expect("set old value");
+        let state = state_with_clock(&clock);
+        set(
+            &state,
+            "key",
+            serde_json::json!("old"),
+            Some(Duration::from_millis(100)),
+        )
+        .expect("set old value");
 
         clock.advance(Duration::from_millis(60));
-        store
-            .set(
-                "key",
-                serde_json::json!("new"),
-                Some(Duration::from_millis(100)),
-            )
-            .expect("replace value");
+        set(
+            &state,
+            "key",
+            serde_json::json!("new"),
+            Some(Duration::from_millis(100)),
+        )
+        .expect("replace value");
         clock.advance(Duration::from_millis(60));
         assert_eq!(
-            store.get("key").expect("new ttl is still live"),
+            get(&state, "key").expect("new ttl is still live"),
             Some(serde_json::json!("new"))
         );
         clock.advance(Duration::from_millis(40));
-        assert_eq!(store.get("key").expect("new ttl boundary"), None);
+        assert_eq!(get(&state, "key").expect("new ttl boundary"), None);
     }
 
     #[test]
     fn byte_capacity_and_failed_replacement_preserve_the_old_value_and_ttl() {
         let clock = Arc::new(ManualClock::new(Instant::now()));
-        let mut store = Store::new(Arc::clone(&clock) as Arc<dyn Clock>);
-        store
-            .set(
-                "seed",
-                serde_json::json!("old"),
-                Some(Duration::from_millis(100)),
-            )
-            .expect("seed expiring value");
+        let state = state_with_clock(&clock);
+        set(
+            &state,
+            "seed",
+            serde_json::json!("old"),
+            Some(Duration::from_millis(100)),
+        )
+        .expect("seed expiring value");
         let full_value = serde_json::json!("x".repeat(MAX_VALUE_BYTES - 2));
         for index in 0..511 {
-            store
-                .set(&format!("k{index:03}"), full_value.clone(), None)
+            set(&state, &format!("k{index:03}"), full_value.clone(), None)
                 .expect("fill total byte capacity");
         }
 
         assert_eq!(
-            store.set("seed", full_value, None),
+            set(&state, "seed", full_value, None),
             Err(StateError::CapacityExceeded)
         );
         clock.advance(Duration::from_millis(99));
         assert_eq!(
-            store.get("seed").expect("old value remains"),
+            get(&state, "seed").expect("old value remains"),
             Some(serde_json::json!("old"))
         );
         clock.advance(Duration::from_millis(1));
-        assert_eq!(store.get("seed").expect("old ttl remains"), None);
+        assert_eq!(get(&state, "seed").expect("old ttl remains"), None);
     }
 
     #[test]
     fn expired_entries_release_entry_capacity_before_a_write() {
         let clock = Arc::new(ManualClock::new(Instant::now()));
-        let mut store = Store::new(Arc::clone(&clock) as Arc<dyn Clock>);
+        let state = state_with_clock(&clock);
         for index in 0..MAX_ENTRIES {
-            store
-                .set(
-                    &format!("k{index}"),
-                    serde_json::json!(index),
-                    Some(Duration::from_millis(10)),
-                )
-                .expect("fill entry capacity");
+            set(
+                &state,
+                &format!("k{index}"),
+                serde_json::json!(index),
+                Some(Duration::from_millis(10)),
+            )
+            .expect("fill entry capacity");
         }
         clock.advance(Duration::from_millis(10));
-        store
-            .set("replacement", serde_json::json!("value"), None)
+        set(&state, "replacement", serde_json::json!("value"), None)
             .expect("expired entries release capacity");
         assert_eq!(
-            store.get("replacement").expect("new value"),
+            get(&state, "replacement").expect("new value"),
             Some(serde_json::json!("value"))
         );
     }
@@ -404,37 +546,34 @@ mod tests {
     #[test]
     fn take_releases_the_accounted_capacity() {
         let clock = Arc::new(ManualClock::new(Instant::now()));
-        let mut store = Store::new(Arc::clone(&clock) as Arc<dyn Clock>);
-        store
-            .set("key", serde_json::json!("value"), None)
-            .expect("set value");
-        assert!(store.used_bytes > 0);
+        let state = state_with_clock(&clock);
+        set(&state, "key", serde_json::json!("value"), None).expect("set value");
+        assert!(state.inner.lock().expect("state lock").used_bytes > 0);
 
         assert_eq!(
-            store.take("key").expect("take value"),
+            take(&state, "key").expect("take value"),
             Some(serde_json::json!("value"))
         );
-        assert_eq!(store.used_bytes, 0);
+        assert_eq!(state.inner.lock().expect("state lock").used_bytes, 0);
     }
 
     #[test]
     fn set_if_absent_treats_an_expired_key_as_absent() {
         let clock = Arc::new(ManualClock::new(Instant::now()));
-        let mut store = Store::new(Arc::clone(&clock) as Arc<dyn Clock>);
-        store
-            .set(
-                "key",
-                serde_json::json!("old"),
-                Some(Duration::from_millis(10)),
-            )
-            .expect("set expiring value");
+        let state = state_with_clock(&clock);
+        set(
+            &state,
+            "key",
+            serde_json::json!("old"),
+            Some(Duration::from_millis(10)),
+        )
+        .expect("set expiring value");
         clock.advance(Duration::from_millis(10));
 
-        assert!(store
-            .set_if_absent("key", serde_json::json!("new"), None)
+        assert!(set_if_absent(&state, "key", serde_json::json!("new"), None)
             .expect("replace expired key"));
         assert_eq!(
-            store.get("key").expect("new value"),
+            get(&state, "key").expect("new value"),
             Some(serde_json::json!("new"))
         );
     }
@@ -450,25 +589,97 @@ mod tests {
         }
 
         let clock = Arc::new(ManualClock::new(Instant::now()));
-        let mut store = Store::new(Arc::clone(&clock) as Arc<dyn Clock>);
-        store
-            .set("key", serde_json::json!("old"), None)
-            .expect("seed value");
+        let state = state_with_clock(&clock);
+        set(&state, "key", serde_json::json!("old"), None).expect("seed value");
 
         for depth in [33, 40] {
             assert_eq!(
-                store.set("key", nested_object(depth), None),
+                set(&state, "key", nested_object(depth), None),
                 Err(StateError::InvalidInput),
                 "depth {depth} must fail"
             );
             assert_eq!(
-                store.get("key").expect("read preserved value"),
+                get(&state, "key").expect("read preserved value"),
                 Some(serde_json::json!("old"))
             );
         }
 
-        store
-            .set("key", nested_object(MAX_VALUE_DEPTH), None)
-            .expect("maximum supported depth");
+        set(&state, "key", nested_object(MAX_VALUE_DEPTH), None).expect("maximum supported depth");
+    }
+
+    #[test]
+    fn get_returns_an_independent_copy() {
+        let state = SharedState::new();
+        set(&state, "key", serde_json::json!({ "nested": [1] }), None).expect("seed value");
+
+        let mut value = get(&state, "key")
+            .expect("get value")
+            .expect("stored value");
+        value["nested"][0] = serde_json::json!(2);
+
+        assert_eq!(
+            get(&state, "key").expect("read stored value"),
+            Some(serde_json::json!({ "nested": [1] }))
+        );
+    }
+
+    #[test]
+    fn poisoned_lock_returns_internal_error() {
+        let state = SharedState::new();
+        let poisoned = state.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned.inner.lock().expect("state lock");
+            panic!("poison state lock");
+        })
+        .join();
+
+        assert_eq!(
+            state.execute(StateCommand::Get {
+                key: "key".to_string()
+            }),
+            Err(StateError::Internal)
+        );
+    }
+
+    #[test]
+    fn concurrent_take_and_set_if_absent_have_exactly_one_winner() {
+        let state = SharedState::new();
+        set(&state, "take:key", serde_json::json!("grant"), None).expect("seed take key");
+
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let attempts = (0..2)
+            .map(|_| {
+                let state = state.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    take(&state, "take:key").expect("take")
+                })
+            })
+            .collect::<Vec<_>>();
+        let results = attempts
+            .into_iter()
+            .map(|attempt| attempt.join().expect("take thread"))
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|value| value.is_some()).count(), 1);
+
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let attempts = ["left", "right"]
+            .into_iter()
+            .map(|value| {
+                let state = state.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    set_if_absent(&state, "request:key", serde_json::json!(value), None)
+                        .expect("setIfAbsent")
+                })
+            })
+            .collect::<Vec<_>>();
+        let results = attempts
+            .into_iter()
+            .map(|attempt| attempt.join().expect("setIfAbsent thread"))
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|stored| **stored).count(), 1);
     }
 }

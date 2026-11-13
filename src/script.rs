@@ -1929,50 +1929,49 @@ fn parse_state_ttl(payload: &Json) -> Result<Option<Duration>, state::StateError
     Ok(Some(Duration::from_millis(ttl_ms)))
 }
 
-fn dispatch_state(shared_state: &SharedState, payload: &Json) -> Json {
-    let Some(operation) = payload.get("op").and_then(Json::as_str) else {
-        return state_error_json(state::StateError::InvalidInput);
-    };
-    let Some(key) = payload.get("key").and_then(Json::as_str) else {
-        return state_error_json(state::StateError::InvalidInput);
-    };
-    let ttl = match parse_state_ttl(payload) {
-        Ok(ttl) => ttl,
-        Err(error) => return state_error_json(error),
-    };
-    let Ok(mut store) = shared_state.lock() else {
-        return state_error_json(state::StateError::Internal);
-    };
+fn parse_state_command(payload: &Json) -> Result<state::StateCommand, state::StateError> {
+    let operation = payload
+        .get("op")
+        .and_then(Json::as_str)
+        .ok_or(state::StateError::InvalidInput)?;
+    let key = payload
+        .get("key")
+        .and_then(Json::as_str)
+        .ok_or(state::StateError::InvalidInput)?
+        .to_string();
+    let ttl = parse_state_ttl(payload)?;
     match operation {
-        "get" => match store.get(key) {
-            Ok(Some(value)) => json!({ "ok": true, "found": true, "value": value }),
-            Ok(None) => json!({ "ok": true, "found": false }),
-            Err(error) => state_error_json(error),
-        },
+        "get" => Ok(state::StateCommand::Get { key }),
         "set" => {
             let Some(value) = payload.get("value").cloned() else {
-                return state_error_json(state::StateError::InvalidInput);
+                return Err(state::StateError::InvalidInput);
             };
-            match store.set(key, value, ttl) {
-                Ok(()) => json!({ "ok": true }),
-                Err(error) => state_error_json(error),
-            }
+            Ok(state::StateCommand::Set { key, value, ttl })
         }
-        "take" => match store.take(key) {
-            Ok(Some(value)) => json!({ "ok": true, "found": true, "value": value }),
-            Ok(None) => json!({ "ok": true, "found": false }),
-            Err(error) => state_error_json(error),
-        },
+        "take" => Ok(state::StateCommand::Take { key }),
         "setIfAbsent" => {
             let Some(value) = payload.get("value").cloned() else {
-                return state_error_json(state::StateError::InvalidInput);
+                return Err(state::StateError::InvalidInput);
             };
-            match store.set_if_absent(key, value, ttl) {
-                Ok(stored) => json!({ "ok": true, "stored": stored }),
-                Err(error) => state_error_json(error),
-            }
+            Ok(state::StateCommand::SetIfAbsent { key, value, ttl })
         }
-        _ => state_error_json(state::StateError::InvalidInput),
+        _ => Err(state::StateError::InvalidInput),
+    }
+}
+
+fn dispatch_state(shared_state: &SharedState, payload: &Json) -> Json {
+    let command = match parse_state_command(payload) {
+        Ok(command) => command,
+        Err(error) => return state_error_json(error),
+    };
+    match shared_state.execute(command) {
+        Ok(state::StateReply::Value(Some(value))) => {
+            json!({ "ok": true, "found": true, "value": value })
+        }
+        Ok(state::StateReply::Value(None)) => json!({ "ok": true, "found": false }),
+        Ok(state::StateReply::Written) => json!({ "ok": true }),
+        Ok(state::StateReply::Stored(stored)) => json!({ "ok": true, "stored": stored }),
+        Err(error) => state_error_json(error),
     }
 }
 
@@ -2337,7 +2336,7 @@ pub async fn execute(
             upstream,
             files_config,
             uploads,
-            shared_state: state::new_shared_state(),
+            shared_state: SharedState::new(),
             worker_slot,
             match_allowed_methods: Vec::new(),
         },
@@ -2675,82 +2674,90 @@ mod tests {
     }
 
     #[test]
-    fn poisoned_state_store_returns_a_catchable_internal_error() {
-        let shared_state = state::new_shared_state();
-        let poisoned = Arc::clone(&shared_state);
-        let _ = std::thread::spawn(move || {
-            let _guard = poisoned.lock().expect("poison state store");
-            panic!("poison state store");
-        })
-        .join();
+    fn state_bridge_maps_commands_and_replies() {
+        let shared_state = SharedState::new();
 
-        let result = dispatch_state(&shared_state, &json!({ "op": "get", "key": "key" }));
-        assert_eq!(result["ok"], json!(false));
-        assert_eq!(result["code"], json!("state_internal_error"));
-        assert_eq!(result["message"], json!("state_internal_error"));
+        assert_eq!(
+            dispatch_state(
+                &shared_state,
+                &json!({ "op": "set", "key": "key", "value": { "n": 1 } })
+            ),
+            json!({ "ok": true })
+        );
+        assert_eq!(
+            dispatch_state(&shared_state, &json!({ "op": "get", "key": "key" })),
+            json!({ "ok": true, "found": true, "value": { "n": 1 } })
+        );
+        assert_eq!(
+            dispatch_state(&shared_state, &json!({ "op": "take", "key": "key" })),
+            json!({ "ok": true, "found": true, "value": { "n": 1 } })
+        );
+        assert_eq!(
+            dispatch_state(&shared_state, &json!({ "op": "get", "key": "key" })),
+            json!({ "ok": true, "found": false })
+        );
+        assert_eq!(
+            dispatch_state(
+                &shared_state,
+                &json!({ "op": "setIfAbsent", "key": "key", "value": "new" })
+            ),
+            json!({ "ok": true, "stored": true })
+        );
+        assert_eq!(
+            dispatch_state(
+                &shared_state,
+                &json!({ "op": "setIfAbsent", "key": "key", "value": "other" })
+            ),
+            json!({ "ok": true, "stored": false })
+        );
     }
 
     #[test]
-    fn concurrent_state_take_and_set_if_absent_have_exactly_one_winner() {
-        let shared_state = state::new_shared_state();
-        let seeded = dispatch_state(
-            &shared_state,
-            &json!({ "op": "set", "key": "take:key", "value": "grant" }),
-        );
-        assert_eq!(seeded["ok"], json!(true));
+    fn state_errors_map_to_stable_wire_codes() {
+        for (error, code) in [
+            (state::StateError::InvalidInput, "state_invalid_input"),
+            (
+                state::StateError::CapacityExceeded,
+                "state_capacity_exceeded",
+            ),
+            (state::StateError::Internal, "state_internal_error"),
+        ] {
+            assert_eq!(
+                state_error_json(error),
+                json!({ "ok": false, "code": code, "message": code })
+            );
+        }
 
-        let barrier = Arc::new(std::sync::Barrier::new(2));
-        let attempts = (0..2)
-            .map(|_| {
-                let shared_state = Arc::clone(&shared_state);
-                let barrier = Arc::clone(&barrier);
-                std::thread::spawn(move || {
-                    barrier.wait();
-                    dispatch_state(&shared_state, &json!({ "op": "take", "key": "take:key" }))
-                })
-            })
-            .collect::<Vec<_>>();
-        let results = attempts
-            .into_iter()
-            .map(|attempt| attempt.join().expect("take thread"))
-            .collect::<Vec<_>>();
+        let shared_state = SharedState::new();
         assert_eq!(
-            results
-                .iter()
-                .filter(|result| result["found"] == json!(true))
-                .count(),
-            1
+            dispatch_state(&shared_state, &json!({ "op": "get" })),
+            json!({
+                "ok": false,
+                "code": "state_invalid_input",
+                "message": "state_invalid_input"
+            })
         );
-
-        let barrier = Arc::new(std::sync::Barrier::new(2));
-        let attempts = ["left", "right"]
-            .into_iter()
-            .map(|value| {
-                let shared_state = Arc::clone(&shared_state);
-                let barrier = Arc::clone(&barrier);
-                std::thread::spawn(move || {
-                    barrier.wait();
-                    dispatch_state(
-                        &shared_state,
-                        &json!({
-                            "op": "setIfAbsent",
-                            "key": "request:key",
-                            "value": value
-                        }),
-                    )
-                })
-            })
-            .collect::<Vec<_>>();
-        let results = attempts
-            .into_iter()
-            .map(|attempt| attempt.join().expect("setIfAbsent thread"))
-            .collect::<Vec<_>>();
         assert_eq!(
-            results
-                .iter()
-                .filter(|result| result["stored"] == json!(true))
-                .count(),
-            1
+            dispatch_state(
+                &shared_state,
+                &json!({ "op": "get", "key": "key", "ttl_ms": 0 })
+            ),
+            json!({
+                "ok": false,
+                "code": "state_invalid_input",
+                "message": "state_invalid_input"
+            })
+        );
+        assert_eq!(
+            dispatch_state(
+                &shared_state,
+                &json!({ "op": "set", "key": "key", "value": 1, "ttl_ms": 0 })
+            ),
+            json!({
+                "ok": false,
+                "code": "state_invalid_input",
+                "message": "state_invalid_input"
+            })
         );
     }
 
