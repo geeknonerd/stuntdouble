@@ -278,11 +278,33 @@ impl UpstreamAccess {
         }
     }
 
-    /// Perform one `ctx.http.get` call from its JSON bridge payload.
-    pub fn get(&self, call: &Json) -> Result<Response, Error> {
+    /// Start one `ctx.http.get` call and parse its bridge payload.
+    ///
+    /// Parsing stays behind `begin_call` so a malformed call is still visible
+    /// in the per-request upstream chain.
+    pub(crate) fn prepare_get(&self, call: &Json) -> PreparedGet {
         let index = self.begin_call("http.get");
         let started = Instant::now();
-        let result = self.get_inner(call, index);
+        let call = self.parse_get_call(call);
+        if let Err(error) = &call {
+            self.finish_call(index, started, Some(error));
+        }
+        PreparedGet {
+            call,
+            index,
+            started,
+        }
+    }
+
+    /// Perform one prepared `ctx.http.get` call.
+    pub(crate) fn get(&self, prepared: PreparedGet) -> Result<Response, Error> {
+        let PreparedGet {
+            call,
+            index,
+            started,
+        } = prepared;
+        let call = call?;
+        let result = self.get_inner(&call, index);
         if let Ok(response) = &result {
             self.update_call(index, |record| {
                 record.status = Some(response.status);
@@ -293,8 +315,7 @@ impl UpstreamAccess {
         result
     }
 
-    fn get_inner(&self, call: &Json, index: usize) -> Result<Response, Error> {
-        let call = self.parse_get_call(call)?;
+    fn get_inner(&self, call: &GetCall, index: usize) -> Result<Response, Error> {
         let url = Url::parse(&call.url)
             .map_err(|error| Error::Policy(format!("ctx.http.get: invalid URL: {error}")))?;
         self.record_url(index, &url);
@@ -335,15 +356,37 @@ impl UpstreamAccess {
         })
     }
 
-    /// Perform one `ctx.http.pipe` call from its JSON bridge payload.
+    /// Start one `ctx.http.pipe` call and parse its bridge payload.
+    ///
+    /// Parsing stays behind `begin_call` so a malformed call is still visible
+    /// in the per-request upstream chain.
+    pub(crate) fn prepare_pipe(&self, call: &Json) -> PreparedPipe {
+        let index = self.begin_call("http.pipe");
+        let started = Instant::now();
+        let call = self.parse_pipe_call(call);
+        if let Err(error) = &call {
+            self.finish_call(index, started, Some(error));
+        }
+        PreparedPipe {
+            call,
+            index,
+            started,
+        }
+    }
+
+    /// Perform one prepared `ctx.http.pipe` call.
     ///
     /// Success means the upstream answered 2xx: the client status and headers
     /// are fixed here and the body is streamed by a background reader. A final
     /// non-2xx answer is a catchable `upstream_http_error`, because a piped
     /// body cannot be inspected by the script.
-    pub fn pipe(&self, call: &Json) -> Result<PipeResponse, Error> {
-        let index = self.begin_call("http.pipe");
-        let started = Instant::now();
+    pub(crate) fn pipe(&self, prepared: PreparedPipe) -> Result<PipeResponse, Error> {
+        let PreparedPipe {
+            call,
+            index,
+            started,
+        } = prepared;
+        let call = call?;
         let result = self.pipe_inner(call, index, started);
         if let Err(error) = &result {
             self.finish_call(index, started, Some(error));
@@ -353,11 +396,10 @@ impl UpstreamAccess {
 
     fn pipe_inner(
         &self,
-        call: &Json,
+        call: PipeCall,
         index: usize,
         started: Instant,
     ) -> Result<PipeResponse, Error> {
-        let call = self.parse_pipe_call(call)?;
         let url = Url::parse(&call.url)
             .map_err(|error| Error::InvalidUrl(format!("ctx.http.pipe: invalid URL: {error}")))?;
         self.record_url(index, &url);
@@ -676,6 +718,7 @@ impl UpstreamAccess {
 }
 
 /// Parsed bridge payload; unknown keys are rejected before this point.
+#[derive(Debug)]
 struct GetCall {
     url: String,
     timeout: Option<Duration>,
@@ -683,10 +726,27 @@ struct GetCall {
 
 /// Parsed `ctx.http.pipe` payload: the client status and headers are fixed
 /// before the upstream body is handed to the HTTP layer.
+#[derive(Debug)]
 struct PipeCall {
     url: String,
     status: Option<u16>,
     headers: Vec<(String, String)>,
+}
+
+/// One decoded `ctx.http.get` call, with its call-chain slot already opened.
+#[derive(Debug)]
+pub(crate) struct PreparedGet {
+    call: Result<GetCall, Error>,
+    index: usize,
+    started: Instant,
+}
+
+/// One decoded `ctx.http.pipe` call, with its call-chain slot already opened.
+#[derive(Debug)]
+pub(crate) struct PreparedPipe {
+    call: Result<PipeCall, Error>,
+    index: usize,
+    started: Instant,
 }
 
 /// Time left for the script itself to catch and map a transport error.
@@ -805,7 +865,33 @@ pub fn response_json(response: Response) -> Json {
 
 #[cfg(test)]
 mod tests {
-    use super::StreamOutcome;
+    use super::*;
+
+    #[test]
+    fn malformed_http_calls_still_enter_the_upstream_chain() {
+        let calls = CallLog::new();
+        let access = UpstreamAccess::new(
+            Vec::new(),
+            Duration::from_secs(1),
+            Instant::now() + Duration::from_secs(30),
+            None,
+            calls.clone(),
+        );
+
+        let get = access.prepare_get(&json!({ "url": 1 }));
+        let get_error = access.get(get).expect_err("malformed get");
+        assert_eq!(get_error.code(), "script_error");
+        let pipe = access.prepare_pipe(&json!({ "url": 1 }));
+        let pipe_error = access.pipe(pipe).expect_err("malformed pipe");
+        assert_eq!(pipe_error.code(), "script_error");
+
+        let calls = calls.snapshot();
+        assert_eq!(calls.len(), 2, "calls: {calls:?}");
+        assert_eq!(calls[0]["api"], "http.get");
+        assert_eq!(calls[0]["error"], "script_error");
+        assert_eq!(calls[1]["api"], "http.pipe");
+        assert_eq!(calls[1]["error"], "script_error");
+    }
 
     #[test]
     fn channel_close_after_the_announced_length_completes() {

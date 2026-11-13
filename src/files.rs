@@ -53,16 +53,88 @@ impl FileOp {
             _ => None,
         }
     }
+}
 
-    fn api(self) -> &'static str {
+/// One decoded `ctx.file` call.
+#[derive(Debug)]
+#[allow(clippy::enum_variant_names)]
+pub(crate) enum FileCall {
+    ReadText {
+        path: String,
+    },
+    ReadBytes {
+        path: String,
+    },
+    Stream {
+        path: String,
+    },
+    WriteText {
+        path: String,
+        text: Option<String>,
+    },
+    WriteBytes {
+        path: String,
+        bytes_base64: Option<String>,
+    },
+}
+
+impl FileCall {
+    /// Decode one bridge payload without claiming a file call-log slot.
+    pub(crate) fn parse(payload: &Json) -> Result<Self, Error> {
+        let Some(raw_op) = payload.get("op").and_then(Json::as_str) else {
+            return Err(Error::Script("ctx.file: missing operation"));
+        };
+        let Some(path) = payload.get("path").and_then(Json::as_str) else {
+            return Err(Error::PathInvalid("ctx.file: path must be a string"));
+        };
+        let Some(op) = FileOp::parse(raw_op) else {
+            return Err(Error::Script("ctx.file: unknown operation"));
+        };
+        Ok(match op {
+            FileOp::ReadText => Self::ReadText {
+                path: path.to_string(),
+            },
+            FileOp::ReadBytes => Self::ReadBytes {
+                path: path.to_string(),
+            },
+            FileOp::Stream => Self::Stream {
+                path: path.to_string(),
+            },
+            FileOp::WriteText => Self::WriteText {
+                path: path.to_string(),
+                text: payload
+                    .get("text")
+                    .and_then(Json::as_str)
+                    .map(str::to_string),
+            },
+            FileOp::WriteBytes => Self::WriteBytes {
+                path: path.to_string(),
+                bytes_base64: payload
+                    .get("bytes_base64")
+                    .and_then(Json::as_str)
+                    .map(str::to_string),
+            },
+        })
+    }
+
+    const fn api(&self) -> &'static str {
         match self {
-            Self::ReadText => "file.readText",
-            Self::ReadBytes => "file.readBytes",
-            Self::Stream => "file.stream",
-            Self::WriteText => "file.writeText",
-            Self::WriteBytes => "file.writeBytes",
+            Self::ReadText { .. } => "file.readText",
+            Self::ReadBytes { .. } => "file.readBytes",
+            Self::Stream { .. } => "file.stream",
+            Self::WriteText { .. } => "file.writeText",
+            Self::WriteBytes { .. } => "file.writeBytes",
         }
     }
+}
+
+/// One successful file or upload operation, before wire encoding.
+#[derive(Debug)]
+pub(crate) enum FileReply {
+    Text(String),
+    Bytes(Vec<u8>),
+    Stream(u64),
+    Written(u64),
 }
 
 /// Why one `ctx.file` call failed. Codes are stable script-visible values.
@@ -482,6 +554,13 @@ impl UploadOp {
     }
 }
 
+/// One decoded `ctx.request.files[i]` call.
+#[derive(Debug)]
+pub(crate) struct UploadCall {
+    op: UploadOp,
+    path: PathBuf,
+}
+
 /// Request-scoped access to uploaded files. It shares the file call chain with
 /// `ctx.file`, so operator logs keep one ordered list.
 #[derive(Debug)]
@@ -501,67 +580,69 @@ impl UploadAccess {
         }
     }
 
-    /// Handle one bridge call. Payload: `{op, index}`.
-    #[must_use]
-    pub fn call(&self, payload: &Json) -> Json {
+    /// Decode one bridge payload and resolve the upload it names.
+    pub(crate) fn prepare(&self, payload: &Json) -> Result<UploadCall, Error> {
         let Some(raw_op) = payload.get("op").and_then(Json::as_str) else {
-            return json!({
-                "ok": false,
-                "code": "script_error",
-                "message": "ctx.request.files: missing operation"
-            });
+            return Err(Error::Script("ctx.request.files: missing operation"));
         };
         let Some(op) = UploadOp::parse(raw_op) else {
-            return json!({
-                "ok": false,
-                "code": "script_error",
-                "message": "ctx.request.files: unknown operation"
-            });
+            return Err(Error::Script("ctx.request.files: unknown operation"));
         };
         let Some(index) = payload
             .get("index")
             .and_then(Json::as_u64)
             .and_then(|value| usize::try_from(value).ok())
         else {
-            return json!({
-                "ok": false,
-                "code": "script_error",
-                "message": "ctx.request.files: index must be a non-negative integer"
-            });
+            return Err(Error::Script(
+                "ctx.request.files: index must be a non-negative integer",
+            ));
         };
         let Some(uploaded) = self.store.file(index) else {
-            return json!({
-                "ok": false,
-                "code": "script_error",
-                "message": "ctx.request.files: index out of range"
-            });
+            return Err(Error::Script("ctx.request.files: index out of range"));
         };
-        let call_index = begin_call(&self.calls, op.api());
+        Ok(UploadCall {
+            op,
+            path: uploaded.path.clone(),
+        })
+    }
+
+    /// Handle one `ctx.request.files[i]` JSON bridge call.
+    #[cfg(test)]
+    #[must_use]
+    pub fn call(&self, payload: &Json) -> Json {
+        match self.prepare(payload).and_then(|call| self.execute(&call)) {
+            Ok(reply) => reply_json(reply),
+            Err(error) => error_json(&error),
+        }
+    }
+
+    /// Execute one decoded upload call.
+    pub(crate) fn execute(&self, call: &UploadCall) -> Result<FileReply, Error> {
+        let call_index = begin_call(&self.calls, call.op.api());
         let started = Instant::now();
-        let read = match op {
-            UploadOp::ReadText => read_upload_capped(&uploaded.path)
+        let read = match call.op {
+            UploadOp::ReadText => read_upload_capped(&call.path)
                 .and_then(|bytes| String::from_utf8(bytes).map_err(|_| Error::Encoding))
                 .map(|text| {
-                    let payload = json!({ "ok": true, "text": text });
-                    (payload, text.len())
+                    let len = text.len();
+                    (FileReply::Text(text), len)
                 }),
-            UploadOp::ReadBytes => read_upload_capped(&uploaded.path).map(|bytes| {
+            UploadOp::ReadBytes => read_upload_capped(&call.path).map(|bytes| {
                 let len = bytes.len();
-                let payload = json!({ "ok": true, "bytes_base64": BASE64.encode(&bytes) });
-                (payload, len)
+                (FileReply::Bytes(bytes), len)
             }),
             UploadOp::Stream => {
-                return match self.open_stream(&uploaded.path, call_index, started) {
-                    Ok(handle) => json!({ "ok": true, "handle": handle }),
+                return match self.open_stream(&call.path, call_index, started) {
+                    Ok(handle) => Ok(FileReply::Stream(handle)),
                     Err(error) => {
                         finish_call(&self.calls, call_index, started, None, Some(error.code()));
-                        error_json(&error)
+                        Err(error)
                     }
                 };
             }
         };
         match read {
-            Ok((payload, bytes)) => {
+            Ok((reply, bytes)) => {
                 finish_call(
                     &self.calls,
                     call_index,
@@ -569,11 +650,11 @@ impl UploadAccess {
                     u64::try_from(bytes).ok(),
                     None,
                 );
-                payload
+                Ok(reply)
             }
             Err(error) => {
                 finish_call(&self.calls, call_index, started, None, Some(error.code()));
-                error_json(&error)
+                Err(error)
             }
         }
     }
@@ -698,74 +779,60 @@ impl FileAccess {
         }
     }
 
-    /// Handle one `ctx.file.*` bridge call. Payload: `{op, path}`.
+    /// Handle one `ctx.file.*` JSON bridge call.
+    #[cfg(test)]
     #[must_use]
     pub fn call(&self, payload: &Json) -> Json {
-        let Some(raw_op) = payload.get("op").and_then(Json::as_str) else {
-            return json!({
-                "ok": false,
-                "code": "script_error",
-                "message": "ctx.file: missing operation"
-            });
-        };
-        let Some(path) = payload.get("path").and_then(Json::as_str) else {
-            return json!({
-                "ok": false,
-                "code": "file_path_invalid",
-                "message": "ctx.file: path must be a string"
-            });
-        };
-        let Some(op) = FileOp::parse(raw_op) else {
-            return json!({
-                "ok": false,
-                "code": "script_error",
-                "message": "ctx.file: unknown operation"
-            });
-        };
-        let index = begin_call(&self.calls, op.api());
+        match FileCall::parse(payload).and_then(|call| self.execute(call)) {
+            Ok(reply) => reply_json(reply),
+            Err(error) => error_json(&error),
+        }
+    }
+
+    /// Execute one decoded `ctx.file` call.
+    pub(crate) fn execute(&self, call: FileCall) -> Result<FileReply, Error> {
+        let index = begin_call(&self.calls, call.api());
         let started = Instant::now();
-        let operation = match op {
-            FileOp::ReadText => self.read_text(path).map(|text| {
+        let operation = match call {
+            FileCall::ReadText { path } => self.read_text(&path).map(|text| {
                 let len = u64::try_from(text.len()).unwrap_or(u64::MAX);
-                (json!({ "ok": true, "text": text }), len)
+                (FileReply::Text(text), len)
             }),
-            FileOp::ReadBytes => self.read_bytes(path).map(|bytes| {
+            FileCall::ReadBytes { path } => self.read_bytes(&path).map(|bytes| {
                 let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-                let payload = json!({ "ok": true, "bytes_base64": BASE64.encode(&bytes) });
-                (payload, len)
+                (FileReply::Bytes(bytes), len)
             }),
-            FileOp::Stream => {
-                return match self.open_stream(path, index, started) {
-                    Ok(handle) => json!({ "ok": true, "handle": handle }),
-                    Err(error) => error_json(&error),
+            FileCall::Stream { path } => {
+                return match self.open_stream(&path, index, started) {
+                    Ok(handle) => Ok(FileReply::Stream(handle)),
+                    Err(error) => {
+                        finish_call(&self.calls, index, started, None, Some(error.code()));
+                        Err(error)
+                    }
                 };
             }
-            FileOp::WriteText => payload
-                .get("text")
-                .and_then(Json::as_str)
+            FileCall::WriteText { path, text } => text
                 .ok_or(Error::Script("ctx.file.writeText: text must be a string"))
-                .and_then(|text| self.write_text(path, text))
-                .map(|len| (json!({ "ok": true, "bytes": len }), len)),
-            FileOp::WriteBytes => payload
-                .get("bytes_base64")
-                .and_then(Json::as_str)
+                .and_then(|text| self.write_text(&path, &text))
+                .map(|len| (FileReply::Written(len), len)),
+            FileCall::WriteBytes { path, bytes_base64 } => bytes_base64
                 .ok_or(Error::Script("ctx.file.writeBytes: bytes must be provided"))
                 .and_then(|encoded| {
                     BASE64
-                        .decode(encoded)
+                        .decode(&encoded)
                         .map_err(|_| Error::Script("ctx.file.writeBytes: invalid byte payload"))
                 })
-                .and_then(|bytes| self.write_bytes(path, &bytes))
-                .map(|len| (json!({ "ok": true, "bytes": len }), len)),
+                .and_then(|bytes| self.write_bytes(&path, &bytes))
+                .map(|len| (FileReply::Written(len), len)),
         };
         match operation {
-            Ok((payload, bytes)) => {
+            Ok((reply, bytes)) => {
                 finish_call(&self.calls, index, started, Some(bytes), None);
-                payload
+                Ok(reply)
             }
             Err(error) => {
                 finish_call(&self.calls, index, started, None, Some(error.code()));
-                error_json(&error)
+                Err(error)
             }
         }
     }
@@ -1273,12 +1340,25 @@ impl Pending<CallRecord> {
     }
 }
 
+#[cfg(test)]
 fn error_json(error: &Error) -> Json {
     json!({
         "ok": false,
         "code": error.code(),
         "message": error.message(),
     })
+}
+
+#[cfg(test)]
+fn reply_json(reply: FileReply) -> Json {
+    match reply {
+        FileReply::Text(text) => json!({ "ok": true, "text": text }),
+        FileReply::Bytes(bytes) => {
+            json!({ "ok": true, "bytes_base64": BASE64.encode(bytes) })
+        }
+        FileReply::Stream(handle) => json!({ "ok": true, "handle": handle }),
+        FileReply::Written(bytes) => json!({ "ok": true, "bytes": bytes }),
+    }
 }
 
 #[cfg(test)]
