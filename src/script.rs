@@ -1791,6 +1791,134 @@ struct HostState {
     shared_state: SharedState,
 }
 
+/// One decoded parent-side host call.
+enum HostCall {
+    HttpGet(upstream::PreparedGet),
+    HttpPipe(upstream::PreparedPipe),
+    File(files::FileCall),
+    Upload(files::UploadCall),
+    State(state::StateCommand),
+    ValidateHeaders,
+    Crypto(crypto::CryptoCall),
+}
+
+/// One parent-side host result, before JSON Lines encoding.
+enum HostReply {
+    HttpGet(upstream::Response),
+    HttpPipe {
+        status: u16,
+        headers: Vec<(String, String)>,
+    },
+    File(files::FileReply),
+    Upload(files::FileReply),
+    State(state::StateReply),
+    ValidateHeaders,
+    Crypto(crypto::CryptoReply),
+    Error(BridgeError),
+}
+
+impl HostReply {
+    fn into_json(self) -> Json {
+        match self {
+            Self::HttpGet(response) => {
+                json!({ "ok": true, "response": upstream::response_json(response) })
+            }
+            Self::HttpPipe { status, headers } => json!({
+                "ok": true,
+                "status": status,
+                "headers": headers
+                    .into_iter()
+                    .map(|(name, value)| json!([name, value]))
+                    .collect::<Vec<_>>(),
+            }),
+            Self::File(reply) | Self::Upload(reply) => file_reply_json(reply),
+            Self::State(state::StateReply::Value(Some(value))) => {
+                json!({ "ok": true, "found": true, "value": value })
+            }
+            Self::State(state::StateReply::Value(None)) => json!({ "ok": true, "found": false }),
+            Self::State(state::StateReply::Written) | Self::ValidateHeaders => {
+                json!({ "ok": true })
+            }
+            Self::State(state::StateReply::Stored(stored)) => {
+                json!({ "ok": true, "stored": stored })
+            }
+            Self::Crypto(crypto::CryptoReply::Bytes(bytes)) => json!({
+                "ok": true,
+                "bytes_base64": base64::prelude::BASE64_STANDARD.encode(bytes),
+            }),
+            Self::Crypto(crypto::CryptoReply::Equal(equal)) => {
+                json!({ "ok": true, "equal": equal })
+            }
+            Self::Error(error) => error.into_json(),
+        }
+    }
+}
+
+enum BridgeErrorKind {
+    Standard,
+    Upstream(Option<&'static str>),
+}
+
+/// One capability failure before wire encoding.
+struct BridgeError {
+    code: &'static str,
+    message: String,
+    kind: BridgeErrorKind,
+}
+
+impl BridgeError {
+    fn standard(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            kind: BridgeErrorKind::Standard,
+        }
+    }
+
+    fn upstream(error: &upstream::Error) -> Self {
+        Self {
+            code: error.code(),
+            message: error.message(),
+            kind: BridgeErrorKind::Upstream(error.transport_kind()),
+        }
+    }
+
+    fn into_json(self) -> Json {
+        match self.kind {
+            BridgeErrorKind::Standard => json!({
+                "ok": false,
+                "code": self.code,
+                "message": self.message,
+            }),
+            BridgeErrorKind::Upstream(kind) => json!({
+                "ok": false,
+                "code": self.code,
+                "kind": kind,
+                "message": self.message,
+            }),
+        }
+    }
+}
+
+impl From<files::Error> for BridgeError {
+    fn from(error: files::Error) -> Self {
+        Self::standard(error.code(), error.message())
+    }
+}
+
+impl From<state::StateError> for BridgeError {
+    fn from(error: state::StateError) -> Self {
+        let code = error.code();
+        Self::standard(code, code)
+    }
+}
+
+impl From<crypto::CryptoError> for BridgeError {
+    fn from(error: crypto::CryptoError) -> Self {
+        Self::standard(error.code(), error.message())
+    }
+}
+
 struct HostStateInit<'a> {
     upstream_config: &'a UpstreamConfig,
     files_config: &'a FilesConfig,
@@ -1841,48 +1969,107 @@ impl HostState {
     /// Handle one bridge call. `None` is a missing configured capability, which
     /// is a parent/worker protocol mismatch rather than a script error.
     fn dispatch(&mut self, name: BridgeName, payload: &Json) -> Option<Json> {
+        let reply = match self.decode_call(name, payload)? {
+            Ok(call) => self.execute_call(call)?,
+            Err(error) => HostReply::Error(error),
+        };
+        Some(reply.into_json())
+    }
+
+    fn decode_call(
+        &self,
+        name: BridgeName,
+        payload: &Json,
+    ) -> Option<Result<HostCall, BridgeError>> {
         match name {
-            BridgeName::HttpGet => {
+            BridgeName::HttpGet => Some(Ok(HostCall::HttpGet(
+                self.upstream.as_ref()?.prepare_get(payload),
+            ))),
+            BridgeName::HttpPipe => Some(Ok(HostCall::HttpPipe(
+                self.upstream.as_ref()?.prepare_pipe(payload),
+            ))),
+            BridgeName::File => {
+                self.files.as_ref()?;
+                Some(
+                    files::FileCall::parse(payload)
+                        .map(HostCall::File)
+                        .map_err(BridgeError::from),
+                )
+            }
+            BridgeName::Upload => {
+                let Some(host) = self.uploads.as_ref() else {
+                    return Some(Err(BridgeError::standard(
+                        "script_error",
+                        "__sd_upload called outside a script request",
+                    )));
+                };
+                Some(
+                    host.prepare(payload)
+                        .map(HostCall::Upload)
+                        .map_err(BridgeError::from),
+                )
+            }
+            BridgeName::State => Some(
+                parse_state_command(payload)
+                    .map(HostCall::State)
+                    .map_err(BridgeError::from),
+            ),
+            BridgeName::ValidateHeaders => {
+                Some(validate_headers_call(payload).map(|()| HostCall::ValidateHeaders))
+            }
+            BridgeName::Crypto => Some(
+                crypto::parse_crypto_call(payload)
+                    .map(HostCall::Crypto)
+                    .map_err(BridgeError::from),
+            ),
+        }
+    }
+
+    fn execute_call(&mut self, call: HostCall) -> Option<HostReply> {
+        match call {
+            HostCall::HttpGet(prepared) => {
                 let host = self.upstream.as_ref()?;
-                Some(match host.get(payload) {
-                    Ok(response) => {
-                        json!({ "ok": true, "response": upstream::response_json(response) })
-                    }
-                    Err(error) => upstream_error_json(&error),
+                Some(match host.get(prepared) {
+                    Ok(response) => HostReply::HttpGet(response),
+                    Err(error) => HostReply::Error(BridgeError::upstream(&error)),
                 })
             }
-            BridgeName::HttpPipe => {
+            HostCall::HttpPipe(prepared) => {
                 let host = self.upstream.as_ref()?;
-                Some(match host.pipe(payload) {
+                Some(match host.pipe(prepared) {
                     Ok(response) => {
                         self.pipe = Some(response.body);
-                        json!({
-                            "ok": true,
-                            "status": response.status,
-                            "headers": response
-                                .headers
-                                .iter()
-                                .map(|(name, value)| json!([name, value]))
-                                .collect::<Vec<_>>(),
-                        })
+                        HostReply::HttpPipe {
+                            status: response.status,
+                            headers: response.headers,
+                        }
                     }
-                    Err(error) => upstream_error_json(&error),
+                    Err(error) => HostReply::Error(BridgeError::upstream(&error)),
                 })
             }
-            BridgeName::File => Some(self.files.as_ref()?.call(payload)),
-            BridgeName::Upload => Some(self.uploads.as_ref().map_or_else(
-                || {
-                    json!({
-                        "ok": false,
-                        "code": "script_error",
-                        "message": "__sd_upload called outside a script request"
-                    })
-                },
-                |host| host.call(payload),
-            )),
-            BridgeName::State => Some(dispatch_state(&self.shared_state, payload)),
-            BridgeName::ValidateHeaders => Some(validate_headers_json(payload)),
-            BridgeName::Crypto => Some(crypto::dispatch_crypto(payload)),
+            HostCall::File(call) => {
+                let host = self.files.as_ref()?;
+                Some(match host.execute(call) {
+                    Ok(reply) => HostReply::File(reply),
+                    Err(error) => HostReply::Error(BridgeError::from(error)),
+                })
+            }
+            HostCall::Upload(call) => {
+                let host = self.uploads.as_ref()?;
+                Some(match host.execute(&call) {
+                    Ok(reply) => HostReply::Upload(reply),
+                    Err(error) => HostReply::Error(BridgeError::from(error)),
+                })
+            }
+            HostCall::State(command) => Some(match self.shared_state.execute(command) {
+                Ok(reply) => HostReply::State(reply),
+                Err(error) => HostReply::Error(BridgeError::from(error)),
+            }),
+            HostCall::ValidateHeaders => Some(HostReply::ValidateHeaders),
+            HostCall::Crypto(call) => Some(match crypto::execute_crypto(call) {
+                Ok(reply) => HostReply::Crypto(reply),
+                Err(error) => HostReply::Error(BridgeError::from(error)),
+            }),
         }
     }
 
@@ -1897,25 +2084,6 @@ impl HostState {
     ) {
         (self.pipe.take(), self.files.take(), self.uploads.take())
     }
-}
-
-/// Stable JSON shape for an upstream bridge failure.
-fn upstream_error_json(error: &upstream::Error) -> Json {
-    json!({
-        "ok": false,
-        "code": error.code(),
-        "kind": error.transport_kind(),
-        "message": error.message(),
-    })
-}
-
-fn state_error_json(error: state::StateError) -> Json {
-    let code = error.code();
-    json!({
-        "ok": false,
-        "code": code,
-        "message": code,
-    })
 }
 
 fn parse_state_ttl(payload: &Json) -> Result<Option<Duration>, state::StateError> {
@@ -1970,38 +2138,25 @@ fn parse_state_command(payload: &Json) -> Result<state::StateCommand, state::Sta
     }
 }
 
-fn dispatch_state(shared_state: &SharedState, payload: &Json) -> Json {
-    let command = match parse_state_command(payload) {
-        Ok(command) => command,
-        Err(error) => return state_error_json(error),
-    };
-    match shared_state.execute(command) {
-        Ok(state::StateReply::Value(Some(value))) => {
-            json!({ "ok": true, "found": true, "value": value })
-        }
-        Ok(state::StateReply::Value(None)) => json!({ "ok": true, "found": false }),
-        Ok(state::StateReply::Written) => json!({ "ok": true }),
-        Ok(state::StateReply::Stored(stored)) => json!({ "ok": true, "stored": stored }),
-        Err(error) => state_error_json(error),
-    }
+/// Parent-side header validation bridge; the worker never owns this policy.
+fn validate_headers_call(payload: &Json) -> Result<(), BridgeError> {
+    let pairs = serde_json::from_value::<Vec<(String, String)>>(payload.clone()).map_err(|_| {
+        BridgeError::standard("script_error", "__sd_validate_headers: invalid payload")
+    })?;
+    validated_header_pairs(&pairs)
+        .map(|_| ())
+        .map_err(|message| BridgeError::standard("script_error", message))
 }
 
-/// Parent-side header validation bridge; the worker never owns this policy.
-fn validate_headers_json(payload: &Json) -> Json {
-    match serde_json::from_value::<Vec<(String, String)>>(payload.clone()) {
-        Ok(pairs) => match validated_header_pairs(&pairs) {
-            Ok(_) => json!({ "ok": true }),
-            Err(message) => json!({
-                "ok": false,
-                "code": "script_error",
-                "message": message,
-            }),
-        },
-        Err(_) => json!({
-            "ok": false,
-            "code": "script_error",
-            "message": "__sd_validate_headers: invalid payload",
+fn file_reply_json(reply: files::FileReply) -> Json {
+    match reply {
+        files::FileReply::Text(text) => json!({ "ok": true, "text": text }),
+        files::FileReply::Bytes(bytes) => json!({
+            "ok": true,
+            "bytes_base64": base64::prelude::BASE64_STANDARD.encode(bytes),
         }),
+        files::FileReply::Stream(handle) => json!({ "ok": true, "handle": handle }),
+        files::FileReply::Written(bytes) => json!({ "ok": true, "bytes": bytes }),
     }
 }
 
@@ -2594,6 +2749,17 @@ fn apply_worker_memory_limit(_memory_limit_mb: u64) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    fn dispatch_state(shared_state: &SharedState, payload: &Json) -> Json {
+        let reply = match parse_state_command(payload) {
+            Ok(command) => match shared_state.execute(command) {
+                Ok(reply) => HostReply::State(reply),
+                Err(error) => HostReply::Error(BridgeError::from(error)),
+            },
+            Err(error) => HostReply::Error(BridgeError::from(error)),
+        };
+        reply.into_json()
+    }
+
     #[test]
     fn worker_protocol_round_trips_host_calls_and_results() {
         let host_call = WorkerMessage::HostCall {
@@ -2734,7 +2900,7 @@ mod tests {
             (state::StateError::Internal, "state_internal_error"),
         ] {
             assert_eq!(
-                state_error_json(error),
+                HostReply::Error(BridgeError::from(error)).into_json(),
                 json!({ "ok": false, "code": code, "message": code })
             );
         }
@@ -2782,6 +2948,99 @@ mod tests {
                 "code": "state_invalid_input",
                 "message": "state_invalid_input"
             })
+        );
+    }
+
+    fn test_host_state(root: &std::path::Path) -> HostState {
+        let upstream_config = UpstreamConfig {
+            allow_hosts: Vec::new(),
+            timeout_ms: 1_000,
+        };
+        let files_config = FilesConfig {
+            root: root.to_path_buf(),
+            upload_max_bytes: 1_024,
+            writable: false,
+            write_max_bytes: 1_024,
+        };
+        HostState::new(HostStateInit {
+            upstream_config: &upstream_config,
+            files_config: &files_config,
+            uploads: None,
+            script_deadline: Instant::now() + Duration::from_secs(30),
+            client_range: None,
+            calls: upstream::CallLog::new(),
+            file_calls: files::CallLog::new(),
+            shared_state: SharedState::new(),
+        })
+    }
+
+    #[test]
+    fn host_bridge_decodes_typed_calls_and_encodes_wire_replies() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut host = test_host_state(dir.path());
+
+        assert_eq!(
+            host.dispatch(
+                BridgeName::State,
+                &json!({ "op": "set", "key": "key", "value": { "n": 1 } })
+            ),
+            Some(json!({ "ok": true }))
+        );
+        assert_eq!(
+            host.dispatch(BridgeName::State, &json!({ "op": "get", "key": "key" })),
+            Some(json!({ "ok": true, "found": true, "value": { "n": 1 } }))
+        );
+        assert_eq!(
+            host.dispatch(BridgeName::Upload, &json!({ "op": "readText", "index": 0 })),
+            Some(json!({
+                "ok": false,
+                "code": "script_error",
+                "message": "__sd_upload called outside a script request"
+            }))
+        );
+        assert_eq!(
+            host.dispatch(BridgeName::ValidateHeaders, &json!([["x-test", "valid"]])),
+            Some(json!({ "ok": true }))
+        );
+        assert_eq!(
+            host.dispatch(
+                BridgeName::ValidateHeaders,
+                &json!({ "not": "a header list" })
+            ),
+            Some(json!({
+                "ok": false,
+                "code": "script_error",
+                "message": "__sd_validate_headers: invalid payload"
+            }))
+        );
+        assert_eq!(
+            host.dispatch(BridgeName::File, &json!({ "op": "readText" })),
+            Some(json!({
+                "ok": false,
+                "code": "file_path_invalid",
+                "message": "ctx.file: path must be a string"
+            }))
+        );
+        assert_eq!(
+            host.dispatch(BridgeName::HttpGet, &json!({ "url": 1 })),
+            Some(json!({
+                "ok": false,
+                "code": "script_error",
+                "kind": null,
+                "message": "ctx.http.get: url must be a string"
+            }))
+        );
+    }
+
+    #[test]
+    fn missing_file_capability_is_a_protocol_error_before_payload_parse() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut host = test_host_state(dir.path());
+        host.files = None;
+
+        assert_eq!(
+            host.dispatch(BridgeName::File, &json!({ "malformed": true })),
+            None
         );
     }
 

@@ -3,7 +3,7 @@
 
 use base64::Engine;
 use hmac::{Hmac, KeyInit, Mac};
-use serde_json::{json, Value as Json};
+use serde_json::Value as Json;
 use sha2::{Digest, Sha256};
 
 pub(crate) const MIN_RANDOM_BYTES: usize = 1;
@@ -36,6 +36,22 @@ impl CryptoError {
             Self::RandomUnavailable => "system random entropy unavailable",
         }
     }
+}
+
+/// One decoded host crypto operation.
+#[derive(PartialEq)]
+pub(crate) enum CryptoCall {
+    RandomBytes { byte_length: usize },
+    Sha256 { input: Vec<u8> },
+    HmacSha256 { key: Vec<u8>, message: Vec<u8> },
+    TimingSafeEqual { left: Vec<u8>, right: Vec<u8> },
+}
+
+/// One successful host crypto result, before wire encoding.
+#[derive(PartialEq, Eq)]
+pub(crate) enum CryptoReply {
+    Bytes(Vec<u8>),
+    Equal(bool),
 }
 
 pub(crate) trait EntropySource: Send + Sync {
@@ -139,100 +155,81 @@ fn decode_crypto_input(
     Ok(bytes)
 }
 
-fn bytes_response_json(bytes: &[u8]) -> Json {
-    json!({
-        "ok": true,
-        "bytes_base64": base64::prelude::BASE64_STANDARD.encode(bytes)
-    })
-}
-
-pub(crate) fn dispatch_crypto_with_entropy(payload: &Json, entropy: &dyn EntropySource) -> Json {
+/// Decode one bridge payload into a typed crypto operation.
+pub(crate) fn parse_crypto_call(payload: &Json) -> Result<CryptoCall, CryptoError> {
     let Some(op) = payload.get("op").and_then(Json::as_str) else {
-        return crypto_error_json(CryptoError::InvalidInput("crypto: missing op"));
+        return Err(CryptoError::InvalidInput("crypto: missing op"));
     };
     match op {
         "random_bytes" => {
             let Some(byte_length) = payload.get("byte_length").and_then(Json::as_u64) else {
-                return crypto_error_json(CryptoError::InvalidInput(
+                return Err(CryptoError::InvalidInput(
                     "randomBytes: byteLength must be a positive integer",
                 ));
             };
             let Ok(len) = usize::try_from(byte_length) else {
-                return crypto_error_json(CryptoError::InvalidInput(
+                return Err(CryptoError::InvalidInput(
                     "randomBytes: byteLength out of range",
                 ));
             };
-            match generate_random_bytes(len, entropy) {
-                Ok(bytes) => bytes_response_json(&bytes),
-                Err(err) => crypto_error_json(err),
-            }
+            Ok(CryptoCall::RandomBytes { byte_length: len })
         }
         "sha256" => {
-            let input = match decode_crypto_input(payload.get("input"), 0, MAX_SHA256_INPUT_BYTES) {
-                Ok(input) => input,
-                Err(err) => return crypto_error_json(err),
-            };
-            match sha256_digest(&input) {
-                Ok(digest) => bytes_response_json(&digest),
-                Err(err) => crypto_error_json(err),
-            }
+            let input = decode_crypto_input(payload.get("input"), 0, MAX_SHA256_INPUT_BYTES)?;
+            Ok(CryptoCall::Sha256 { input })
         }
         "hmac_sha256" => {
-            let key = match decode_crypto_input(payload.get("key"), 0, MAX_HMAC_KEY_BYTES) {
-                Ok(key) => key,
-                Err(err) => return crypto_error_json(err),
-            };
-            let message =
-                match decode_crypto_input(payload.get("message"), 0, MAX_HMAC_MESSAGE_BYTES) {
-                    Ok(msg) => msg,
-                    Err(err) => return crypto_error_json(err),
-                };
-            match hmac_sha256_digest(&key, &message) {
-                Ok(digest) => bytes_response_json(&digest),
-                Err(err) => crypto_error_json(err),
-            }
+            let key = decode_crypto_input(payload.get("key"), 0, MAX_HMAC_KEY_BYTES)?;
+            let message = decode_crypto_input(payload.get("message"), 0, MAX_HMAC_MESSAGE_BYTES)?;
+            Ok(CryptoCall::HmacSha256 { key, message })
         }
         "timing_safe_equal" => {
-            let left = match decode_crypto_input(
+            let left = decode_crypto_input(
                 payload.get("left"),
                 MIN_TIMING_SAFE_EQUAL_BYTES,
                 MAX_TIMING_SAFE_EQUAL_BYTES,
-            ) {
-                Ok(left) => left,
-                Err(err) => return crypto_error_json(err),
-            };
-            let right = match decode_crypto_input(
+            )?;
+            let right = decode_crypto_input(
                 payload.get("right"),
                 MIN_TIMING_SAFE_EQUAL_BYTES,
                 MAX_TIMING_SAFE_EQUAL_BYTES,
-            ) {
-                Ok(right) => right,
-                Err(err) => return crypto_error_json(err),
-            };
-            match timing_safe_equal(&left, &right) {
-                Ok(equal) => json!({ "ok": true, "equal": equal }),
-                Err(err) => crypto_error_json(err),
-            }
+            )?;
+            Ok(CryptoCall::TimingSafeEqual { left, right })
         }
-        _ => crypto_error_json(CryptoError::InvalidInput("crypto: unknown operation")),
+        _ => Err(CryptoError::InvalidInput("crypto: unknown operation")),
     }
 }
 
-pub(crate) fn dispatch_crypto(payload: &Json) -> Json {
-    dispatch_crypto_with_entropy(payload, &OsEntropy)
+/// Execute one decoded crypto operation with an injectable entropy source.
+pub(crate) fn execute_crypto_with_entropy(
+    call: CryptoCall,
+    entropy: &dyn EntropySource,
+) -> Result<CryptoReply, CryptoError> {
+    match call {
+        CryptoCall::RandomBytes { byte_length } => {
+            generate_random_bytes(byte_length, entropy).map(CryptoReply::Bytes)
+        }
+        CryptoCall::Sha256 { input } => {
+            sha256_digest(&input).map(|bytes| CryptoReply::Bytes(bytes.to_vec()))
+        }
+        CryptoCall::HmacSha256 { key, message } => {
+            hmac_sha256_digest(&key, &message).map(|bytes| CryptoReply::Bytes(bytes.to_vec()))
+        }
+        CryptoCall::TimingSafeEqual { left, right } => {
+            timing_safe_equal(&left, &right).map(CryptoReply::Equal)
+        }
+    }
 }
 
-fn crypto_error_json(error: CryptoError) -> Json {
-    json!({
-        "ok": false,
-        "code": error.code(),
-        "message": error.message(),
-    })
+/// Execute one decoded crypto operation with the operating-system entropy source.
+pub(crate) fn execute_crypto(call: CryptoCall) -> Result<CryptoReply, CryptoError> {
+    execute_crypto_with_entropy(call, &OsEntropy)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     struct FailingEntropy;
 
@@ -427,48 +424,46 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_crypto_json_bridge() {
+    fn crypto_bridge_parses_and_executes_typed_calls() {
         // random_bytes
-        let res = dispatch_crypto_with_entropy(
-            &json!({ "op": "random_bytes", "byte_length": 16 }),
-            &OsEntropy,
-        );
-        assert_eq!(res["ok"], true);
-        let b64 = res["bytes_base64"].as_str().expect("b64 string");
-        let decoded = base64::prelude::BASE64_STANDARD
-            .decode(b64)
-            .expect("decode");
-        assert_eq!(decoded.len(), 16);
+        let call =
+            parse_crypto_call(&json!({ "op": "random_bytes", "byte_length": 16 })).expect("parse");
+        let CryptoReply::Bytes(bytes) =
+            execute_crypto_with_entropy(call, &OsEntropy).expect("random bytes")
+        else {
+            panic!("random_bytes returned a non-bytes reply");
+        };
+        assert_eq!(bytes.len(), 16);
 
         // random_bytes failure injection
-        let fail_res = dispatch_crypto_with_entropy(
-            &json!({ "op": "random_bytes", "byte_length": 16 }),
-            &FailingEntropy,
-        );
-        assert_eq!(fail_res["ok"], false);
-        assert_eq!(fail_res["code"], "crypto_random_unavailable");
+        let call =
+            parse_crypto_call(&json!({ "op": "random_bytes", "byte_length": 16 })).expect("parse");
+        let error = execute_crypto_with_entropy(call, &FailingEntropy)
+            .err()
+            .expect("entropy failure");
+        assert_eq!(error, CryptoError::RandomUnavailable,);
 
         // sha256 string
-        let sha_res = dispatch_crypto(&json!({
+        let call = parse_crypto_call(&json!({
             "op": "sha256",
             "input": { "type": "string", "value": "abc" }
-        }));
-        assert_eq!(sha_res["ok"], true);
-        let digest = base64::prelude::BASE64_STANDARD
-            .decode(sha_res["bytes_base64"].as_str().unwrap())
-            .unwrap();
+        }))
+        .expect("parse sha256");
+        let CryptoReply::Bytes(digest) = execute_crypto(call).expect("sha256") else {
+            panic!("sha256 returned a non-bytes reply");
+        };
         assert_eq!(
             hex(&digest),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
 
         // timing_safe_equal
-        let tse_res = dispatch_crypto(&json!({
+        let call = parse_crypto_call(&json!({
             "op": "timing_safe_equal",
             "left": { "type": "string", "value": "tokenA" },
             "right": { "type": "string", "value": "tokenA" }
-        }));
-        assert_eq!(tse_res["ok"], true);
-        assert_eq!(tse_res["equal"], true);
+        }))
+        .expect("parse timing_safe_equal");
+        assert!(matches!(execute_crypto(call), Ok(CryptoReply::Equal(true))));
     }
 }
