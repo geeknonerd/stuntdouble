@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.3](https://github.com/geeknonerd/stuntdouble/compare/v1.9.2...v1.9.3) - 2026-11-16
+
+### Fixed
+
+- *(state)* reject ttl_ms on read operations ([#243](https://github.com/geeknonerd/stuntdouble/pull/243))
+- *(files)* simplify link-like checks ([#242](https://github.com/geeknonerd/stuntdouble/pull/242))
+
+### Other
+
+- *(deps)* bump debian from `99c0b25` to `734a72b` ([#247](https://github.com/geeknonerd/stuntdouble/pull/247))
+- *(deps)* bump toml ([#246](https://github.com/geeknonerd/stuntdouble/pull/246))
+- *(deps)* bump rust from 9181b56 to e6f2cff ([#245](https://github.com/geeknonerd/stuntdouble/pull/245))
+- *(script)* route host bridge through typed calls ([#244](https://github.com/geeknonerd/stuntdouble/pull/244))
+- *(state)* encapsulate shared state store ([#240](https://github.com/geeknonerd/stuntdouble/pull/240))
+
 ## [1.9.2](https://github.com/geeknonerd/stuntdouble/compare/v1.9.1...v1.9.2) - 2026-11-10
 
 ### Other
