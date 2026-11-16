@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM rust:1.99-bookworm@sha256:9181b56c2a21ab1d5e73cffe04fc762426d30aa7fac3c91141dd033f49a7fc8b AS builder
+FROM --platform=$BUILDPLATFORM rust:1.99-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c AS builder
 
 # linux/amd64 builds natively; linux/arm64 is cross-compiled from the same
 # host-platform builder, which keeps a release build minutes long instead of
